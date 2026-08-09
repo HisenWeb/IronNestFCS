@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,91 +23,25 @@ jobs:
           from pathlib import Path
           p = Path('IronNestFCS.Logic/FSC.cs')
           s = p.read_text(encoding='utf-8')
-
-          old_sig = '''    private IEnumerator PrepareTriggerConsoleForTask(
-        LeftRight leftRight,
-        ArtilleryTask task,
-        bool waitForPreviousShotReset) {'''
-          new_sig = '''    private IEnumerator PrepareTriggerConsoleForTask(
-        LeftRight leftRight,
-        ArtilleryTask task,
-        bool waitForPreviousShotReset,
-        bool armWhenPrepared) {'''
-          if old_sig not in s:
-              raise SystemExit('helper signature not found')
+          old_sig = "    private IEnumerator PrepareTriggerConsoleForTask(\n        LeftRight leftRight,\n        ArtilleryTask task,\n        bool waitForPreviousShotReset) {"
+          new_sig = "    private IEnumerator PrepareTriggerConsoleForTask(\n        LeftRight leftRight,\n        ArtilleryTask task,\n        bool waitForPreviousShotReset,\n        bool armWhenPrepared) {"
+          if old_sig not in s: raise SystemExit('helper signature not found')
           s = s.replace(old_sig, new_sig, 1)
-
-          old_tail = '''            yield return FcsRuntimeClock.WaitUntilFocused();
-            yield return TriggerConsole.ReadyToFire();
-            yield return FcsRuntimeClock.WaitUntilFocused();
-            yield return TriggerConsole.Arm(leftRight);
-        }
-        finally {'''
-          new_tail = '''            yield return FcsRuntimeClock.WaitUntilFocused();
-            yield return TriggerConsole.ReadyToFire();
-            if (armWhenPrepared) {
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.Arm(leftRight);
-            }
-        }
-        finally {'''
-          if old_tail not in s:
-              raise SystemExit('helper arm tail not found')
+          old_tail = "            yield return FcsRuntimeClock.WaitUntilFocused();\n            yield return TriggerConsole.ReadyToFire();\n            yield return FcsRuntimeClock.WaitUntilFocused();\n            yield return TriggerConsole.Arm(leftRight);\n        }\n        finally {"
+          new_tail = "            yield return FcsRuntimeClock.WaitUntilFocused();\n            yield return TriggerConsole.ReadyToFire();\n            if (armWhenPrepared) {\n                yield return FcsRuntimeClock.WaitUntilFocused();\n                yield return TriggerConsole.Arm(leftRight);\n            }\n        }\n        finally {"
+          if old_tail not in s: raise SystemExit('helper arm tail not found')
           s = s.replace(old_tail, new_tail, 1)
-
-          old_promoted = 'yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true);'
-          new_promoted = 'yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true, armWhenPrepared: false);'
-          if old_promoted not in s:
-              raise SystemExit('promoted helper call not found')
+          old_promoted = "yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true);"
+          new_promoted = "yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true, armWhenPrepared: false);"
+          if old_promoted not in s: raise SystemExit('promoted helper call not found')
           s = s.replace(old_promoted, new_promoted, 1)
-
-          old_ordinary = '''        if (!triggerPrepared)
-            yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: false);
-
-        try {'''
-          new_ordinary = '''        if (!triggerPrepared) {
-            yield return PrepareTriggerConsoleForTask(
-                leftRight,
-                task,
-                waitForPreviousShotReset: false,
-                armWhenPrepared: true);
-        }
-        else {
-            // The promoted Second may pre-confirm Review switches during the turret slew, but the gun must remain
-            // safe until the shared azimuth is physically ready. Arm only after turret.Ready has been observed.
-            yield return _deskLock.Acquire();
-            try {
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.Arm(leftRight);
-            }
-            finally {
-                _deskLock.Release();
-            }
-        }
-
-        try {'''
-          if old_ordinary not in s:
-              raise SystemExit('ordinary helper call block not found')
+          old_ordinary = "        if (!triggerPrepared)\n            yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: false);\n\n        try {"
+          new_ordinary = "        if (!triggerPrepared) {\n            yield return PrepareTriggerConsoleForTask(\n                leftRight,\n                task,\n                waitForPreviousShotReset: false,\n                armWhenPrepared: true);\n        }\n        else {\n            // Review may be pre-confirmed during the promoted Second's turret slew, but the gun stays safe.\n            // Arm only after turret.Ready proves the shared azimuth has physically reached its target.\n            yield return _deskLock.Acquire();\n            try {\n                yield return FcsRuntimeClock.WaitUntilFocused();\n                yield return TriggerConsole.Arm(leftRight);\n            }\n            finally {\n                _deskLock.Release();\n            }\n        }\n\n        try {"
+          if old_ordinary not in s: raise SystemExit('ordinary helper call block not found')
           s = s.replace(old_ordinary, new_ordinary, 1)
-
-          s = s.replace(
-              'Review Console while the turret is still slewing. Ordinary/first shots keep the original safer order:',
-              'Review Console while the turret is still slewing, but stays disarmed. Ordinary/first shots keep the original safer order:',
-              1)
-          s = s.replace(
-              'only for the game\'s asynchronous control reset, then re-enable Review/Arm while azimuth keeps moving.',
-              'only for the game\'s asynchronous control reset, then re-enable Review while azimuth keeps moving; Arm waits for turret.Ready.',
-              1)
-          s = s.replace(
-              '// second shot may prepare in parallel with turret rotation, but only after that reset settles.',
-              '// second shot may pre-confirm Review switches in parallel with turret rotation, but only after that reset settles.',
-              1)
-
-          if 'PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true);' in s:
-              raise SystemExit('stale promoted helper call remains')
-          if 'yield return TriggerConsole.Arm(leftRight);' not in s:
-              raise SystemExit('arm call missing after patch')
-
+          s = s.replace("Review Console while the turret is still slewing. Ordinary/first shots keep the original safer order:", "Review Console while the turret is still slewing, but stays disarmed. Ordinary/first shots keep the original safer order:", 1)
+          s = s.replace("only for the game's asynchronous control reset, then re-enable Review/Arm while azimuth keeps moving.", "only for the game's asynchronous control reset, then re-enable Review while azimuth keeps moving; Arm waits for turret.Ready.", 1)
+          s = s.replace("// second shot may prepare in parallel with turret rotation, but only after that reset settles.", "// second shot may pre-confirm Review switches in parallel with turret rotation, but only after that reset settles.", 1)
           p.write_text(s, encoding='utf-8')
           PY
 
