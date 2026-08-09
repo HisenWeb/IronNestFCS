@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,14 +25,12 @@ jobs:
           import subprocess
 
           base = '2a888482afd1233160b9aed0d3c6d8f27418a1a0'
-          subprocess.run(['git', 'checkout', base, '--',
-                          'IronNestFCS.Logic/FCS/TriggerConsole.cs',
-                          'IronNestFCS.Logic/FSC.cs'], check=True)
+          subprocess.run(['git', 'checkout', base, '--', 'IronNestFCS.Logic/FCS/TriggerConsole.cs', 'IronNestFCS.Logic/FSC.cs'], check=True)
 
           p = Path('IronNestFCS.Logic/FSC.cs')
           s = p.read_text(encoding='utf-8')
 
-          old_wait = '''    private IEnumerator WaitForFirePriority(ArtilleryTask task, TurretReservation res) {
+          old_wait = """    private IEnumerator WaitForFirePriority(ArtilleryTask task, TurretReservation res) {
         // Pure Promise.all-like wait: no scoring timeout and no polling/recalculation. The winner is produced by
         // task-assignment/ballistic-solution events. F9 changes the generation, which cancels stale waiters.
         while (!res.Canceled
@@ -47,13 +44,13 @@ jobs:
         if (res.Generation != _firePriorityGeneration || !IsActiveTask(task))
             res.Canceled = true;
     }
-'''
-          new_wait = '''    private bool CanEnterTurretQueue(ArtilleryTask task) {
+"""
+          new_wait = """    private bool CanEnterTurretQueue(ArtilleryTask task) {
         if (ReferenceEquals(_firePriorityWinner, task))
             return true;
 
         // Once a pair has been resolved and First has actually committed the shared fire lane, let the fixed
-        // Second enter CoroutineLock.Acquire() immediately. It will wait behind First while that lock is held,
+        // Second enter CoroutineLock.Acquire() immediately. It waits behind First while that lock is held,
         // reproducing the pre-decoupling reservation pipeline without allowing Second to rotate out of order.
         return ReferenceEquals(_firePrioritySecond, task)
                && _firePriorityWinner != null
@@ -75,55 +72,25 @@ jobs:
         if (res.Generation != _firePriorityGeneration || !IsActiveTask(task))
             res.Canceled = true;
     }
-'''
-          if old_wait not in s:
-              raise SystemExit('WaitForFirePriority block not found')
+"""
+          if old_wait not in s: raise SystemExit('WaitForFirePriority block not found')
           s = s.replace(old_wait, new_wait, 1)
 
           old_call = '            yield return WaitForFirePriority(task, res);'
-          new_call = '            yield return WaitForTurretQueueEligibility(task, res);'
-          if old_call not in s:
-              raise SystemExit('reservation wait call not found')
-          s = s.replace(old_call, new_call, 1)
+          if old_call not in s: raise SystemExit('reservation wait call not found')
+          s = s.replace(old_call, '            yield return WaitForTurretQueueEligibility(task, res);', 1)
 
-          old_comment = '''            // A provisional single winner can be revoked if a synchronized second task arrives before the lock
+          old_comment = """            // A provisional single winner can be revoked if a synchronized second task arrives before the lock
             // is committed. Keep this reservation coroutine alive so it can wait for the new Promise.all result.
-'''
-          new_comment = '''            // First and the already-fixed Second can both reach this Acquire. First gets the free lock; Second
+"""
+          new_comment = """            // First and the already-fixed Second can both reach this Acquire. First gets the free lock; Second
             // reaches it only after First has committed, so it waits behind the held lock and is ready to take over
             // immediately after a confirmed shot releases it.
-'''
-          if old_comment not in s:
-              raise SystemExit('reservation comment not found')
+"""
+          if old_comment not in s: raise SystemExit('reservation comment not found')
           s = s.replace(old_comment, new_comment, 1)
 
-          old_fire = '''        try {
-            yield return _deskLock.Acquire();
-            try {
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.PrepareForNewFireSolution(leftRight);
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmTask();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmBullet();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmRotation();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmElevation();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ReadyToFire();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.Arm(leftRight);
-                if (_sceneInteractor.AutoFire) {
-                    yield return FcsRuntimeClock.WaitUntilFocused();
-                    TriggerConsole.Fire();
-                }
-            }
-            finally {
-                _deskLock.Release();
-            }
-
-            var fireTimeout = _sceneInteractor.AutoFire
+          marker = '''            var fireTimeout = _sceneInteractor.AutoFire
                 ? AutoFireTimeoutSeconds
                 : ManualFireTimeoutSeconds;
             yield return gunSys.WaitFire(fireTimeout);
@@ -142,33 +109,7 @@ jobs:
     // invalidate the broken arbitration instead of pretending the first shot completed.
     ReleaseFirePriorityAfterSuccessfulShot(task);
 '''
-          new_fire = '''        try {
-            yield return _deskLock.Acquire();
-            try {
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.PrepareForNewFireSolution(leftRight);
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmTask();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmBullet();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmRotation();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmElevation();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ReadyToFire();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.Arm(leftRight);
-                if (_sceneInteractor.AutoFire) {
-                    yield return FcsRuntimeClock.WaitUntilFocused();
-                    TriggerConsole.Fire();
-                }
-            }
-            finally {
-                _deskLock.Release();
-            }
-
-            var fireTimeout = _sceneInteractor.AutoFire
+          replacement = '''            var fireTimeout = _sceneInteractor.AutoFire
                 ? AutoFireTimeoutSeconds
                 : ManualFireTimeoutSeconds;
             yield return gunSys.WaitFire(fireTimeout);
@@ -188,18 +129,13 @@ jobs:
             yield break;
         }
 '''
-          if old_fire not in s:
-              raise SystemExit('stable fire pipeline block not found')
-          s = s.replace(old_fire, new_fire, 1)
+          if marker not in s: raise SystemExit('fire promotion block not found')
+          s = s.replace(marker, replacement, 1)
 
-          if '_triggerResetRequiredTask' in s:
-              raise SystemExit('early-trigger reset state unexpectedly remains')
-          if 'PrepareTriggerConsoleForTask' in s:
-              raise SystemExit('early-trigger helper unexpectedly remains')
-          if 'WaitForFirePriority(' in s:
-              raise SystemExit('old winner-only turret gate remains')
-          if s.count('ReleaseFirePriorityAfterSuccessfulShot(task);') != 1:
-              raise SystemExit('successful-shot promotion count unexpected')
+          if '_triggerResetRequiredTask' in s: raise SystemExit('early-trigger reset state remains')
+          if 'PrepareTriggerConsoleForTask' in s: raise SystemExit('early-trigger helper remains')
+          if 'WaitForFirePriority(' in s: raise SystemExit('old winner-only gate remains')
+          if s.count('ReleaseFirePriorityAfterSuccessfulShot(task);') != 1: raise SystemExit('promotion count unexpected')
 
           p.write_text(s, encoding='utf-8')
           PY
