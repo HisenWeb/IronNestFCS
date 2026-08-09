@@ -85,7 +85,7 @@ public sealed class GunPhysicalState
                 }
                 catch
                 {
-                    // State metadata is diagnostic only. Classification must still work if it is unavailable.
+                    // State metadata is diagnostic only. Classification falls back to the observed index.
                 }
             }
 
@@ -116,37 +116,84 @@ public sealed class GunPhysicalState
         return state;
     }
 
+    private static bool AtState(GunPhysicalState state, int index, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            if (string.Equals(state.ReloadStateKey, key, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return state.ReloadStateIndex == index;
+    }
+
     private static GunPhysicalStateKind Classify(GunPhysicalState state)
     {
         if (!state.IsBound)
             return GunPhysicalStateKind.Unbound;
 
-        // Only live mechanism motion / a locked reload lowering path is authoritative evidence that the
-        // gun must not be touched yet. In the release build an idle EMPTY gun is observed as:
-        //   chamber=empty, powder=0, IsReloading=true, pendingReload=true,
-        //   state=3/BreechOpen, working=false, breechLocked=false.
-        // Therefore IsReloading/pendingReload must never by themselves turn an idle empty gun into recovery.
+        // Release-build probe (2026-08-09) observed this full reload sequence:
+        //   0 BreachLocked -> 1 BreachUnlocking -> 2 GuideDeploy -> 3 BreechOpen
+        //   -> 4 ShellRamming -> 5 SelectPowderCharge -> 6 RamCharges
+        //   -> 7 CloseShellGuide -> 8 FinalSequence -> 9 Done -> 0 BreachLocked.
+        // Crucially, reloadController.working stayed FALSE throughout long parts of that sequence, including
+        // a ~28 s post-shot state-0 window. Therefore working/breechLocked are not sufficient readiness signals.
+
+        var atLocked = AtState(state, 0, "BreachLocked", "BreechLocked");
+        var atUnlocking = AtState(state, 1, "BreachUnlocking", "BreechUnlocking");
+        var atGuideDeploy = AtState(state, 2, "GuideDeploy");
+        var atBreechOpen = AtState(state, 3, "BreechOpen", "BreachOpen");
+        var atShellRamming = AtState(state, 4, "ShellRamming");
+        var atSelectPowder = AtState(state, 5, "SelectPowderCharge");
+        var atRamCharges = AtState(state, 6, "RamCharges");
+        var atCloseGuide = AtState(state, 7, "CloseShellGuide");
+        var atFinalSequence = AtState(state, 8, "FinalSequence");
+        var atDone = AtState(state, 9, "Done");
+
+        // Hard live lock/motion still means do not touch the mechanism regardless of state label.
         if (state.ReloadWorking || state.BreechLocked)
             return GunPhysicalStateKind.Recovering;
 
-        // Empty + physically idle is safe for the normal loading path. This covers both fresh mission startup
-        // and the settled state after a previous shot. If a post-shot mechanism is still actually moving, the
-        // working/lock guard above keeps it in Recovering until it settles.
+        // The only observed normal EMPTY handoff point is state 3 / BreechOpen. Fresh mission startup briefly
+        // passes through state 2 first, and post-shot recovery spends a long time empty in states 0/1/2, so
+        // accepting "empty + C0" without the state check causes exactly the first-shot/reload races we observed.
         if (state.ShellId == null && state.PowderCharges == 0)
-            return GunPhysicalStateKind.EmptyReady;
+        {
+            if (atBreechOpen)
+                return GunPhysicalStateKind.EmptyReady;
 
-        // Shell-in-chamber/no committed powder is a valid stable intermediate after F9. Resume by loading only
-        // the charge required by the next same-shell target.
+            if (atLocked || atUnlocking || atGuideDeploy || state.IsReloading || state.PendingReload)
+                return GunPhysicalStateKind.PostShotRecovery;
+
+            return GunPhysicalStateKind.Unknown;
+        }
+
+        // After shell ramming completes, state 5 waits for charge selection. This is the stable F9-recoverable
+        // "shell in chamber, no powder yet" state. State 4 with a chambered shell is still part of the ram cycle.
         if (state.ShellType.HasValue && state.PowderCharges == 0)
-            return GunPhysicalStateKind.ShellLoaded;
+        {
+            if (atSelectPowder)
+                return GunPhysicalStateKind.ShellLoaded;
 
-        // A chambered known shell with committed powder is a reusable physical round. CanFire is deliberately
-        // not required because it is a flow flag rather than the durable source of shell/charge truth.
+            if (atShellRamming || atGuideDeploy || atBreechOpen)
+                return GunPhysicalStateKind.Recovering;
+
+            return GunPhysicalStateKind.Unknown;
+        }
+
+        // A reusable loaded round is only ready once the reload sequence has returned to state 0 AND the gun
+        // itself reports CanFire with the reload flow flags clear. Powder becomes visible already in state 6;
+        // treating that as LoadedReady made FCS start elevation while states 6->9 were still physically running.
         if (state.ShellType.HasValue && state.PowderCharges > 0 && state.PowderCharges <= 6)
-            return GunPhysicalStateKind.LoadedReady;
+        {
+            if (atLocked && state.CanFire && !state.IsReloading && !state.PendingReload)
+                return GunPhysicalStateKind.LoadedReady;
 
-        // Powder without a known chambered shell, an unknown shell id, or an invalid powder count is unsafe.
-        // The scheduler gives Unknown a bounded recovery window and will not issue reload controls meanwhile.
+            if (atRamCharges || atCloseGuide || atFinalSequence || atDone || atLocked)
+                return GunPhysicalStateKind.Recovering;
+
+            return GunPhysicalStateKind.Unknown;
+        }
+
         return GunPhysicalStateKind.Unknown;
     }
 
@@ -180,7 +227,7 @@ public sealed class GunPhysicalState
             GunPhysicalStateKind.ShellLoaded => $"shell-loaded {shell} C0",
             GunPhysicalStateKind.LoadedReady => $"loaded {shell} C{PowderCharges}",
             GunPhysicalStateKind.PostShotRecovery =>
-                $"post-shot chamber={shell} C{PowderCharges} pendingReload={PendingReload} IsReloading={IsReloading}",
+                $"post-shot chamber={shell} C{PowderCharges} state={ReloadStateIndex}/{ReloadStateKey} pendingReload={PendingReload} IsReloading={IsReloading}",
             GunPhysicalStateKind.Recovering =>
                 $"recovering chamber={shell} C{PowderCharges} state={ReloadStateIndex}/{ReloadStateKey} working={ReloadWorking} breechLocked={BreechLocked}",
             GunPhysicalStateKind.Unknown =>
