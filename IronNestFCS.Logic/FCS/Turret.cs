@@ -32,8 +32,24 @@ public class Turret {
         }
         return true;
     }
+
+    private void HoldCurrentAzimuth(string reason) {
+        if (_turret == null)
+            return;
+
+        try {
+            _turret.DesiredRotation = _turret.CurrentAngle;
+            MelonLogger.Msg($"[FCS] Turret rotation canceled; holding {_turret.CurrentAngle:F2}° ({reason})");
+        }
+        catch (Exception ex) {
+            MelonLogger.Warning($"[FCS] Turret rotation cancel failed: {ex.Message}");
+        }
+    }
     
-    public IEnumerator SetRotation(float angle, float timeoutSeconds = 45f) {
+    public IEnumerator SetRotation(
+        float angle,
+        float timeoutSeconds = 45f,
+        Func<bool>? cancelRequested = null) {
         LastRotationSucceeded = false;
         if (_turret == null) {
             MelonLogger.Error("[FCS] Aiming: unbound TurretController");
@@ -41,12 +57,22 @@ public class Turret {
         }
 
         yield return FcsRuntimeClock.WaitUntilFocused();
+        if (cancelRequested?.Invoke() == true) {
+            HoldCurrentAzimuth("canceled before rotation start");
+            yield break;
+        }
+
         _turret.DesiredRotation = -angle;
         var deadline = FcsRuntimeClock.Now + Mathf.Max(1f, timeoutSeconds);
         yield return FcsRuntimeClock.WaitForSeconds(0.5f);
 
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
+
+            if (cancelRequested?.Invoke() == true) {
+                HoldCurrentAzimuth("task/arbitration invalidated");
+                yield break;
+            }
 
             if (_turret.rotationVelocity == 0)
                 break;
@@ -57,6 +83,12 @@ public class Turret {
             }
             yield return FcsRuntimeClock.WaitForSeconds(0.25f);
         }
+
+        if (cancelRequested?.Invoke() == true) {
+            HoldCurrentAzimuth("canceled at rotation completion");
+            yield break;
+        }
+
         LastRotationSucceeded = true;
     }
     
