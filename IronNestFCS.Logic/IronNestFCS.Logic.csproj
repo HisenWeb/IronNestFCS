@@ -60,6 +60,10 @@
             <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\UnityEngine.CoreModule.dll</HintPath>
             <Private>false</Private>
         </Reference>
+        <Reference Include="UnityEngine.AnimationModule">
+            <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\UnityEngine.AnimationModule.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
         <Reference Include="UnityEngine.IMGUIModule">
             <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\UnityEngine.IMGUIModule.dll</HintPath>
             <Private>false</Private>
