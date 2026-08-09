@@ -13,6 +13,13 @@ public class FcsSceneInteractor {
 
     private List<GameObject> destroyOnShutdown = new();
     private readonly ClickRaycaster clicks = new();
+    private readonly List<object> localCoroutines = new();
+    private bool shuttingDown;
+
+    // A Logic F9 can stop a coroutine between LookAtTarget.OnClickDown/OnClickUp. Keep every physical
+    // down/up pair that FCS owns in one place so Shutdown can always release a half-finished interaction
+    // before the old AssemblyLoadContext is unloaded.
+    private static readonly List<LookAtTarget> heldPhysicalClicks = new();
 
     public BulletType selectedBulletType = BulletType.HE;
     private List<GameObject> bulletTypeBtns = new();
@@ -26,6 +33,7 @@ public class FcsSceneInteractor {
     }
 
     public void Initialize() {
+        shuttingDown = false;
         InitializeBulletTypeButtons();
         InitializeTargetButtons();
     }
@@ -110,7 +118,8 @@ public class FcsSceneInteractor {
                 SetColor(button, Color.gray);
                 var collider = button.GetComponent<Collider>();
                 if (collider != null) collider.enabled = false;
-                MelonCoroutines.Start(QueueStableTarget(targetId, bulletAtClick, button));
+                var handle = MelonCoroutines.Start(QueueStableTarget(targetId, bulletAtClick, button));
+                localCoroutines.Add(handle);
             }, Color.red);
             button.transform.position = new Vector3(x, y, z);
             button.transform.localScale = Vector3.one * 0.02f;
@@ -161,10 +170,17 @@ public class FcsSceneInteractor {
     }
 
     private IEnumerator QueueStableTarget(int targetId, BulletType bulletType, GameObject button) {
+        if (shuttingDown)
+            yield break;
+
         var clickedAt = FcsRuntimeClock.Now;
         ArtilleryTask? task = null;
         yield return fcs.MapTable.GetStableMarkTarget(targetId, result => task = result);
+        if (shuttingDown)
+            yield break;
         yield return FcsRuntimeClock.WaitUntilFocused();
+        if (shuttingDown)
+            yield break;
 
         if (task != null) {
             task.targetId = targetId;
@@ -177,7 +193,11 @@ public class FcsSceneInteractor {
             yield return FcsRuntimeClock.WaitForSeconds(remainingCooldown);
         }
 
+        if (shuttingDown)
+            yield break;
         yield return FcsRuntimeClock.WaitUntilFocused();
+        if (shuttingDown)
+            yield break;
         if (button != null) {
             SetColor(button, Color.red);
             var collider = button.GetComponent<Collider>();
@@ -195,6 +215,14 @@ public class FcsSceneInteractor {
     }
 
     public void ShutDown() {
+        shuttingDown = true;
+        foreach (var handle in localCoroutines) {
+            try { MelonCoroutines.Stop(handle); }
+            catch (Exception ex) { MelonLogger.Warning($"[FCS] Stop scene interaction coroutine failed: {ex.Message}"); }
+        }
+        localCoroutines.Clear();
+
+        ReleaseHeldPhysicalClicks("logic shutdown/F9");
         clicks.Clear();
         foreach (var obj in destroyOnShutdown) {
             Object.Destroy(obj);
@@ -249,6 +277,40 @@ public class FcsSceneInteractor {
         return go;
     }
 
+    public static void BeginPhysicalClick(LookAtTarget button) {
+        button.OnClickDown();
+        if (!heldPhysicalClicks.Contains(button))
+            heldPhysicalClicks.Add(button);
+    }
+
+    public static void EndPhysicalClick(LookAtTarget button) {
+        try {
+            button.OnClickUp();
+        }
+        finally {
+            heldPhysicalClicks.Remove(button);
+        }
+    }
+
+    public static void ReleaseHeldPhysicalClicks(string reason) {
+        if (heldPhysicalClicks.Count == 0)
+            return;
+
+        var held = heldPhysicalClicks.ToArray();
+        heldPhysicalClicks.Clear();
+        foreach (var button in held) {
+            try {
+                button.OnClickUp();
+                MelonLogger.Warning(
+                    $"[FCS] Released interrupted physical click during {reason}: {button.gameObject.name}");
+            }
+            catch (Exception ex) {
+                MelonLogger.Warning(
+                    $"[FCS] Failed to release interrupted physical click during {reason}: {ex.Message}");
+            }
+        }
+    }
+
     /// <summary>
     /// 等待游戏按钮可点击并模拟一次完整点击。失焦期间既不点击，也不消耗 FCS watchdog 时间。
     /// </summary>
@@ -274,11 +336,12 @@ public class FcsSceneInteractor {
 
         yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         yield return FcsRuntimeClock.WaitUntilFocused();
-        button.OnClickDown();
+        BeginPhysicalClick(button);
 
-        // Finish an already-started click even if focus changes between down and up.
+        // Finish an already-started click even if focus changes between down and up. F9/Shutdown has an
+        // additional tracked-release fallback in case the coroutine itself is stopped during this hold.
         yield return new WaitForSeconds(0.1f);
-        button.OnClickUp();
+        EndPhysicalClick(button);
     }
     
     public static IEnumerator InvokeDelay(Action action, float delay) {
