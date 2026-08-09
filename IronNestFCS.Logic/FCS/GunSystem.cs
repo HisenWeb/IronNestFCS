@@ -33,6 +33,7 @@ public class GunSystem {
     private const float ElevationToleranceDegrees = 0.05f;
     private const float ReloadControlTimeoutSeconds = 60f;
     private const float ShellChamberTimeoutSeconds = 15f;
+    private const float PowderCommitTimeoutSeconds = 12f;
     private const float MinimumPostShotRecoverySeconds = 13f;
     private const float RecoveryElevationVelocityTolerance = 0.05f;
 
@@ -448,22 +449,119 @@ public class GunSystem {
         LastReloadActionSucceeded = true;
     }
 
+    private string PowderControlsSummary(int requiredCount) {
+        var count = Math.Min(requiredCount, powderButtons.Count);
+        var states = new List<string>();
+        for (var i = 0; i < count; i++) {
+            states.Add($"{i + 1}:{(powderButtons[i].isActive ? "A" : "I")}");
+        }
+        return $"rammer={(loadPowderButton?.isActive == true ? "A" : "I")}, required=[{string.Join(",", states)}]";
+    }
+
+    private IEnumerator WaitForPowderCommit(int expectedCount) {
+        LastReloadActionSucceeded = false;
+        var deadline = FcsRuntimeClock.Now + PowderCommitTimeoutSeconds;
+
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            var physical = GunPhysicalState.Read(_surfix);
+
+            if (physical.PowderCharges > 0) {
+                if (physical.PowderCharges != expectedCount) {
+                    FailReloadAction(
+                        $"powder commit mismatch: expected C{expectedCount}, physical C{physical.PowderCharges}; " +
+                        $"{physical.Summary()}");
+                    yield break;
+                }
+
+                MelonLogger.Msg(
+                    $"[FCS ReloadResume] {_surfix}: powder committed as C{physical.PowderCharges}; {physical.Summary()}");
+                LastReloadActionSucceeded = true;
+                yield break;
+            }
+
+            if (physical.EmptyReady || physical.Kind == GunPhysicalStateKind.PostShotRecovery) {
+                FailReloadAction($"powder commit lost chambered shell; {physical.Summary()}");
+                yield break;
+            }
+
+            if (FcsRuntimeClock.Now >= deadline) {
+                FailReloadAction(
+                    $"powder rammer did not commit C{expectedCount} within {PowderCommitTimeoutSeconds:F0}s; " +
+                    $"{physical.Summary()}, {PowderControlsSummary(expectedCount)}");
+                yield break;
+            }
+
+            yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+        }
+    }
+
     public IEnumerator LoadPowder(int count) {
         LastReloadActionSucceeded = false;
         LastReloadFailureReason = "";
-        if (count < 0 || count > powderButtons.Count) {
+        if (count <= 0 || count > powderButtons.Count) {
             FailReloadAction($"invalid powder count {count}, available buttons={powderButtons.Count}");
             yield break;
         }
 
+        yield return FcsRuntimeClock.WaitUntilFocused();
+        var startState = GunPhysicalState.Read(_surfix);
+        if (!startState.ShellLoaded) {
+            FailReloadAction($"powder loading requires shell-loaded handoff; {startState.Summary()}");
+            yield break;
+        }
+
+        var requiredDispenserAlreadyInactive = false;
         for (var i = 0; i < count; i++) {
-            yield return FcsRuntimeClock.WaitUntilFocused();
-            yield return ClickReloadControl(powderButtons[i], $"Button Dispencer ({i + 1})");
-            if (!LastReloadActionSucceeded) yield break;
+            if (!powderButtons[i].isActive) {
+                requiredDispenserAlreadyInactive = true;
+                break;
+            }
+        }
+        var stagedBeforeEntry = loadPowderButton?.isActive == true && requiredDispenserAlreadyInactive;
+
+        MelonLogger.Msg(
+            $"[FCS ReloadResume] {_surfix}: powder stage start expected=C{count}, " +
+            $"physical={startState.Summary()}, stagedBeforeEntry={stagedBeforeEntry}, {PowderControlsSummary(count)}");
+
+        if (stagedBeforeEntry) {
+            // F9 can interrupt state 5 after one or more dispenser presses. We cannot reliably reconstruct the
+            // hidden staged count from C0, so do not replay dispenser clicks and risk double-staging. Commit the
+            // already staged physical powder once, then verify the durable GunController charge count below.
+            MelonLogger.Warning(
+                $"[FCS ReloadResume] {_surfix}: staged powder detected before task resume; " +
+                "skipping dispenser replay and committing the existing tray");
+        }
+        else {
+            for (var i = 0; i < count; i++) {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                var physical = GunPhysicalState.Read(_surfix);
+                if (!physical.ShellLoaded || physical.PowderCharges > 0) {
+                    FailReloadAction(
+                        $"reload state changed while selecting powder {i + 1}/{count}; {physical.Summary()}");
+                    yield break;
+                }
+
+                yield return ClickReloadControl(powderButtons[i], $"Button Dispencer ({i + 1})", 10f);
+                if (!LastReloadActionSucceeded) yield break;
+            }
         }
 
         yield return FcsRuntimeClock.WaitUntilFocused();
-        yield return ClickReloadControl(loadPowderButton, "Universal Button Charge Rammer (1)");
+        var beforeRam = GunPhysicalState.Read(_surfix);
+        if (beforeRam.PowderCharges == 0) {
+            if (!beforeRam.ShellLoaded) {
+                FailReloadAction($"powder state changed before charge rammer; {beforeRam.Summary()}");
+                yield break;
+            }
+
+            yield return ClickReloadControl(loadPowderButton, "Universal Button Charge Rammer (1)", 10f);
+            if (!LastReloadActionSucceeded) yield break;
+        }
+
+        // Treat the physical charge count as the success condition. A button click alone is not enough, and a
+        // resumed tray with the wrong count must fail visibly rather than silently firing an unintended charge.
+        yield return WaitForPowderCommit(count);
     }
 
     public bool HaveBulletInCylinder(BulletType type) {
