@@ -482,8 +482,9 @@ public class FSC
             yield break;
         }
 
-        // Normal and shell-only recovery can select their charge from the new target, so turret rotation may
-        // overlap their loading. A fully loaded round has a fixed charge: solve/validate it first, then move turret.
+        // Reservation coroutines may be started early, but ReserveTurretAndRotate now waits until this task has
+        // completed its own loading/ballistic/elevation work (Progress.WaitingForFire) before competing for the
+        // shared turret. This preserves overlap while letting whichever gun becomes locally ready first fire first.
         if (mode != GunTaskMode.ReuseLoadedRound) {
             _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
         }
@@ -752,6 +753,17 @@ public class FSC
     }
 
     private IEnumerator ReserveTurretAndRotate(ArtilleryTask task, TurretReservation res) {
+        // Both gun pipelines may prepare in parallel. A reservation coroutine is allowed to exist early, but it
+        // must not reserve the shared turret until its own gun has finished loading and reached target elevation.
+        // Progress.WaitingForFire is the existing handoff point immediately after successful SetElevation.
+        while (!res.Canceled && task.progress != Progress.WaitingForFire) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return null;
+        }
+        if (res.Canceled)
+            yield break;
+
+        MelonLogger.Msg($"[FCS] T{task.targetId}: local gun ready; competing for shared fire lane");
         yield return _turretLock.Acquire();
         res.Acquired = true;
         yield return FcsRuntimeClock.WaitUntilFocused();
@@ -760,6 +772,7 @@ public class FSC
             yield break;
         }
 
+        MelonLogger.Msg($"[FCS] T{task.targetId}: acquired shared fire lane");
         yield return Turret.SetRotation(task.angel, TurretRotationTimeoutSeconds);
         yield return FcsRuntimeClock.WaitUntilFocused();
         if (!Turret.LastRotationSucceeded) {
