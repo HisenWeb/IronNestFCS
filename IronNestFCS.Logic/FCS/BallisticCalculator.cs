@@ -227,7 +227,7 @@ public class BallisticCalculator {
         lastCalculationSucceeded = true;
         MelonLogger.Msg(
             $"[FCS BALLISTIC] input: distance={requestedDistance:F3}km, direction={requestedDirection:F2}°, " +
-            $"shell={requestedShell.DisplayName()}, charge=C{requestedCharge:F0}; " +
+            $"shell={requestedShell}, charge=C{requestedCharge:F0}; " +
             $"before={(IsFinite(before) ? before.ToString("F2") : "invalid")}°, " +
             $"output={lastSettledElevation:F2}°, verifyRetry={verificationRetry}");
     }
