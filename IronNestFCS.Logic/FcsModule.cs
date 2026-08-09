@@ -18,6 +18,7 @@ public class FcsModule : IFcsModule
         window = new FcsWindow(fcs);
         PhysicalStateProbe.Reset();
         TriggerConsoleProbe.Reset();
+        AimingSpeedProbe.Reset();
         bool bound = fcs.TryBind();
         if (bound)
         {
@@ -25,6 +26,8 @@ public class FcsModule : IFcsModule
             PhysicalStateProbe.LogCurrentState();
             // Read-only physical-state probe for the five review switches + two arming levers.
             TriggerConsoleProbe.BindAndLog();
+            // Read-only probe for real physical azimuth/elevation slew rates. This never affects arbitration.
+            AimingSpeedProbe.BindAndLog();
         }
         // 返回绑定结果仅用于 Host 日志；窗口实例已建好，未绑定时会显示提示，
         // 进入场景后按 F9 重载即可绑定。
@@ -41,6 +44,7 @@ public class FcsModule : IFcsModule
         {
             PhysicalStateProbe.Tick();
             TriggerConsoleProbe.Tick();
+            AimingSpeedProbe.Tick();
         }
     }
 
@@ -54,6 +58,7 @@ public class FcsModule : IFcsModule
         fcs.Dispose();
         PhysicalStateProbe.Reset();
         TriggerConsoleProbe.Reset();
+        AimingSpeedProbe.Reset();
         window = null;
     }
 }
