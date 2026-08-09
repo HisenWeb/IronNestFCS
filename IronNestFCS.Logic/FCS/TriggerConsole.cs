@@ -13,6 +13,8 @@ public class TriggerConsole {
     private const float ArmOffX = -32f;
     private const float ArmPoseTolerance = 4f;
     private const float PoseTransitionTimeoutSeconds = 2f;
+    private const float PostShotResetTimeoutSeconds = 3f;
+    private const int PostShotResetStableSamples = 2;
 
     private LookAtTarget? _taskCheck;
     private LookAtTarget? _bulletCheck;
@@ -231,6 +233,53 @@ public class TriggerConsole {
             : $"?({x:F0}°)";
     }
 
+    private bool AreAllFireControlsOff() {
+        return TryReadReviewState(_taskPose, out var taskOn, out _) && !taskOn
+               && TryReadReviewState(_bulletPose, out var bulletOn, out _) && !bulletOn
+               && TryReadReviewState(_rotationPose, out var rotationOn, out _) && !rotationOn
+               && TryReadReviewState(_elevationPose, out var elevationOn, out _) && !elevationOn
+               && TryReadReviewState(_readyPose, out var readyOn, out _) && !readyOn
+               && TryReadArmState(_armLeftPose, out var armLeftOn, out _) && !armLeftOn
+               && TryReadArmState(_armRightPose, out var armRightOn, out _) && !armRightOn;
+    }
+
+    /// <summary>
+    /// After a real shot the game clears the shared Review Console and arming lever asynchronously. A promoted
+    /// second shot must not re-enable controls until that automatic reset has actually finished, otherwise the
+    /// tail of the previous reset can switch the new solution back OFF. Wait for two stable all-OFF samples; if
+    /// the game does not settle, actively recover the shared controls to the known OFF baseline before continuing.
+    /// </summary>
+    private IEnumerator WaitForPostShotAutomaticReset() {
+        var deadline = FcsRuntimeClock.Now + PostShotResetTimeoutSeconds;
+        var stableSamples = 0;
+
+        while (FcsRuntimeClock.Now < deadline) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            if (AreAllFireControlsOff()) {
+                stableSamples++;
+                if (stableSamples >= PostShotResetStableSamples) {
+                    LogPhysicalStates("post-shot reset settled");
+                    yield break;
+                }
+            }
+            else {
+                stableSamples = 0;
+            }
+            yield return FcsRuntimeClock.WaitForSeconds(0.05f);
+        }
+
+        MelonLogger.Warning(
+            "[FCS] TriggerConsole: post-shot automatic reset did not settle in time; forcing shared controls OFF");
+        yield return EnsureArmState(_armLeft, _armLeftPose, false, "Left");
+        yield return EnsureArmState(_armRight, _armRightPose, false, "Right");
+        yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire");
+        yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck");
+        yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck");
+        yield return EnsureReviewState(_bulletCheck, _bulletPose, false, "BulletCheck");
+        yield return EnsureReviewState(_taskCheck, _taskPose, false, "TaskCheck");
+        LogPhysicalStates("post-shot reset recovered");
+    }
+
     private void LogPhysicalStates(string reason) {
         MelonLogger.Msg(
             $"[FCS] TriggerConsole physical ({reason}): " +
@@ -262,11 +311,18 @@ public class TriggerConsole {
     /// its REAL physical poses. Shell, powder, elevation and the rest of each gun's physical state are untouched.
     /// Later calls belong to normal tasks and must not clear shared controls.
     /// </summary>
-    public IEnumerator PrepareForNewFireSolution(LeftRight leftRight) {
+    public IEnumerator PrepareForNewFireSolution(
+        LeftRight leftRight,
+        bool waitForPreviousShotReset = false) {
         if (_resetPendingAfterBind) {
             _resetPendingAfterBind = false;
             yield return ResetPhysicalFireControlsAfterBind();
             yield break;
+        }
+
+        if (waitForPreviousShotReset) {
+            MelonLogger.Msg($"[FCS] TriggerConsole: {leftRight} waiting for previous shot control reset");
+            yield return WaitForPostShotAutomaticReset();
         }
 
         LogPhysicalStates("before fire solution");
