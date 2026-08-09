@@ -6,8 +6,8 @@ using UnityEngine;
 namespace IronNestFCS.Logic.FCS;
 
 public class TriggerConsole {
-    private const float ReviewOnZ = 0f;
-    private const float ReviewOffZ = -90f;
+    private const float ReviewOnZ = -90f;
+    private const float ReviewOffZ = 0f;
     private const float ReviewPoseTolerance = 10f;
     private const float ArmOnX = -50f;
     private const float ArmOffX = -32f;
@@ -22,8 +22,8 @@ public class TriggerConsole {
     private LookAtTarget? _armLeft;
     private LookAtTarget? _armRight;
 
-    // Physical truth discovered from the release build with TriggerConsoleProbe:
-    // review switch knob Z: OFF=-90°, ON=0°;
+    // Physical truth discovered from the release build with TriggerConsoleProbe and verified in-game:
+    // review switch knob Z: OFF=0°, ON=-90°;
     // arming lever parent X: OFF=-32°, ON=-50°.
     private Transform? _taskPose;
     private Transform? _bulletPose;
