@@ -16,11 +16,11 @@ public class FcsModule : IFcsModule
     public bool Initialize()
     {
         window = new FcsWindow(fcs);
+        PhysicalStateProbe.Reset();
         bool bound = fcs.TryBind();
         if (bound)
         {
-            // Read-only diagnostic: verify whether the game exposes enough physical gun state
-            // (especially PowderCharges) to reconstruct loaded guns after an F9 hot reload.
+            // Read-only baseline for the full reload/fire state timeline.
             PhysicalStateProbe.LogCurrentState();
         }
         // 返回绑定结果仅用于 Host 日志；窗口实例已建好，未绑定时会显示提示，
@@ -31,7 +31,11 @@ public class FcsModule : IFcsModule
     public void Update()
     {
         fcs.Update();
-        // 高频火控逻辑入口：读炮塔/目标状态、算弹道等。后续在 FSC 上加方法并在此调用。
+
+        // Probe is intentionally outside FSC's focus gate. The game can keep its reload mechanism running
+        // while unfocused, and that background transition is exactly what this diagnostic needs to capture.
+        if (fcs.IsBound)
+            PhysicalStateProbe.Tick();
     }
 
     public void OnGui()
@@ -42,6 +46,7 @@ public class FcsModule : IFcsModule
     public void Shutdown()
     {
         fcs.Dispose();
+        PhysicalStateProbe.Reset();
         window = null;
     }
 }
