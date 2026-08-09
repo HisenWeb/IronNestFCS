@@ -211,7 +211,8 @@ public class GunSystem {
             yield break;
         }
 
-        var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
+        // Watchdogs use scaled game time so Alt+Tab/background pause does not consume timeout budget.
+        var deadline = Time.time + Mathf.Max(1f, timeoutSeconds);
 
         // SetDesiredElevation drives the release build's real internal elevation target.
         // SetSliderValue alone can be overwritten/clamped by the turret controller.
@@ -232,7 +233,7 @@ public class GunSystem {
 
         yield return new WaitForSeconds(0.1f);
         while (Mathf.Abs(gunController.CurrentElevation - elevation) > ElevationToleranceDegrees) {
-            if (Time.realtimeSinceStartup >= deadline) {
+            if (Time.time >= deadline) {
                 MelonLogger.Error(
                     $"[FCS] GunSystem {_surfix}: elevation timeout, current={gunController.CurrentElevation:F2}, " +
                     $"desired={gunController.DesiredElevationAngle:F2}, target={elevation:F2}, " +
@@ -294,14 +295,14 @@ public class GunSystem {
             yield break;
         }
 
-        var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
+        var deadline = Time.time + Mathf.Max(1f, timeoutSeconds);
         while (true) {
             var mechanismReady = reloadController == null || !reloadController.working;
             var breechReady = !gunController.ExternalReloadLoweringLocked;
             var motionReady = gunController.elevationChangeVelocity == 0;
             if (mechanismReady && breechReady && motionReady) break;
 
-            if (Time.realtimeSinceStartup >= deadline) {
+            if (Time.time >= deadline) {
                 var state = reloadController == null
                     ? "unknown"
                     : $"{reloadController.CurrentStateIndex}, working={reloadController.working}";
@@ -329,9 +330,9 @@ public class GunSystem {
             yield break;
         }
 
-        var deadline = Time.realtimeSinceStartup + Mathf.Max(0.1f, timeoutSeconds);
+        var deadline = Time.time + Mathf.Max(0.1f, timeoutSeconds);
         while (!button.isActive || button.nextAllowedClickTime > Time.realtimeSinceStartup) {
-            if (Time.realtimeSinceStartup >= deadline) {
+            if (Time.time >= deadline) {
                 FailReloadAction($"reload control timed out: {controlName}");
                 yield break;
             }
@@ -416,18 +417,18 @@ public class GunSystem {
         if (gunController == null)
             yield break;
 
-        var startedAt = Time.realtimeSinceStartup;
+        var startedAt = Time.time;
         var minimumRecoveryUntil = startedAt + MinimumPostShotRecoverySeconds;
         var deadline = startedAt + Mathf.Max(MinimumPostShotRecoverySeconds, timeoutSeconds);
 
         while (true) {
-            var minimumDelayDone = Time.realtimeSinceStartup >= minimumRecoveryUntil;
+            var minimumDelayDone = Time.time >= minimumRecoveryUntil;
             var mechanismReady = reloadController == null || !reloadController.working;
             var breechReady = !gunController.ExternalReloadLoweringLocked;
             var motionReady = gunController.elevationChangeVelocity == 0;
             if (minimumDelayDone && mechanismReady && breechReady && motionReady) break;
 
-            if (Time.realtimeSinceStartup >= deadline) {
+            if (Time.time >= deadline) {
                 var state = reloadController == null
                     ? "unknown"
                     : $"{reloadController.CurrentStateIndex}, working={reloadController.working}";
@@ -449,9 +450,9 @@ public class GunSystem {
             yield break;
         }
 
-        var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
+        var deadline = Time.time + Mathf.Max(1f, timeoutSeconds);
         while (!gunController.pendingReload) {
-            if (Time.realtimeSinceStartup >= deadline) {
+            if (Time.time >= deadline) {
                 MelonLogger.Error($"[FCS] GunSystem {_surfix}: fire was not observed before timeout");
                 yield break;
             }
