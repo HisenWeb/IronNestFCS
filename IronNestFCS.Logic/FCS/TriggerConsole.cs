@@ -54,89 +54,49 @@ public class TriggerConsole {
         _fire?.AddEnergy(255);
     }
 
-    private static bool TryGetToggleState(LookAtTarget? control, out bool active) {
-        active = false;
-        if (control == null) return false;
-        try {
-            active = control.GetActive();
-            return true;
-        }
-        catch {
-            return false;
-        }
-    }
-
-    private static IEnumerator SetToggleState(
-        LookAtTarget? control,
-        bool desired,
-        string controlName,
-        float timeoutSeconds = 5f) {
-        if (control == null) {
-            MelonLogger.Error($"[FCS] TriggerConsole: missing {controlName}");
-            yield break;
-        }
-
-        yield return FcsRuntimeClock.WaitUntilFocused();
-
-        if (TryGetToggleState(control, out var current)) {
-            if (current == desired)
-                yield break;
-        }
-        else if (!desired) {
-            MelonLogger.Warning(
-                $"[FCS] TriggerConsole: can't read {controlName} state; leaving it unchanged during reset");
-            yield break;
-        }
-
-        yield return FcsSceneInteractor.WaitAndClick(control, timeoutSeconds);
-        yield return FcsRuntimeClock.WaitUntilFocused();
-
-        if (TryGetToggleState(control, out var after) && after != desired) {
-            MelonLogger.Warning(
-                $"[FCS] TriggerConsole: {controlName} did not reach requested state {(desired ? "ON" : "OFF")}");
-        }
-    }
-
     /// <summary>
-    /// F9 can leave either gun armed and the shared review switches latched from an abandoned task.
-    /// Always disarm BOTH guns, reset the review chain, then Arm() will enable only the selected gun.
+    /// The review-console switches are game actions, not a reliable generic toggle API. GetActive() is useful
+    /// for some two-state cockpit levers, but treating it as the authoritative ON/OFF position here caused
+    /// valid confirmation clicks to be skipped. Keep this hook as a no-op so existing FSC call sites remain
+    /// compatible; a new firing solution is rebuilt by replaying the normal confirmation sequence below.
     /// </summary>
     public IEnumerator PrepareForNewFireSolution(LeftRight leftRight) {
-        yield return SetToggleState(_armLeft, false, "Left arming lever");
-        yield return SetToggleState(_armRight, false, "Right arming lever");
-        yield return SetToggleState(_readyFire, false, "ReadyToFire");
-        yield return SetToggleState(_elevationCheck, false, "ElevationCheck");
-        yield return SetToggleState(_rotationCheck, false, "RotationCheck");
-        yield return SetToggleState(_bulletCheck, false, "BulletCheck");
-        yield return SetToggleState(_taskCheck, false, "TaskCheck");
+        yield break;
     }
 
     public IEnumerator Arm(LeftRight leftRight) {
         var arm = leftRight == LeftRight.Left ? _armLeft : _armRight;
-        yield return SetToggleState(
-            arm,
-            true,
-            leftRight == LeftRight.Left ? "Left arming lever" : "Right arming lever");
+        if (arm == null) {
+            MelonLogger.Error($"[FCS] TriggerConsole: missing {leftRight} arming lever");
+            yield break;
+        }
+
+        yield return FcsRuntimeClock.WaitUntilFocused();
+        arm.OnClickDown();
+
+        // Complete an already-started lever click even if focus changes in this short interval.
+        yield return new WaitForSeconds(0.2f);
+        arm.OnClickUp();
         yield return FcsRuntimeClock.WaitForSeconds(1f);
     }
 
     public IEnumerator ConfirmTask() {
-        yield return SetToggleState(_taskCheck, true, "TaskCheck");
+        yield return FcsSceneInteractor.WaitAndClick(_taskCheck);
     }
 
     public IEnumerator ConfirmBullet() {
-        yield return SetToggleState(_bulletCheck, true, "BulletCheck");
+        yield return FcsSceneInteractor.WaitAndClick(_bulletCheck);
     }
 
     public IEnumerator ConfirmRotation() {
-        yield return SetToggleState(_rotationCheck, true, "RotationCheck");
+        yield return FcsSceneInteractor.WaitAndClick(_rotationCheck);
     }
 
     public IEnumerator ConfirmElevation() {
-        yield return SetToggleState(_elevationCheck, true, "ElevationCheck");
+        yield return FcsSceneInteractor.WaitAndClick(_elevationCheck);
     }
 
     public IEnumerator ReadyToFire() {
-        yield return SetToggleState(_readyFire, true, "ReadyToFire");
+        yield return FcsSceneInteractor.WaitAndClick(_readyFire);
     }
 }
