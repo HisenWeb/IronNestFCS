@@ -17,6 +17,12 @@ public class FcsModule : IFcsModule
     {
         window = new FcsWindow(fcs);
         bool bound = fcs.TryBind();
+        if (bound)
+        {
+            // Read-only diagnostic: verify whether the game exposes enough physical gun state
+            // (especially PowderCharges) to reconstruct loaded guns after an F9 hot reload.
+            PhysicalStateProbe.LogCurrentState();
+        }
         // 返回绑定结果仅用于 Host 日志；窗口实例已建好，未绑定时会显示提示，
         // 进入场景后按 F9 重载即可绑定。
         return bound;
