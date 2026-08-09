@@ -99,6 +99,7 @@ public class FSC
         _harmony = new HarmonyInstance(HarmonyId);
         _deskLock.Reset();
         _turretLock.Reset();
+        FcsRuntimeClock.Reset();
 
         // Do not create any in-world FCS controls until all Iron Nest-specific scene
         // objects have been found. This makes the universal MelonGame loader safe.
@@ -119,7 +120,14 @@ public class FSC
     }
 
     public void Update() {
+        // Track focus even while the game keeps running in the background. This freezes the
+        // FCS-only clock during Alt+Tab without changing the game's own run-in-background policy.
+        FcsRuntimeClock.Update();
+        if (!FcsRuntimeClock.IsFocused)
+            return;
+
         _sceneInteractor.Update();
+        TryDispatch();
     }
     
     public void Dispose()
@@ -148,13 +156,16 @@ public class FSC
 
     private IEnumerator ReplenishPowderLoop() {
         while (true) {
-            yield return new WaitForSeconds(PowderCheckInterval);
+            yield return FcsRuntimeClock.WaitForSeconds(PowderCheckInterval);
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
             var charges = Math.Min(LeftGun.RemainingCharges(), RightGun.RemainingCharges());
             if (charges >= PowderReplenishThreshold) continue;
             MelonLogger.Msg(
                 $"[FCS] AutoReplenish: powder charges {charges} < {PowderReplenishThreshold}, buying one");
             yield return _deskLock.Acquire();
             try {
+                yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return _purchaseDeck.BuyPowders();
             }
             finally {
@@ -165,19 +176,19 @@ public class FSC
 
     public IEnumerator ExposeAllEntities() {
         while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
             foreach (var m in MapTable.GetAllFireMissionEntities()) {
                 var vr = m.transform.FindChild("VisualRoot");
                 vr.gameObject.SetActive(true);
                 vr.FindChild("Info").gameObject.SetActive(true);
             }
-            yield return new WaitForSeconds(1f);
+            yield return FcsRuntimeClock.WaitForSeconds(1f);
         }
     }
 
     public void EnqueueTask(ArtilleryTask task) {
         task.progress = Progress.Pending;
-        // Use scaled game time so focus-loss pauses are not counted as task runtime.
-        task.startedAt = Time.time;
+        task.startedAt = FcsRuntimeClock.Now;
         task.completedAt = 0f;
         task.failureReason = "";
         task.chargeCount = 0;
@@ -187,6 +198,9 @@ public class FSC
     }
 
     private void TryDispatch() {
+        if (!FcsRuntimeClock.IsFocused)
+            return;
+
         while (_taskQueue.Count > 0) {
             LeftRight slot;
             if (LeftTask == null) slot = LeftRight.Left;
@@ -218,7 +232,7 @@ public class FSC
     }
 
     private void RecordTaskResult(ArtilleryTask task) {
-        task.completedAt = Time.time;
+        task.completedAt = FcsRuntimeClock.Now;
         CompletedTaskCount++;
         if (task.progress == Progress.Finished) SuccessfulTaskCount++;
         else if (task.progress == Progress.Failed) FailedTaskCount++;
@@ -240,6 +254,8 @@ public class FSC
     }
 
     private IEnumerator RunTaskRoutine(LeftRight leftRight, ArtilleryTask task) {
+        yield return FcsRuntimeClock.WaitUntilFocused();
+
         var gunSys = leftRight == LeftRight.Left ? LeftGun : RightGun;
 
         var turret = new TurretReservation();
@@ -254,17 +270,24 @@ public class FSC
 
         yield return _deskLock.Acquire();
         try {
+            yield return FcsRuntimeClock.WaitUntilFocused();
             task.progress = Progress.Calculating;
             yield return BallisticCalculator.SetDistance(task.distance);
+            yield return FcsRuntimeClock.WaitUntilFocused();
             yield return BallisticCalculator.SetDirection(task.angel);
+            yield return FcsRuntimeClock.WaitUntilFocused();
             yield return BallisticCalculator.SetCharge(powderCount);
+            yield return FcsRuntimeClock.WaitUntilFocused();
             yield return BallisticCalculator.SetShellType(task.bulletType);
+            yield return FcsRuntimeClock.WaitUntilFocused();
             yield return BallisticCalculator.Calculate();
+            yield return FcsRuntimeClock.WaitUntilFocused();
             elevation = BallisticCalculator.GetElevation();
             task.elevation = elevation;
 
             var powderPurchaseAttempts = 0;
             while (gunSys.RemainingCharges() < powderCount && powderPurchaseAttempts < 10) {
+                yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return _purchaseDeck.BuyPowders();
                 powderPurchaseAttempts++;
             }
@@ -280,7 +303,9 @@ public class FSC
                     failureReason = $"no {task.bulletType} shell and cylinder has no empty slot";
                 }
                 else {
+                    yield return FcsRuntimeClock.WaitUntilFocused();
                     yield return _purchaseDeck.BuyShell(task.bulletType, leftRight);
+                    yield return FcsRuntimeClock.WaitUntilFocused();
                     if (!gunSys.HaveBulletInCylinder(task.bulletType)) {
                         viable = false;
                         failureReason = $"purchase of {task.bulletType} did not reach the cylinder";
@@ -297,9 +322,6 @@ public class FSC
             yield break;
         }
 
-        // A previous shot can leave the release-version rammer/breech state machine busy
-        // long after the visible barrel motion has stopped. Never touch the next reload
-        // controls until the mechanism itself reports its empty/rest state.
         task.progress = Progress.LoadingBullet;
         yield return gunSys.WaitForReloadReady(ReloadReadyTimeoutSeconds);
         if (!gunSys.LastReloadReadySucceeded) {
@@ -307,6 +329,7 @@ public class FSC
             yield break;
         }
 
+        yield return FcsRuntimeClock.WaitUntilFocused();
         yield return gunSys.LoadBullet(task.bulletType);
         if (!gunSys.LastReloadActionSucceeded) {
             AbortTask(leftRight, task, turret,
@@ -317,6 +340,7 @@ public class FSC
         }
 
         task.progress = Progress.LoadingPowder;
+        yield return FcsRuntimeClock.WaitUntilFocused();
         yield return gunSys.LoadPowder(powderCount);
         if (!gunSys.LastReloadActionSucceeded) {
             AbortTask(leftRight, task, turret,
@@ -327,13 +351,15 @@ public class FSC
         }
 
         task.progress = Progress.WaitLoading;
-        var loadingDeadline = Time.time + LoadingTimeoutSeconds;
-        while (!gunSys.CanFire() && Time.time < loadingDeadline) {
+        var loadingDeadline = FcsRuntimeClock.Now + LoadingTimeoutSeconds;
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            if (gunSys.CanFire()) break;
+            if (FcsRuntimeClock.Now >= loadingDeadline) {
+                AbortTask(leftRight, task, turret, $"loading timed out after {LoadingTimeoutSeconds:F0}s");
+                yield break;
+            }
             yield return new WaitForSeconds(0.5f);
-        }
-        if (!gunSys.CanFire()) {
-            AbortTask(leftRight, task, turret, $"loading timed out after {LoadingTimeoutSeconds:F0}s");
-            yield break;
         }
 
         task.progress = Progress.Aiming;
@@ -347,8 +373,11 @@ public class FSC
         var turretWaitTimeout = _sceneInteractor.AutoFire
             ? AutoTurretWaitTimeoutSeconds
             : ManualTurretWaitTimeoutSeconds;
-        var turretDeadline = Time.time + turretWaitTimeout;
-        while (!turret.Ready && !turret.Failed && Time.time < turretDeadline) {
+        var turretDeadline = FcsRuntimeClock.Now + turretWaitTimeout;
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            if (turret.Ready || turret.Failed) break;
+            if (FcsRuntimeClock.Now >= turretDeadline) break;
             yield return null;
         }
         if (turret.Failed) {
@@ -360,19 +389,23 @@ public class FSC
             yield break;
         }
 
-        // Direction stays locked until the shot is observed. The desk lock is only held
-        // while touching the shared confirmation controls, so the other gun may continue
-        // ballistic calculation/loading in parallel.
         try {
             yield return _deskLock.Acquire();
             try {
+                yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return TriggerConsole.ConfirmTask();
+                yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return TriggerConsole.ConfirmBullet();
+                yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return TriggerConsole.ConfirmRotation();
+                yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return TriggerConsole.ConfirmElevation();
+                yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return TriggerConsole.ReadyToFire();
+                yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return TriggerConsole.Arm(leftRight);
                 if (_sceneInteractor.AutoFire) {
+                    yield return FcsRuntimeClock.WaitUntilFocused();
                     TriggerConsole.Fire();
                 }
             }
@@ -397,6 +430,7 @@ public class FSC
 
         task.progress = Progress.BackToIdle;
         yield return gunSys.WaitBackToIdle();
+        yield return FcsRuntimeClock.WaitUntilFocused();
         task.progress = Progress.Finished;
         RecordTaskResult(task);
         ReleaseSlot(leftRight);
@@ -414,12 +448,14 @@ public class FSC
     private IEnumerator ReserveTurretAndRotate(ArtilleryTask task, TurretReservation res) {
         yield return _turretLock.Acquire();
         res.Acquired = true;
+        yield return FcsRuntimeClock.WaitUntilFocused();
         if (res.Canceled) {
             ReleaseTurretOnce(res);
             yield break;
         }
 
         yield return Turret.SetRotation(task.angel, TurretRotationTimeoutSeconds);
+        yield return FcsRuntimeClock.WaitUntilFocused();
         if (!Turret.LastRotationSucceeded) {
             res.Failed = true;
             res.FailureReason = $"turret could not reach {task.angel:F1}°";
