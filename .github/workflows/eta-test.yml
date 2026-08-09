@@ -1,0 +1,10 @@
+name: Verify ETA staging runner
+on:
+  push:
+    branches:
+      - agent/fire-ready-eta
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo runner-ok
