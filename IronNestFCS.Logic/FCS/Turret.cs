@@ -8,6 +8,7 @@ namespace IronNestFCS.Logic.FCS;
 public class Turret {
     private TurretController? _turret;
 
+    public bool LastRotationSucceeded { get; private set; }
 
     public bool TryBind() {
         var turretObj = GameObject.Find("TurretSystem");
@@ -16,20 +17,27 @@ public class Turret {
             return false;
         }
         _turret = turretObj.GetComponent<TurretController>();
-        return true;
+        return _turret != null;
     }
     
-    public IEnumerator SetRotation(float angle) {
+    public IEnumerator SetRotation(float angle, float timeoutSeconds = 45f) {
+        LastRotationSucceeded = false;
         if (_turret == null) {
             MelonLogger.Error("[FCS] Aiming: unbound TurretController");
             yield break;
         }
 
         _turret.DesiredRotation = -angle;
-        yield return new WaitForSeconds(1f);
+        var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
+        yield return new WaitForSeconds(0.5f);
         while (_turret.rotationVelocity != 0) {
-            yield return new WaitForSeconds(1f);
+            if (Time.realtimeSinceStartup >= deadline) {
+                MelonLogger.Error($"[FCS] Turret rotation timed out at target {angle:F1}°");
+                yield break;
+            }
+            yield return new WaitForSeconds(0.25f);
         }
+        LastRotationSucceeded = true;
     }
     
 }

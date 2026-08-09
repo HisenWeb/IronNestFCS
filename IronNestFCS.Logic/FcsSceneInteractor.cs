@@ -62,7 +62,7 @@ public class FcsSceneInteractor {
 
     /// <summary>
     /// 4 个目标按钮（对应地图上 1~4 号炮兵标记）。点击即用当前选中弹种为该目标入队一个任务，
-    /// 调度器自动派给空闲炮管。用 activeTargets 防止同一目标重复入队。
+    /// 调度器自动派给空闲炮管。
     /// </summary>
     private void InitializeTargetButtons() {
         const float z = -18.5881f;
@@ -98,8 +98,6 @@ public class FcsSceneInteractor {
         
         x -= 0.05f;
         y -= 0.0045f;
-        
-        ////////////////
         
         for (var i = 1; i <= 4; i++) {
             var targetId = i;
@@ -175,14 +173,12 @@ public class FcsSceneInteractor {
                      ?? Shader.Find("Universal Render Pipeline/Lit");
         if (shader == null) {
             MelonLogger.Warning("[FCS] Can't find URP shader. Use default material color instead.");
-            // 退而求其次：直接改现有材质颜色
             if (renderer.material != null)
                 renderer.material.color = color;
             return;
         }
 
         var mat = new Material(shader);
-        // URP Unlit 用 _BaseColor 控制颜色；同时设 color 兼容。
         mat.color = color;
         if (mat.HasProperty("_BaseColor"))
             mat.SetColor("_BaseColor", color);
@@ -191,8 +187,6 @@ public class FcsSceneInteractor {
 
     /// <summary>
     /// 在 3D 世界里创建一段文本（World Space 的 TextMeshPro，非 UGUI）。
-    /// 返回 GameObject，调用方自行设 transform.position/scale。文本/字号后续可通过
-    /// go.GetComponent&lt;TextMeshPro&gt;() 修改。英文数字用默认字体即可显示。
     /// </summary>
     public GameObject AddText(string text, float fontSize = 4f) {
         var go = new GameObject("FcsText");
@@ -200,24 +194,30 @@ public class FcsSceneInteractor {
         go.transform.Rotate(new Vector3(90, 0, 0));
         go.transform.Rotate(new Vector3(0, 0, -90));
         var tmp = go.AddComponent<TextMeshPro>();
-        // AddComponent 后 Awake 未必已执行，字体可能未自动赋值导致不渲染；
-        // 显式赋默认字体（含 ASCII，英文数字足够）。
         if (tmp.font == null && TMP_Settings.defaultFontAsset != null)
             tmp.font = TMP_Settings.defaultFontAsset;
         tmp.text = text;
         tmp.fontSize = fontSize;
         tmp.color = Color.white;
-        // 锚点设到左上角，方便从左上往下排版（Center 会以几何中心为原点）。
-        // tmp.alignment = TextAlignmentOptions.MidlineLeft;
         return go;
     }
-    
-    public static IEnumerator WaitAndClick(LookAtTarget? button) {
+
+    /// <summary>
+    /// 等待游戏按钮可点击并模拟一次完整点击。以前这里可能无限等待，导致任务永远占住炮管；
+    /// 现在默认 10 秒超时，后续任务流程会通过自己的状态 watchdog 判定失败并释放槽位。
+    /// </summary>
+    public static IEnumerator WaitAndClick(LookAtTarget? button, float timeoutSeconds = 10f) {
         if (button == null) {
             MelonLogger.Error("[FCS] WaitAndClick: button is null");
             yield break;
         }
+
+        var deadline = Time.realtimeSinceStartup + Mathf.Max(0.1f, timeoutSeconds);
         while (button.isActive == false || button.nextAllowedClickTime > Time.realtimeSinceStartup) {
+            if (Time.realtimeSinceStartup >= deadline) {
+                MelonLogger.Error($"[FCS] WaitAndClick timeout: {button.gameObject.name}");
+                yield break;
+            }
             yield return new WaitForSeconds(0.1f);
         }
         yield return new WaitForSeconds(0.1f);

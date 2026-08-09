@@ -6,7 +6,10 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 
 [assembly: MelonInfo(typeof(FcsHostMod), "IronNestFCS", "1.0.6", "svr2kos2")]
-[assembly: MelonGame("Iron Nest", "Iron Nest: Heavy Turret Simulator")]
+// Keep the loader compatibility universal. Release builds have used different
+// Application.companyName/productName metadata, and MelonGame does exact string
+// matching. The FCS still guards itself by binding Iron Nest-specific scene objects.
+[assembly: MelonGame()]
 
 namespace IronNestFCS;
 
