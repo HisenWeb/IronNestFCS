@@ -31,6 +31,8 @@ public enum BulletType {
 
 public class GunSystem {
     private const float ElevationToleranceDegrees = 0.05f;
+    private const float ReloadControlTimeoutSeconds = 60f;
+    private const float MinimumPostShotRecoverySeconds = 13f;
 
     private string _surfix = "";
 
@@ -41,6 +43,7 @@ public class GunSystem {
     private readonly List<LookAtTarget> powderButtons = new();
     private LookAtTarget? loadPowderButton;
     private GunController? gunController;
+    private ArtilleryReloadController? reloadController;
     private LinearSliderInteractable? elevationLever;
     private OdometerDisplay? remainingCharges;
     private TextMeshPro? shellId;
@@ -55,11 +58,15 @@ public class GunSystem {
 
     public bool LastElevationSucceeded { get; private set; }
     public bool LastFireObserved { get; private set; }
+    public bool LastReloadReadySucceeded { get; private set; }
+    public bool LastReloadActionSucceeded { get; private set; }
+    public string LastReloadFailureReason { get; private set; } = "";
 
     public bool TryBind(string surfix) {
         _surfix = surfix;
         powderButtons.Clear();
         elevationOverrideHeld = false;
+        LastReloadFailureReason = "";
 
         var gunSystemObject = GameObject.Find("Gun System " + surfix);
         if (gunSystemObject == null) {
@@ -106,6 +113,7 @@ public class GunSystem {
         var loadPowderObject = reloadingConsole.FindChild("Universal Button Charge Rammer (1)");
         loadPowderButton = loadPowderObject?.GetComponent<LookAtTarget>();
         gunController = GameObject.Find("Gun" + surfix)?.GetComponent<GunController>();
+        reloadController = gunController?.artilleryReloadController;
         var elevationBase = GameObject.Find(".Elevation Lever Baseplate");
         elevationLever = elevationBase?.transform.FindChild(".Elevation Lever " + surfix)
             ?.GetComponent<LinearSliderInteractable>();
@@ -116,6 +124,13 @@ public class GunSystem {
                 $"[FCS] GunSystem {surfix}: elevation slider value={elevationLever.Value:F2}, " +
                 $"range={elevationLever.minOutputValue:F2}..{elevationLever.maxOutputValue:F2}, " +
                 $"gun current={gunController.CurrentElevation:F2}, desired={gunController.DesiredElevationAngle:F2}");
+        }
+        if (reloadController != null) {
+            MelonLogger.Msg(
+                $"[FCS] GunSystem {surfix}: reload state={reloadController.CurrentStateIndex} ({reloadController.CurrentState})");
+        }
+        else {
+            MelonLogger.Warning($"[FCS] GunSystem {surfix}: ArtilleryReloadController unavailable; reload recovery will use fallback checks");
         }
 
         var ok = remainingCharges != null
@@ -258,14 +273,99 @@ public class GunSystem {
         MelonLogger.Msg("[GunSystem] NextBullet");
         nextBulletButton.OnClickDown();
     }
+
+    private void FailReloadAction(string reason) {
+        LastReloadActionSucceeded = false;
+        LastReloadFailureReason = reason;
+        MelonLogger.Error($"[FCS] GunSystem {_surfix}: {reason}");
+    }
+
+    /// <summary>
+    /// The release build exposes a real reload state machine. After a shot, the visual barrel
+    /// can appear settled before the rammer/breech has actually returned to state 0. Starting
+    /// the next task during that interval leaves all reload buttons inactive. Wait for the
+    /// mechanism itself, not just a fixed delay.
+    /// </summary>
+    public IEnumerator WaitForReloadReady(float timeoutSeconds = ReloadControlTimeoutSeconds) {
+        LastReloadReadySucceeded = false;
+        if (gunController == null) {
+            MelonLogger.Error($"[FCS] GunSystem {_surfix}: gun controller unbound while waiting for reload readiness");
+            yield break;
+        }
+
+        var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
+        while (true) {
+            var stateReady = reloadController == null || reloadController.CurrentStateIndex == 0;
+            var breechReady = !gunController.ExternalReloadLoweringLocked;
+            var motionReady = gunController.elevationChangeVelocity == 0;
+            if (stateReady && breechReady && motionReady) break;
+
+            if (Time.realtimeSinceStartup >= deadline) {
+                var state = reloadController == null
+                    ? "unknown"
+                    : $"{reloadController.CurrentStateIndex} ({reloadController.CurrentState})";
+                MelonLogger.Error(
+                    $"[FCS] GunSystem {_surfix}: reload mechanism did not become ready; " +
+                    $"state={state}, breechLocked={gunController.ExternalReloadLoweringLocked}, " +
+                    $"elevationVelocity={gunController.elevationChangeVelocity:F3}");
+                yield break;
+            }
+            yield return new WaitForSeconds(0.25f);
+        }
+
+        // Small settle gap closes the one-frame race where state 0 is reached just before
+        // the interaction buttons are re-enabled.
+        yield return new WaitForSeconds(0.5f);
+        LastReloadReadySucceeded = true;
+    }
+
+    private IEnumerator ClickReloadControl(LookAtTarget? button, string controlName,
+        float timeoutSeconds = ReloadControlTimeoutSeconds) {
+        LastReloadActionSucceeded = false;
+        LastReloadFailureReason = "";
+        if (button == null) {
+            FailReloadAction($"reload control missing: {controlName}");
+            yield break;
+        }
+
+        var deadline = Time.realtimeSinceStartup + Mathf.Max(0.1f, timeoutSeconds);
+        while (!button.isActive || button.nextAllowedClickTime > Time.realtimeSinceStartup) {
+            if (Time.realtimeSinceStartup >= deadline) {
+                FailReloadAction($"reload control timed out: {controlName}");
+                yield break;
+            }
+            yield return new WaitForSeconds(0.1f);
+        }
+
+        yield return new WaitForSeconds(0.1f);
+        try {
+            button.OnClickDown();
+        }
+        catch (Exception ex) {
+            FailReloadAction($"reload control click-down failed ({controlName}): {ex.Message}");
+            yield break;
+        }
+        yield return new WaitForSeconds(0.1f);
+        try {
+            button.OnClickUp();
+        }
+        catch (Exception ex) {
+            FailReloadAction($"reload control click-up failed ({controlName}): {ex.Message}");
+            yield break;
+        }
+
+        LastReloadActionSucceeded = true;
+    }
     
     /// <summary>
     /// 装填指定弹种：先把弹仓转到目标弹，再按装填。转弹仓每步之间要等动画/物理完成。
     /// </summary>
     public IEnumerator LoadBullet(BulletType type) {
+        LastReloadActionSucceeded = false;
+        LastReloadFailureReason = "";
         RefreshBullets();
         if (bullets.Count == 0 || !bullets.Contains(type.ToString())) {
-            MelonLogger.Error($"[FCS] GunSystem {_surfix}: No {type} available in cylinder");
+            FailReloadAction($"No {type} available in cylinder");
             yield break;
         }
         
@@ -278,25 +378,27 @@ public class GunSystem {
             RefreshBullets();
         }
         if (bullets.Count == 0 || bullets[0] != type.ToString()) {
-            MelonLogger.Error($"[FCS] GunSystem {_surfix}: Can't find {type} after rotation, current: {string.Join(", ", bullets)}");
+            FailReloadAction($"Can't find {type} after cylinder rotation, current: {string.Join(", ", bullets)}");
             yield break;
         }
-        yield return FcsSceneInteractor.WaitAndClick(loadBulletButton);
-    }
 
-    private IEnumerator SelectPowder(int count) {
-        if (count < 0 || count > powderButtons.Count) {
-            MelonLogger.Error($"[FCS] GunSystem {_surfix}: invalid powder count {count}, available buttons={powderButtons.Count}");
-            yield break;
-        }
-        for (var i = 0; i < count; i++) {
-            yield return FcsSceneInteractor.WaitAndClick(powderButtons[i]);
-        }
+        yield return ClickReloadControl(loadBulletButton, "Universal Button Load shell Rammer");
     }
 
     public IEnumerator LoadPowder(int count) {
-        yield return SelectPowder(count);
-        yield return FcsSceneInteractor.WaitAndClick(loadPowderButton);
+        LastReloadActionSucceeded = false;
+        LastReloadFailureReason = "";
+        if (count < 0 || count > powderButtons.Count) {
+            FailReloadAction($"invalid powder count {count}, available buttons={powderButtons.Count}");
+            yield break;
+        }
+
+        for (var i = 0; i < count; i++) {
+            yield return ClickReloadControl(powderButtons[i], $"Button Dispencer ({i + 1})");
+            if (!LastReloadActionSucceeded) yield break;
+        }
+
+        yield return ClickReloadControl(loadPowderButton, "Universal Button Charge Rammer (1)");
     }
 
     public bool HaveBulletInCylinder(BulletType type) {
@@ -309,20 +411,34 @@ public class GunSystem {
         return bullets.Contains(null);
     }
 
-    public IEnumerator WaitBackToIdle(float timeoutSeconds = 30f) {
+    public IEnumerator WaitBackToIdle(float timeoutSeconds = 60f) {
         if (gunController == null)
             yield break;
 
-        var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
-        while (gunController.elevationChangeVelocity != 0) {
+        var startedAt = Time.realtimeSinceStartup;
+        var minimumRecoveryUntil = startedAt + MinimumPostShotRecoverySeconds;
+        var deadline = startedAt + Mathf.Max(MinimumPostShotRecoverySeconds, timeoutSeconds);
+
+        while (true) {
+            var minimumDelayDone = Time.realtimeSinceStartup >= minimumRecoveryUntil;
+            var stateReady = reloadController == null || reloadController.CurrentStateIndex == 0;
+            var breechReady = !gunController.ExternalReloadLoweringLocked;
+            var motionReady = gunController.elevationChangeVelocity == 0;
+            if (minimumDelayDone && stateReady && breechReady && motionReady) break;
+
             if (Time.realtimeSinceStartup >= deadline) {
-                MelonLogger.Warning($"[FCS] GunSystem {_surfix}: return-to-idle movement timed out; releasing task slot anyway");
+                var state = reloadController == null
+                    ? "unknown"
+                    : $"{reloadController.CurrentStateIndex} ({reloadController.CurrentState})";
+                MelonLogger.Warning(
+                    $"[FCS] GunSystem {_surfix}: post-shot recovery timed out; " +
+                    $"state={state}, breechLocked={gunController.ExternalReloadLoweringLocked}, " +
+                    $"elevationVelocity={gunController.elevationChangeVelocity:F3}. " +
+                    $"The next task will re-check reload readiness before touching controls.");
                 break;
             }
             yield return new WaitForSeconds(0.1f);
         }
-        // Preserve the original post-shot recovery delay, but the movement wait above is now bounded.
-        yield return new WaitForSeconds(13f);
     }
 
     public IEnumerator WaitFire(float timeoutSeconds = 20f) {
