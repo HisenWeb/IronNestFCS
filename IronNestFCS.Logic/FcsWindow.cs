@@ -78,7 +78,7 @@ public class FcsWindow
         Label($"等待队列：{queue.Count}");
         foreach (var item in queue)
         {
-            Label($"  T{item.targetId} {item.bulletType}  方位 {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}");
+            Label($"  T{item.targetId} {item.bulletType.DisplayName()}  方位 {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}");
         }
 
         Label($"本轮：完成 {fcs.CompletedTaskCount}    成功 {fcs.SuccessfulTaskCount}    失败 {fcs.FailedTaskCount}");
@@ -89,7 +89,7 @@ public class FcsWindow
             var item = recentItems[i];
             var result = item.progress == Progress.Finished ? "成功" : "失败";
             var duration = item.completedAt > item.startedAt ? item.completedAt - item.startedAt : 0f;
-            Label($"  {result} T{item.targetId} {item.bulletType}  装药{item.chargeCount} 仰角{item.elevation:F1}°  {duration:F0}秒");
+            Label($"  {result} T{item.targetId} {item.bulletType.DisplayName()}  装药{item.chargeCount} 仰角{item.elevation:F1}°  {duration:F0}秒");
             if (item.progress == Progress.Failed && !string.IsNullOrEmpty(item.failureReason)) {
                 Label($"    原因：{item.failureReason}");
             }
@@ -106,7 +106,7 @@ public class FcsWindow
         }
 
         var elapsed = task.startedAt > 0f ? FcsRuntimeClock.Now - task.startedAt : 0f;
-        label($"{name}炮：T{task.targetId} {task.bulletType}  {ProgressText(task.progress)}  {elapsed:F0}秒");
+        label($"{name}炮：T{task.targetId} {task.bulletType.DisplayName()}  {ProgressText(task.progress)}  {elapsed:F0}秒");
         label($"  方位 {task.angel:F1}° / 距离 {task.distance:F2}km   装药 {task.chargeCount}   仰角 {task.elevation:F1}°");
     }
 
