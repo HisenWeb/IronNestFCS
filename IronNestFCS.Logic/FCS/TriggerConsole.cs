@@ -54,11 +54,6 @@ public class TriggerConsole {
         _fire?.AddEnergy(255);
     }
 
-    /// <summary>
-    /// Review switches and arming levers are two-state controls. After F9 they may still be left in
-    /// the old task's state, so blindly clicking them can toggle an already-correct control OFF.
-    /// GetActive() exposes the latched on/off state; use it to drive every control idempotently.
-    /// </summary>
     private static bool TryGetToggleState(LookAtTarget? control, out bool active) {
         active = false;
         if (control == null) return false;
@@ -103,15 +98,12 @@ public class TriggerConsole {
     }
 
     /// <summary>
-    /// Put the shared review console and the selected gun's arming lever into a known baseline before
-    /// confirming a new target. This makes retargeting after F9 safe even if the old task was reset
-    /// halfway through review/arming.
+    /// F9 can leave either gun armed and the shared review switches latched from an abandoned task.
+    /// Always disarm BOTH guns, reset the review chain, then Arm() will enable only the selected gun.
     /// </summary>
     public IEnumerator PrepareForNewFireSolution(LeftRight leftRight) {
-        var arm = leftRight == LeftRight.Left ? _armLeft : _armRight;
-
-        yield return SetToggleState(arm, false,
-            leftRight == LeftRight.Left ? "Left arming lever" : "Right arming lever");
+        yield return SetToggleState(_armLeft, false, "Left arming lever");
+        yield return SetToggleState(_armRight, false, "Right arming lever");
         yield return SetToggleState(_readyFire, false, "ReadyToFire");
         yield return SetToggleState(_elevationCheck, false, "ElevationCheck");
         yield return SetToggleState(_rotationCheck, false, "RotationCheck");
@@ -127,7 +119,7 @@ public class TriggerConsole {
             leftRight == LeftRight.Left ? "Left arming lever" : "Right arming lever");
         yield return FcsRuntimeClock.WaitForSeconds(1f);
     }
-    
+
     public IEnumerator ConfirmTask() {
         yield return SetToggleState(_taskCheck, true, "TaskCheck");
     }
