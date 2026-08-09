@@ -61,8 +61,8 @@ public class FcsSceneInteractor {
     }
 
     /// <summary>
-    /// 4 个目标按钮（对应地图上 1~4 号炮兵标记）。点击即用当前选中弹种为该目标入队一个任务，
-    /// 调度器自动派给空闲炮管。
+    /// 4 个目标按钮（对应地图上 1~4 号炮兵标记）。点击后先对地图标记做短暂稳定采样，
+    /// 再把目标快照入队，避免正式版场景初始化时首帧 Transform 瞬态造成第一发坐标偶发错误。
     /// </summary>
     private void InitializeTargetButtons() {
         const float z = -18.5881f;
@@ -103,19 +103,13 @@ public class FcsSceneInteractor {
             var targetId = i;
             GameObject button = null;
             button = AddButton(() => {
-                var task = fcs.MapTable.GetMarkTarget(targetId);
-                if (task == null) {
-                    return; // 地图上没有这个编号的目标
-                }
-                task.targetId = targetId;
-                task.bulletType = selectedBulletType;
-                fcs.EnqueueTask(task);
+                // Snapshot the selected shell at click time. Marker stabilization is asynchronous,
+                // so a later shell-selection click must not alter the already requested mission.
+                var bulletAtClick = selectedBulletType;
                 SetColor(button, Color.gray);
-                button.GetComponent<Collider>().enabled = false;
-                MelonCoroutines.Start(InvokeDelay(() => {
-                    SetColor(button, Color.red);
-                    button.GetComponent<Collider>().enabled = true;
-                }, 1f));
+                var collider = button.GetComponent<Collider>();
+                if (collider != null) collider.enabled = false;
+                MelonCoroutines.Start(QueueStableTarget(targetId, bulletAtClick, button));
             }, Color.red);
             button.transform.position = new Vector3(x, y, z);
             button.transform.localScale = Vector3.one * 0.02f;
@@ -126,6 +120,31 @@ public class FcsSceneInteractor {
             text.transform.localScale = Vector3.one * 1.0f;
             x -= 0.05f;
             y -= 0.0045f;
+        }
+    }
+
+    private IEnumerator QueueStableTarget(int targetId, BulletType bulletType, GameObject button) {
+        var clickedAt = Time.realtimeSinceStartup;
+        ArtilleryTask? task = null;
+        yield return fcs.MapTable.GetStableMarkTarget(targetId, result => task = result);
+
+        if (task != null) {
+            task.targetId = targetId;
+            task.bulletType = bulletType;
+            fcs.EnqueueTask(task);
+        }
+
+        // Preserve the old one-second anti-double-click cooldown. Stable sampling normally consumes
+        // about 0.2 s of it; only wait for the remainder.
+        var remainingCooldown = 1f - (Time.realtimeSinceStartup - clickedAt);
+        if (remainingCooldown > 0f) {
+            yield return new WaitForSeconds(remainingCooldown);
+        }
+
+        if (button != null) {
+            SetColor(button, Color.red);
+            var collider = button.GetComponent<Collider>();
+            if (collider != null) collider.enabled = true;
         }
     }
 
