@@ -102,14 +102,28 @@ public class FcsWindow
     {
         if (task == null) {
             var state = GunPhysicalState.Read(side);
-            if (state.LoadedReady) {
-                label($"{name}炮：已装填 {state.ShellType!.Value.DisplayName()} / 装药{state.PowderCharges}，等待目标");
-            }
-            else if (state.EmptyReady) {
-                label($"{name}炮：空闲（空炮）");
-            }
-            else {
-                label($"{name}炮：物理状态占用  {state.Summary()}");
+            switch (state.Kind) {
+                case GunPhysicalStateKind.LoadedReady:
+                    label($"{name}炮：已装填 {state.ShellType!.Value.DisplayName()} / 装药{state.PowderCharges}，等待目标");
+                    break;
+                case GunPhysicalStateKind.ShellLoaded:
+                    label($"{name}炮：已入膛 {state.ShellType!.Value.DisplayName()} / 未装药，等待同弹种目标");
+                    break;
+                case GunPhysicalStateKind.EmptyReady:
+                    label($"{name}炮：空闲（空炮）");
+                    break;
+                case GunPhysicalStateKind.PostShotRecovery:
+                    label($"{name}炮：击发后复位中");
+                    break;
+                case GunPhysicalStateKind.Recovering:
+                    label($"{name}炮：状态恢复中  {state.Summary()}");
+                    break;
+                case GunPhysicalStateKind.Unknown:
+                    label($"{name}炮：状态待确认  {state.Summary()}");
+                    break;
+                default:
+                    label($"{name}炮：未绑定");
+                    break;
             }
             return;
         }

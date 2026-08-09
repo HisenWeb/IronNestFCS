@@ -22,7 +22,6 @@ public class FSC
     private const float PowderCheckInterval = 5f;
     private const int PowderReplenishThreshold = 6;
 
-    // Watchdogs. A failed game interaction must never occupy a gun/turret forever.
     private const float ReloadReadyTimeoutSeconds = 60f;
     private const float LoadingTimeoutSeconds = 60f;
     private const float ElevationTimeoutSeconds = 35f;
@@ -31,10 +30,10 @@ public class FSC
     private const float ManualTurretWaitTimeoutSeconds = 300f;
     private const float AutoFireTimeoutSeconds = 25f;
     private const float ManualFireTimeoutSeconds = 300f;
+    private const float PhysicalRecoveryTimeoutSeconds = 30f;
     private const int RecentTaskLimit = 20;
 
     private HarmonyInstance? _harmony;
-    
     private FcsSceneInteractor _sceneInteractor;
     private readonly PurchaseDeck _purchaseDeck = new();
     public readonly MapTable MapTable = new MapTable();
@@ -43,7 +42,7 @@ public class FSC
     public readonly GunSystem RightGun = new GunSystem();
     public readonly Turret Turret = new Turret();
     public readonly TriggerConsole TriggerConsole = new();
-    
+
     private readonly Queue<ArtilleryTask> _taskQueue = new();
     private readonly Queue<ArtilleryTask> _recentTasks = new();
 
@@ -59,17 +58,20 @@ public class FSC
     public int SuccessfulTaskCount { get; private set; }
     public int FailedTaskCount { get; private set; }
 
-    /// <summary>
-    /// 弹道计算器、采购台和确认台是共享短操作硬件。
-    /// </summary>
     private readonly CoroutineLock _deskLock = new();
-
-    /// <summary>
-    /// 炮塔方向是两炮共享资源；一个任务拿到方向后一直持有到该发完成/失败。
-    /// </summary>
     private readonly CoroutineLock _turretLock = new();
-
     private readonly List<object> _runningCoroutines = new();
+
+    private float _leftRecoveryStartedAt = -1f;
+    private float _rightRecoveryStartedAt = -1f;
+    private bool _leftRecoveryTimeoutLogged;
+    private bool _rightRecoveryTimeoutLogged;
+
+    private enum GunTaskMode {
+        FreshLoad,
+        CompleteShellLoaded,
+        ReuseLoadedRound,
+    }
 
     public FSC() {
         _sceneInteractor = new FcsSceneInteractor(this);
@@ -77,9 +79,6 @@ public class FSC
 
     public bool IsBound { get; private set; } = false;
 
-    /// <summary>
-    /// 对场景绑定做统一异常隔离。正式版对象名发生变化时应表现为“未绑定”，而不是直接炸掉整个 Logic。
-    /// </summary>
     private static bool TryBindSafe(string name, Func<bool> binder) {
         try {
             var ok = binder();
@@ -92,7 +91,6 @@ public class FSC
         }
     }
 
-    /// <summary>查找并绑定游戏对象。返回 false 表示当前场景还没有目标控件。</summary>
     public bool TryBind()
     {
         _sceneInteractor = new FcsSceneInteractor(this);
@@ -100,9 +98,8 @@ public class FSC
         _deskLock.Reset();
         _turretLock.Reset();
         FcsRuntimeClock.Reset();
+        ResetPhysicalRecoveryTracking();
 
-        // Do not create any in-world FCS controls until all Iron Nest-specific scene
-        // objects have been found. This makes the universal MelonGame loader safe.
         IsBound = TryBindSafe(nameof(MapTable), MapTable.TryBind)
                   && TryBindSafe(nameof(BallisticCalculator), BallisticCalculator.TryBind)
                   && TryBindSafe("LeftGun", () => LeftGun.TryBind("Left"))
@@ -120,8 +117,6 @@ public class FSC
     }
 
     public void Update() {
-        // Track focus even while the game keeps running in the background. This freezes the
-        // FCS-only clock during Alt+Tab without changing the game's own run-in-background policy.
         FcsRuntimeClock.Update();
         if (!FcsRuntimeClock.IsFocused)
             return;
@@ -129,7 +124,7 @@ public class FSC
         _sceneInteractor.Update();
         TryDispatch();
     }
-    
+
     public void Dispose()
     {
         foreach (var handle in _runningCoroutines) {
@@ -138,8 +133,6 @@ public class FSC
         }
         _runningCoroutines.Clear();
 
-        // A hot reload can stop a task while it owns release-version gun elevation
-        // control. Always restore the game's original controller mode before unloading.
         LeftGun.ReleaseElevationOverride();
         RightGun.ReleaseElevationOverride();
 
@@ -147,11 +140,19 @@ public class FSC
         _recentTasks.Clear();
         LeftTask = null;
         RightTask = null;
+        ResetPhysicalRecoveryTracking();
 
         _sceneInteractor.ShutDown();
         try { _harmony?.UnpatchSelf(); }
         catch (Exception ex) { MelonLogger.Error($"[FCS] UnpatchSelf failed: {ex}"); }
         _harmony = null;
+    }
+
+    private void ResetPhysicalRecoveryTracking() {
+        _leftRecoveryStartedAt = -1f;
+        _rightRecoveryStartedAt = -1f;
+        _leftRecoveryTimeoutLogged = false;
+        _rightRecoveryTimeoutLogged = false;
     }
 
     private IEnumerator ReplenishPowderLoop() {
@@ -193,78 +194,161 @@ public class FSC
         task.failureReason = "";
         task.chargeCount = 0;
         task.elevation = 0f;
+        task.dispatchExcludedGunMask = 0;
         _taskQueue.Enqueue(task);
         TryDispatch();
     }
 
-    /// <summary>
-    /// 调度不再把 LeftTask/RightTask == null 等同于“炮是空的”。F9 会清掉任务对象，
-    /// 但真实炮膛/装药仍留在游戏里；因此每次派发都重新读取左右炮物理状态。
-    /// 优先复用已经装填且与目标兼容的炮，其次才把普通任务交给真正的空炮。
-    /// </summary>
     private void TryDispatch() {
         if (!FcsRuntimeClock.IsFocused)
             return;
 
         while (_taskQueue.Count > 0) {
             var task = _taskQueue.Peek();
-            if (TryChooseGun(task, out var slot, out var reuseLoadedRound)) {
+            if (TryChooseGun(task, out var slot, out var mode)) {
                 _taskQueue.Dequeue();
                 if (slot == LeftRight.Left) LeftTask = task;
                 else RightTask = task;
-                StartTaskRoutine(slot, task, reuseLoadedRound);
+                StartTaskRoutine(slot, task, mode);
                 continue;
             }
 
-            // 有炮正在执行任务时，队首暂时无法派发并不代表目标无效；等当前任务完成后再试。
             if (LeftTask != null || RightTask != null)
                 break;
 
             var leftState = GunPhysicalState.Read("Left");
             var rightState = GunPhysicalState.Read("Right");
 
-            // 装填机构还在动作或状态暂时不可判定时不要抢控制权，留在队列等待下一帧。
-            if (!leftState.IsStable || !rightState.IsStable)
+            var waitLeft = ShouldWaitForPhysicalRecovery(LeftRight.Left, leftState);
+            var waitRight = ShouldWaitForPhysicalRecovery(LeftRight.Right, rightState);
+            if (waitLeft || waitRight)
                 break;
 
-            // 两门炮都没有正在执行的 FCS 任务，而且物理状态稳定，但没有任何一门能接这个目标。
-            // 这种任务不能无限堵住队列；拒绝本次目标，保留炮内现有弹药不动。
             _taskQueue.Dequeue();
             RejectPendingTask(task,
                 $"no compatible gun for current physical loads; Left={leftState.Summary()}, Right={rightState.Summary()}");
         }
     }
 
-    private bool TryChooseGun(ArtilleryTask task, out LeftRight slot, out bool reuseLoadedRound) {
+    private bool TryChooseGun(ArtilleryTask task, out LeftRight slot, out GunTaskMode mode) {
         slot = LeftRight.Left;
-        reuseLoadedRound = false;
+        mode = GunTaskMode.FreshLoad;
 
         var leftState = LeftTask == null ? GunPhysicalState.Read("Left") : null;
         var rightState = RightTask == null ? GunPhysicalState.Read("Right") : null;
 
-        // 已装填炮优先：避免一边已有可用炮弹，却又在另一边重新装一发相同任务。
-        if (LeftTask == null && leftState != null && leftState.CanReuseFor(task.bulletType, task.distance)) {
+        if (LeftTask == null && !IsGunExcluded(task, LeftRight.Left)
+            && leftState != null && leftState.CanReuseLoadedFor(task.bulletType)) {
             slot = LeftRight.Left;
-            reuseLoadedRound = true;
+            mode = GunTaskMode.ReuseLoadedRound;
+            ResetPhysicalRecoveryTracking(LeftRight.Left, leftState);
             return true;
         }
-        if (RightTask == null && rightState != null && rightState.CanReuseFor(task.bulletType, task.distance)) {
+        if (RightTask == null && !IsGunExcluded(task, LeftRight.Right)
+            && rightState != null && rightState.CanReuseLoadedFor(task.bulletType)) {
             slot = LeftRight.Right;
-            reuseLoadedRound = true;
+            mode = GunTaskMode.ReuseLoadedRound;
+            ResetPhysicalRecoveryTracking(LeftRight.Right, rightState);
             return true;
         }
 
-        // 普通装填只允许进入真正的空炮。已装填但不兼容的炮绝不能再塞一发到它后面。
-        if (LeftTask == null && leftState != null && leftState.EmptyReady) {
+        if (LeftTask == null && !IsGunExcluded(task, LeftRight.Left)
+            && leftState != null && leftState.CanCompleteShellFor(task.bulletType)) {
             slot = LeftRight.Left;
+            mode = GunTaskMode.CompleteShellLoaded;
+            ResetPhysicalRecoveryTracking(LeftRight.Left, leftState);
             return true;
         }
-        if (RightTask == null && rightState != null && rightState.EmptyReady) {
+        if (RightTask == null && !IsGunExcluded(task, LeftRight.Right)
+            && rightState != null && rightState.CanCompleteShellFor(task.bulletType)) {
             slot = LeftRight.Right;
+            mode = GunTaskMode.CompleteShellLoaded;
+            ResetPhysicalRecoveryTracking(LeftRight.Right, rightState);
+            return true;
+        }
+
+        if (LeftTask == null && !IsGunExcluded(task, LeftRight.Left)
+            && leftState != null && leftState.EmptyReady) {
+            slot = LeftRight.Left;
+            mode = GunTaskMode.FreshLoad;
+            ResetPhysicalRecoveryTracking(LeftRight.Left, leftState);
+            return true;
+        }
+        if (RightTask == null && !IsGunExcluded(task, LeftRight.Right)
+            && rightState != null && rightState.EmptyReady) {
+            slot = LeftRight.Right;
+            mode = GunTaskMode.FreshLoad;
+            ResetPhysicalRecoveryTracking(LeftRight.Right, rightState);
             return true;
         }
 
         return false;
+    }
+
+    private static int GunMask(LeftRight side) => side == LeftRight.Left ? 1 : 2;
+
+    private static bool IsGunExcluded(ArtilleryTask task, LeftRight side) {
+        return (task.dispatchExcludedGunMask & GunMask(side)) != 0;
+    }
+
+    private bool ShouldWaitForPhysicalRecovery(LeftRight side, GunPhysicalState state) {
+        if (state.IsRecognizedStable) {
+            ResetPhysicalRecoveryTracking(side, state);
+            return false;
+        }
+
+        var now = FcsRuntimeClock.Now;
+        float startedAt;
+        bool timeoutLogged;
+
+        if (side == LeftRight.Left) {
+            if (_leftRecoveryStartedAt < 0f) {
+                _leftRecoveryStartedAt = now;
+                _leftRecoveryTimeoutLogged = false;
+                MelonLogger.Msg($"[FCS] Left physical state waiting for recovery: {state.Summary()}");
+            }
+            startedAt = _leftRecoveryStartedAt;
+            timeoutLogged = _leftRecoveryTimeoutLogged;
+        }
+        else {
+            if (_rightRecoveryStartedAt < 0f) {
+                _rightRecoveryStartedAt = now;
+                _rightRecoveryTimeoutLogged = false;
+                MelonLogger.Msg($"[FCS] Right physical state waiting for recovery: {state.Summary()}");
+            }
+            startedAt = _rightRecoveryStartedAt;
+            timeoutLogged = _rightRecoveryTimeoutLogged;
+        }
+
+        if (now - startedAt < PhysicalRecoveryTimeoutSeconds)
+            return true;
+
+        if (!timeoutLogged) {
+            MelonLogger.Error(
+                $"[FCS] {side} physical state did not converge within {PhysicalRecoveryTimeoutSeconds:F0}s: {state.Summary()}");
+            if (side == LeftRight.Left) _leftRecoveryTimeoutLogged = true;
+            else _rightRecoveryTimeoutLogged = true;
+        }
+
+        return false;
+    }
+
+    private void ResetPhysicalRecoveryTracking(LeftRight side, GunPhysicalState state) {
+        if (!state.IsRecognizedStable)
+            return;
+
+        if (side == LeftRight.Left) {
+            if (_leftRecoveryStartedAt >= 0f)
+                MelonLogger.Msg($"[FCS] Left physical state recovered as {state.Summary()}");
+            _leftRecoveryStartedAt = -1f;
+            _leftRecoveryTimeoutLogged = false;
+        }
+        else {
+            if (_rightRecoveryStartedAt >= 0f)
+                MelonLogger.Msg($"[FCS] Right physical state recovered as {state.Summary()}");
+            _rightRecoveryStartedAt = -1f;
+            _rightRecoveryTimeoutLogged = false;
+        }
     }
 
     private void RejectPendingTask(ArtilleryTask task, string reason) {
@@ -274,12 +358,12 @@ public class FSC
         RecordTaskResult(task);
     }
 
-    private void StartTaskRoutine(LeftRight leftRight, ArtilleryTask task, bool reuseLoadedRound) {
-        var handle = MelonCoroutines.Start(RunTaskRoutine(leftRight, task, reuseLoadedRound));
+    private void StartTaskRoutine(LeftRight leftRight, ArtilleryTask task, GunTaskMode mode) {
+        var handle = MelonCoroutines.Start(RunTaskRoutine(leftRight, task, mode));
         _runningCoroutines.Add(handle);
     }
 
-    private void ReleaseSlot(LeftRight leftRight) {
+    private void ClearSlotWithoutDispatch(LeftRight leftRight) {
         if (leftRight == LeftRight.Left) {
             LeftGun.ReleaseElevationOverride();
             LeftTask = null;
@@ -288,7 +372,49 @@ public class FSC
             RightGun.ReleaseElevationOverride();
             RightTask = null;
         }
+    }
+
+    private void ReleaseSlot(LeftRight leftRight) {
+        ClearSlotWithoutDispatch(leftRight);
         TryDispatch();
+    }
+
+    private void PrependTask(ArtilleryTask task) {
+        var rest = _taskQueue.ToArray();
+        _taskQueue.Clear();
+        _taskQueue.Enqueue(task);
+        foreach (var queued in rest)
+            _taskQueue.Enqueue(queued);
+    }
+
+    private void RequeueForPhysicalReclassification(
+        LeftRight leftRight,
+        ArtilleryTask task,
+        TurretReservation turret,
+        string reason) {
+        task.progress = Progress.Pending;
+        task.failureReason = "";
+        turret.Canceled = true;
+        ReleaseTurretOnce(turret);
+        ClearSlotWithoutDispatch(leftRight);
+        PrependTask(task);
+        MelonLogger.Warning($"[FCS] {leftRight} T{task.targetId}: state changed, reclassifying instead of failing: {reason}");
+    }
+
+    private void RetryOnAnotherGun(
+        LeftRight leftRight,
+        ArtilleryTask task,
+        TurretReservation turret,
+        string reason) {
+        task.dispatchExcludedGunMask |= GunMask(leftRight);
+        task.progress = Progress.Pending;
+        task.failureReason = "";
+        turret.Canceled = true;
+        ReleaseTurretOnce(turret);
+        ClearSlotWithoutDispatch(leftRight);
+        PrependTask(task);
+        MelonLogger.Warning(
+            $"[FCS] {leftRight} T{task.targetId}: current preloaded configuration rejected ({reason}); trying another gun");
     }
 
     private void RecordTaskResult(ArtilleryTask task) {
@@ -313,29 +439,47 @@ public class FSC
         ReleaseSlot(leftRight);
     }
 
-    private IEnumerator RunTaskRoutine(LeftRight leftRight, ArtilleryTask task, bool reuseLoadedRound) {
+    private IEnumerator RunTaskRoutine(LeftRight leftRight, ArtilleryTask task, GunTaskMode mode) {
         yield return FcsRuntimeClock.WaitUntilFocused();
 
         var gunSys = leftRight == LeftRight.Left ? LeftGun : RightGun;
         var sideName = leftRight == LeftRight.Left ? "Left" : "Right";
         var turret = new TurretReservation();
 
-        // 普通任务继续保持原有优化：一开始就预约/旋转炮塔，与解算和装填并行。
-        // 已装填重定向任务则先用现有装药重新解算并校验，确认目标可用后才动炮塔。
-        if (!reuseLoadedRound) {
+        var initialState = GunPhysicalState.Read(sideName);
+        if (mode == GunTaskMode.FreshLoad && !initialState.EmptyReady) {
+            RequeueForPhysicalReclassification(
+                leftRight, task, turret, $"expected empty gun, got {initialState.Summary()}");
+            yield break;
+        }
+        if (mode == GunTaskMode.CompleteShellLoaded
+            && !initialState.CanCompleteShellFor(task.bulletType)) {
+            RequeueForPhysicalReclassification(
+                leftRight, task, turret, $"expected shell-loaded {task.bulletType.DisplayName()}, got {initialState.Summary()}");
+            yield break;
+        }
+        if (mode == GunTaskMode.ReuseLoadedRound
+            && !initialState.CanReuseLoadedFor(task.bulletType)) {
+            RequeueForPhysicalReclassification(
+                leftRight, task, turret, $"expected loaded {task.bulletType.DisplayName()}, got {initialState.Summary()}");
+            yield break;
+        }
+
+        if (mode != GunTaskMode.ReuseLoadedRound) {
             _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
         }
 
         int powderCount;
-        GunPhysicalState? loadedState = null;
-        if (reuseLoadedRound) {
-            loadedState = GunPhysicalState.Read(sideName);
-            if (!loadedState.CanReuseFor(task.bulletType, task.distance)) {
-                AbortTask(leftRight, task, turret,
-                    $"loaded round changed or cannot cover target; {loadedState.Summary()}");
+        if (mode == GunTaskMode.ReuseLoadedRound) {
+            powderCount = initialState.PowderCharges;
+            if (powderCount < BallisticCalculator.MinimumCharge(task.distance)) {
+                RetryOnAnotherGun(
+                    leftRight,
+                    task,
+                    turret,
+                    $"C{powderCount} below minimum charge for {task.distance:F2}km");
                 yield break;
             }
-            powderCount = loadedState.PowderCharges;
         }
         else {
             powderCount = _sceneInteractor.maxCharge ? 6 : BallisticCalculator.MinimumCharge(task.distance);
@@ -363,17 +507,14 @@ public class FSC
             elevation = BallisticCalculator.GetElevation();
             task.elevation = elevation;
 
-            if (reuseLoadedRound) {
-                // 当前炮弹/装药已经无法改变，只能使用游戏计算器给出的新仰角。
-                // 若结果超出该炮物理仰角范围，则拒绝这个目标，但不动炮里的现有弹药。
-                loadedState = GunPhysicalState.Read(sideName);
-                if (!loadedState.IsElevationWithinPhysicalRange(elevation)) {
-                    viable = false;
-                    failureReason =
-                        $"current loaded {task.bulletType.DisplayName()} C{powderCount} has no usable elevation for {task.distance:F2}km";
-                }
+            var stateForRange = GunPhysicalState.Read(sideName);
+            if (!stateForRange.IsElevationWithinPhysicalRange(elevation)) {
+                viable = false;
+                failureReason =
+                    $"{task.bulletType.DisplayName()} C{powderCount} has no usable elevation for {task.distance:F2}km (E={elevation:F2})";
             }
-            else {
+
+            if (viable && mode != GunTaskMode.ReuseLoadedRound) {
                 var powderPurchaseAttempts = 0;
                 while (gunSys.RemainingCharges() < powderCount && powderPurchaseAttempts < 10) {
                     yield return FcsRuntimeClock.WaitUntilFocused();
@@ -384,9 +525,11 @@ public class FSC
                     viable = false;
                     failureReason = $"powder unavailable: need {powderCount}, have {gunSys.RemainingCharges()}";
                 }
+            }
 
+            if (viable && mode == GunTaskMode.FreshLoad) {
                 task.progress = Progress.SelectingBullet;
-                if (viable && !gunSys.HaveBulletInCylinder(task.bulletType)) {
+                if (!gunSys.HaveBulletInCylinder(task.bulletType)) {
                     if (!gunSys.HaveEmptyShellInCylinder()) {
                         viable = false;
                         failureReason = $"no {task.bulletType} shell and cylinder has no empty slot";
@@ -408,17 +551,24 @@ public class FSC
         }
 
         if (!viable) {
-            AbortTask(leftRight, task, turret, failureReason);
+            if (mode == GunTaskMode.ReuseLoadedRound) {
+                RetryOnAnotherGun(leftRight, task, turret, failureReason);
+            }
+            else {
+                AbortTask(leftRight, task, turret, failureReason);
+            }
             yield break;
         }
 
-        if (reuseLoadedRound) {
-            // 解算期间游戏状态可能变化，因此真正接管前再核对一次炮膛和装药。
-            loadedState = GunPhysicalState.Read(sideName);
+        if (mode == GunTaskMode.ReuseLoadedRound) {
+            var loadedState = GunPhysicalState.Read(sideName);
             if (!loadedState.LoadedReady
                 || loadedState.ShellType != task.bulletType
                 || loadedState.PowderCharges != powderCount) {
-                AbortTask(leftRight, task, turret,
+                RequeueForPhysicalReclassification(
+                    leftRight,
+                    task,
+                    turret,
                     $"loaded round changed before retargeting; {loadedState.Summary()}");
                 yield break;
             }
@@ -428,21 +578,46 @@ public class FSC
             _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
         }
         else {
-            task.progress = Progress.LoadingBullet;
-            yield return gunSys.WaitForReloadReady(ReloadReadyTimeoutSeconds);
-            if (!gunSys.LastReloadReadySucceeded) {
-                AbortTask(leftRight, task, turret, "reload mechanism was not ready for the next cycle");
-                yield break;
-            }
+            if (mode == GunTaskMode.FreshLoad) {
+                var beforeShellLoad = GunPhysicalState.Read(sideName);
+                if (!beforeShellLoad.EmptyReady) {
+                    RequeueForPhysicalReclassification(
+                        leftRight, task, turret, $"gun changed before shell load; {beforeShellLoad.Summary()}");
+                    yield break;
+                }
 
-            yield return FcsRuntimeClock.WaitUntilFocused();
-            yield return gunSys.LoadBullet(task.bulletType);
-            if (!gunSys.LastReloadActionSucceeded) {
-                AbortTask(leftRight, task, turret,
-                    string.IsNullOrEmpty(gunSys.LastReloadFailureReason)
-                        ? "shell loading control failed"
-                        : gunSys.LastReloadFailureReason);
-                yield break;
+                task.progress = Progress.LoadingBullet;
+                yield return gunSys.WaitForReloadReady(ReloadReadyTimeoutSeconds);
+                if (!gunSys.LastReloadReadySucceeded) {
+                    AbortTask(leftRight, task, turret, "reload mechanism was not ready for the next cycle");
+                    yield break;
+                }
+
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                yield return gunSys.LoadBullet(task.bulletType);
+                if (!gunSys.LastReloadActionSucceeded) {
+                    AbortTask(leftRight, task, turret,
+                        string.IsNullOrEmpty(gunSys.LastReloadFailureReason)
+                            ? "shell loading control failed"
+                            : gunSys.LastReloadFailureReason);
+                    yield break;
+                }
+            }
+            else {
+                var shellState = GunPhysicalState.Read(sideName);
+                if (!shellState.CanCompleteShellFor(task.bulletType)) {
+                    RequeueForPhysicalReclassification(
+                        leftRight, task, turret, $"chamber changed before powder load; {shellState.Summary()}");
+                    yield break;
+                }
+
+                MelonLogger.Msg(
+                    $"[FCS] {leftRight} T{task.targetId}: resuming chambered {task.bulletType.DisplayName()} with no powder");
+                yield return gunSys.WaitForReloadReady(ReloadReadyTimeoutSeconds);
+                if (!gunSys.LastReloadReadySucceeded) {
+                    AbortTask(leftRight, task, turret, "reload mechanism was not ready to resume powder loading");
+                    yield break;
+                }
             }
 
             task.progress = Progress.LoadingPowder;
@@ -460,12 +635,21 @@ public class FSC
             var loadingDeadline = FcsRuntimeClock.Now + LoadingTimeoutSeconds;
             while (true) {
                 yield return FcsRuntimeClock.WaitUntilFocused();
-                if (gunSys.CanFire()) break;
+                var loaded = GunPhysicalState.Read(sideName);
+                if (loaded.LoadedReady
+                    && loaded.ShellType == task.bulletType
+                    && loaded.PowderCharges == powderCount)
+                    break;
+
                 if (FcsRuntimeClock.Now >= loadingDeadline) {
-                    AbortTask(leftRight, task, turret, $"loading timed out after {LoadingTimeoutSeconds:F0}s");
+                    AbortTask(
+                        leftRight,
+                        task,
+                        turret,
+                        $"loading did not converge to {task.bulletType.DisplayName()} C{powderCount}; {loaded.Summary()}");
                     yield break;
                 }
-                yield return new WaitForSeconds(0.5f);
+                yield return FcsRuntimeClock.WaitForSeconds(0.25f);
             }
         }
 
@@ -499,6 +683,8 @@ public class FSC
         try {
             yield return _deskLock.Acquire();
             try {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                yield return TriggerConsole.PrepareForNewFireSolution(leftRight);
                 yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return TriggerConsole.ConfirmTask();
                 yield return FcsRuntimeClock.WaitUntilFocused();

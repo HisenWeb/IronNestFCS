@@ -33,4 +33,9 @@ public class ArtilleryTask {
     public float startedAt;
     public float completedAt;
     public string failureReason = "";
+
+    // Runtime-only dispatch memory. If a preloaded gun is tried and its fixed shell/charge cannot
+    // solve the target, exclude that side and let the same task fall back to the other gun.
+    // Bit 0 = Left, bit 1 = Right. Reset when a brand-new target is enqueued.
+    public int dispatchExcludedGunMask;
 }
