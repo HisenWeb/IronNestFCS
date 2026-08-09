@@ -111,6 +111,7 @@ public class FSC
         MelonLogger.Msg("[FCS] Initialize: " + (IsBound ? "success" : "failed"));
         if (IsBound) {
             _sceneInteractor.Initialize();
+            _runningCoroutines.Add(MelonCoroutines.Start(ResetSharedFireControlsAfterBind()));
             _runningCoroutines.Add(MelonCoroutines.Start(ReplenishPowderLoop()));
         }
         return IsBound;
@@ -153,6 +154,22 @@ public class FSC
         _rightRecoveryStartedAt = -1f;
         _leftRecoveryTimeoutLogged = false;
         _rightRecoveryTimeoutLogged = false;
+    }
+
+    /// <summary>
+    /// F9 abandons the old task but the physical review switches/arming levers survive in the game scene.
+    /// Reset those shared controls immediately after rebind so the system has a known firing baseline even
+    /// before a new target is selected. PrepareForNewFireSolution disarms BOTH guns.
+    /// </summary>
+    private IEnumerator ResetSharedFireControlsAfterBind() {
+        yield return FcsRuntimeClock.WaitUntilFocused();
+        yield return _deskLock.Acquire();
+        try {
+            yield return TriggerConsole.PrepareForNewFireSolution(LeftRight.Left);
+        }
+        finally {
+            _deskLock.Release();
+        }
     }
 
     private IEnumerator ReplenishPowderLoop() {
@@ -237,6 +254,8 @@ public class FSC
         var leftState = LeftTask == null ? GunPhysicalState.Read("Left") : null;
         var rightState = RightTask == null ? GunPhysicalState.Read("Right") : null;
 
+        // Exclusion only applies to the exact fixed loaded configuration that was already tried and found
+        // unable to solve this target. If that gun later becomes shell-only or empty, it is a new usable state.
         if (LeftTask == null && !IsGunExcluded(task, LeftRight.Left)
             && leftState != null && leftState.CanReuseLoadedFor(task.bulletType)) {
             slot = LeftRight.Left;
@@ -252,14 +271,14 @@ public class FSC
             return true;
         }
 
-        if (LeftTask == null && !IsGunExcluded(task, LeftRight.Left)
+        if (LeftTask == null
             && leftState != null && leftState.CanCompleteShellFor(task.bulletType)) {
             slot = LeftRight.Left;
             mode = GunTaskMode.CompleteShellLoaded;
             ResetPhysicalRecoveryTracking(LeftRight.Left, leftState);
             return true;
         }
-        if (RightTask == null && !IsGunExcluded(task, LeftRight.Right)
+        if (RightTask == null
             && rightState != null && rightState.CanCompleteShellFor(task.bulletType)) {
             slot = LeftRight.Right;
             mode = GunTaskMode.CompleteShellLoaded;
@@ -267,15 +286,13 @@ public class FSC
             return true;
         }
 
-        if (LeftTask == null && !IsGunExcluded(task, LeftRight.Left)
-            && leftState != null && leftState.EmptyReady) {
+        if (LeftTask == null && leftState != null && leftState.EmptyReady) {
             slot = LeftRight.Left;
             mode = GunTaskMode.FreshLoad;
             ResetPhysicalRecoveryTracking(LeftRight.Left, leftState);
             return true;
         }
-        if (RightTask == null && !IsGunExcluded(task, LeftRight.Right)
-            && rightState != null && rightState.EmptyReady) {
+        if (RightTask == null && rightState != null && rightState.EmptyReady) {
             slot = LeftRight.Right;
             mode = GunTaskMode.FreshLoad;
             ResetPhysicalRecoveryTracking(LeftRight.Right, rightState);
@@ -465,21 +482,17 @@ public class FSC
             yield break;
         }
 
+        // Normal and shell-only recovery can select their charge from the new target, so turret rotation may
+        // overlap their loading. A fully loaded round has a fixed charge: solve/validate it first, then move turret.
         if (mode != GunTaskMode.ReuseLoadedRound) {
             _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
         }
 
         int powderCount;
         if (mode == GunTaskMode.ReuseLoadedRound) {
+            // Do NOT use MinimumCharge as a range verdict here. It is only the FCS's preferred automatic
+            // charge policy; a fixed already-loaded charge must be tested with the game's actual calculator.
             powderCount = initialState.PowderCharges;
-            if (powderCount < BallisticCalculator.MinimumCharge(task.distance)) {
-                RetryOnAnotherGun(
-                    leftRight,
-                    task,
-                    turret,
-                    $"C{powderCount} below minimum charge for {task.distance:F2}km");
-                yield break;
-            }
         }
         else {
             powderCount = _sceneInteractor.maxCharge ? 6 : BallisticCalculator.MinimumCharge(task.distance);
