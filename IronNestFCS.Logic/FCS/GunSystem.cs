@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using Il2Cpp;
 using Il2CppTMPro;
 using MelonLoader;
@@ -32,6 +32,7 @@ public enum BulletType {
 public class GunSystem {
     private const float ElevationToleranceDegrees = 0.05f;
     private const float ReloadControlTimeoutSeconds = 60f;
+    private const float ShellChamberTimeoutSeconds = 15f;
     private const float MinimumPostShotRecoverySeconds = 13f;
 
     private string _surfix = "";
@@ -368,9 +369,32 @@ public class GunSystem {
 
         LastReloadActionSucceeded = true;
     }
+
+    private IEnumerator WaitForChamberedShell(BulletType type,
+        float timeoutSeconds = ShellChamberTimeoutSeconds) {
+        LastReloadActionSucceeded = false;
+        var expected = type.ToString();
+        var deadline = FcsRuntimeClock.Now + Mathf.Max(1f, timeoutSeconds);
+
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            var chamber = BulletInChamber();
+            if (chamber == expected) {
+                LastReloadActionSucceeded = true;
+                yield break;
+            }
+
+            if (FcsRuntimeClock.Now >= deadline) {
+                FailReloadAction(
+                    $"shell rammer did not chamber {expected}; chamber={chamber ?? "empty"}");
+                yield break;
+            }
+            yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+        }
+    }
     
     /// <summary>
-    /// 装填指定弹种：先把弹仓转到目标弹，再按装填。转弹仓每步之间要等动画/物理完成。
+    /// 装填指定弹种：先把弹仓转到目标弹，再确认装填机构稳定，推弹后确认炮弹确实进入炮膛。
     /// </summary>
     public IEnumerator LoadBullet(BulletType type) {
         LastReloadActionSucceeded = false;
@@ -397,7 +421,31 @@ public class GunSystem {
             yield break;
         }
 
+        // The cylinder can report the correct shell before the rammer/breech is ready for the next
+        // interaction. Re-check the real mechanism state after cylinder positioning instead of
+        // relying only on the pre-LoadBullet readiness check in FSC.
+        yield return WaitForReloadReady();
+        if (!LastReloadReadySucceeded) {
+            FailReloadAction("reload mechanism was not ready after cylinder positioning");
+            yield break;
+        }
+
         yield return ClickReloadControl(loadBulletButton, "Universal Button Load shell Rammer");
+        if (!LastReloadActionSucceeded) yield break;
+
+        // A successful OnClickDown/OnClickUp only proves that the UI accepted the interaction.
+        // Do not proceed to powder until the durable game state confirms the requested shell is
+        // actually in the chamber.
+        yield return WaitForChamberedShell(type);
+        if (!LastReloadActionSucceeded) yield break;
+
+        // Let the rammer/breech finish its physical cycle before handing control to powder loading.
+        yield return WaitForReloadReady();
+        if (!LastReloadReadySucceeded) {
+            FailReloadAction("reload mechanism did not settle after shell ramming");
+            yield break;
+        }
+        LastReloadActionSucceeded = true;
     }
 
     public IEnumerator LoadPowder(int count) {
