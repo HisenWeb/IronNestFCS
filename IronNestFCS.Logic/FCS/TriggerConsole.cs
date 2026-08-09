@@ -175,11 +175,12 @@ public class TriggerConsole {
 
     private static IEnumerator ThrowArm(LookAtTarget arm) {
         yield return FcsRuntimeClock.WaitUntilFocused();
-        arm.OnClickDown();
+        FcsSceneInteractor.BeginPhysicalClick(arm);
 
         // Once an arm action starts, always complete the down/up pair even if focus changes during the hold.
+        // If F9 stops this coroutine, FcsSceneInteractor.ShutDown releases the tracked control before unload.
         yield return new WaitForSeconds(0.2f);
-        arm.OnClickUp();
+        FcsSceneInteractor.EndPhysicalClick(arm);
     }
 
     private static IEnumerator EnsureArmState(LookAtTarget? arm, Transform? pose, bool desiredOn, string name) {
