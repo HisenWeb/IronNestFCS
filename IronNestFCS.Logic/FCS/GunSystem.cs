@@ -34,6 +34,7 @@ public class GunSystem {
     private const float ReloadControlTimeoutSeconds = 60f;
     private const float ShellChamberTimeoutSeconds = 15f;
     private const float MinimumPostShotRecoverySeconds = 13f;
+    private const float RecoveryElevationVelocityTolerance = 0.05f;
 
     private string _surfix = "";
 
@@ -304,7 +305,7 @@ public class GunSystem {
                 ? !gunController.ExternalReloadLoweringLocked
                 : physical.EmptyReady || physical.ShellLoaded;
             var breechReady = !gunController.ExternalReloadLoweringLocked;
-            var motionReady = gunController.elevationChangeVelocity == 0;
+            var motionReady = Mathf.Abs(gunController.elevationChangeVelocity) <= RecoveryElevationVelocityTolerance;
             if (interactionReady && breechReady && motionReady) break;
 
             if (FcsRuntimeClock.Now >= deadline) {
@@ -489,16 +490,25 @@ public class GunSystem {
         // while the gun was still physically returning. Keep BackToIdle alive until the verified final handoff.
         var minimumRecoveryUntilGameTime = Time.time + MinimumPostShotRecoverySeconds;
         var deadline = FcsRuntimeClock.Now + Mathf.Max(MinimumPostShotRecoverySeconds, timeoutSeconds);
+        var emptyReadyVelocityBlockLogged = false;
 
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
 
             var physical = GunPhysicalState.Read(_surfix);
             var minimumDelayDone = Time.time >= minimumRecoveryUntilGameTime;
-            var motionReady = gunController.elevationChangeVelocity == 0;
+            var motionReady = Mathf.Abs(gunController.elevationChangeVelocity) <= RecoveryElevationVelocityTolerance;
             var recoveryComplete = reloadController == null
                 ? !gunController.ExternalReloadLoweringLocked && motionReady
                 : physical.EmptyReady && motionReady;
+
+            if (physical.EmptyReady && !motionReady && !emptyReadyVelocityBlockLogged) {
+                emptyReadyVelocityBlockLogged = true;
+                MelonLogger.Warning(
+                    $"[FCS] GunSystem {_surfix}: EmptyReady reached but residual elevation velocity " +
+                    $"{gunController.elevationChangeVelocity:F4} exceeds tolerance " +
+                    $"{RecoveryElevationVelocityTolerance:F2}; waiting for settle");
+            }
 
             if (minimumDelayDone && recoveryComplete)
                 break;
