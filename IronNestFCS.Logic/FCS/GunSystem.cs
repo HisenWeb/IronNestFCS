@@ -30,6 +30,8 @@ public enum BulletType {
 }
 
 public class GunSystem {
+    private const float ElevationToleranceDegrees = 0.05f;
+
     private string _surfix = "";
 
     private CylinderShellSelector? shellSelector;
@@ -43,12 +45,21 @@ public class GunSystem {
     private OdometerDisplay? remainingCharges;
     private TextMeshPro? shellId;
 
+    // In the release build TurretController can re-derive each gun's elevation target
+    // from the physical elevation controls every frame. FCS needs to temporarily own
+    // that target so the two guns can hold independent precomputed elevations.
+    private static TurretController? sharedTurretController;
+    private static int elevationOverrideUsers;
+    private static bool? savedDriveGunElevationsFromController;
+    private bool elevationOverrideHeld;
+
     public bool LastElevationSucceeded { get; private set; }
     public bool LastFireObserved { get; private set; }
 
     public bool TryBind(string surfix) {
         _surfix = surfix;
         powderButtons.Clear();
+        elevationOverrideHeld = false;
 
         var gunSystemObject = GameObject.Find("Gun System " + surfix);
         if (gunSystemObject == null) {
@@ -98,6 +109,14 @@ public class GunSystem {
         var elevationBase = GameObject.Find(".Elevation Lever Baseplate");
         elevationLever = elevationBase?.transform.FindChild(".Elevation Lever " + surfix)
             ?.GetComponent<LinearSliderInteractable>();
+        sharedTurretController = GameObject.Find("TurretSystem")?.GetComponent<TurretController>();
+
+        if (elevationLever != null && gunController != null) {
+            MelonLogger.Msg(
+                $"[FCS] GunSystem {surfix}: elevation slider value={elevationLever.Value:F2}, " +
+                $"range={elevationLever.minOutputValue:F2}..{elevationLever.maxOutputValue:F2}, " +
+                $"gun current={gunController.CurrentElevation:F2}, desired={gunController.DesiredElevationAngle:F2}");
+        }
 
         var ok = remainingCharges != null
                  && nextBulletButton != null
@@ -106,7 +125,8 @@ public class GunSystem {
                  && powderButtons.Count >= 6
                  && loadPowderButton != null
                  && gunController != null
-                 && elevationLever != null;
+                 && elevationLever != null
+                 && sharedTurretController != null;
         if (!ok) {
             MelonLogger.Error($"[FCS] GunSystem {surfix}: one or more controls could not be bound");
         }
@@ -117,24 +137,98 @@ public class GunSystem {
         return gunController != null && gunController.CanFire;
     }
 
+    private bool AcquireElevationOverride() {
+        if (elevationOverrideHeld) return true;
+
+        if (sharedTurretController == null) {
+            sharedTurretController = GameObject.Find("TurretSystem")?.GetComponent<TurretController>();
+        }
+        if (sharedTurretController == null) {
+            MelonLogger.Error($"[FCS] GunSystem {_surfix}: TurretController unavailable for elevation override");
+            return false;
+        }
+
+        try {
+            if (elevationOverrideUsers == 0) {
+                savedDriveGunElevationsFromController = sharedTurretController.driveGunElevationsFromController;
+                sharedTurretController.driveGunElevationsFromController = false;
+                MelonLogger.Msg(
+                    $"[FCS] Elevation override acquired; saved driveGunElevationsFromController={savedDriveGunElevationsFromController}");
+            }
+            elevationOverrideUsers++;
+            elevationOverrideHeld = true;
+            return true;
+        }
+        catch (Exception ex) {
+            MelonLogger.Error($"[FCS] GunSystem {_surfix}: failed to acquire elevation override: {ex.Message}");
+            return false;
+        }
+    }
+
+    public void ReleaseElevationOverride() {
+        if (!elevationOverrideHeld) return;
+        elevationOverrideHeld = false;
+        elevationOverrideUsers = Math.Max(0, elevationOverrideUsers - 1);
+
+        if (elevationOverrideUsers != 0) return;
+        try {
+            if (sharedTurretController != null && savedDriveGunElevationsFromController.HasValue) {
+                sharedTurretController.driveGunElevationsFromController = savedDriveGunElevationsFromController.Value;
+                MelonLogger.Msg(
+                    $"[FCS] Elevation override released; restored driveGunElevationsFromController={savedDriveGunElevationsFromController.Value}");
+            }
+        }
+        catch (Exception ex) {
+            MelonLogger.Warning($"[FCS] Failed to restore gun elevation drive: {ex.Message}");
+        }
+        finally {
+            savedDriveGunElevationsFromController = null;
+        }
+    }
+
     public IEnumerator SetElevation(float elevation, float timeoutSeconds = 30f) {
         LastElevationSucceeded = false;
         if (elevationLever == null || gunController == null) {
             MelonLogger.Error($"[FCS] GunSystem {_surfix}: Elevation lever or gun controller unbound");
             yield break;
         }
+        if (!AcquireElevationOverride()) {
+            yield break;
+        }
 
         var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
-        elevationLever.SetSliderValue(elevation);
+
+        // SetDesiredElevation drives the release build's real internal elevation target.
+        // SetSliderValue alone can be overwritten/clamped by the turret controller.
+        gunController.SetDesiredElevation(elevation);
+
+        // Keep the physical lever visually in sync only when the requested value lies
+        // inside this particular slider's advertised output range.
+        var sliderMin = Mathf.Min(elevationLever.minOutputValue, elevationLever.maxOutputValue);
+        var sliderMax = Mathf.Max(elevationLever.minOutputValue, elevationLever.maxOutputValue);
+        if (elevation >= sliderMin && elevation <= sliderMax) {
+            elevationLever.SetSliderValue(elevation);
+        }
+        else {
+            MelonLogger.Warning(
+                $"[FCS] GunSystem {_surfix}: target {elevation:F2}° is outside elevation slider range " +
+                $"{sliderMin:F2}..{sliderMax:F2}; driving GunController directly");
+        }
+
         yield return new WaitForSeconds(0.1f);
-        while (!Mathf.Approximately(gunController.CurrentElevation, elevation)) {
+        while (Mathf.Abs(gunController.CurrentElevation - elevation) > ElevationToleranceDegrees) {
             if (Time.realtimeSinceStartup >= deadline) {
                 MelonLogger.Error(
-                    $"[FCS] GunSystem {_surfix}: elevation timeout, current={gunController.CurrentElevation:F2}, target={elevation:F2}");
+                    $"[FCS] GunSystem {_surfix}: elevation timeout, current={gunController.CurrentElevation:F2}, " +
+                    $"desired={gunController.DesiredElevationAngle:F2}, target={elevation:F2}, " +
+                    $"slider={elevationLever.Value:F2} range={sliderMin:F2}..{sliderMax:F2}");
                 yield break;
             }
-            elevationLever.SetSliderValue(elevation);
-            yield return new WaitForSeconds(0.5f);
+
+            // The release build's elevation controller is stateful. Reasserting the real
+            // desired target makes the operation resilient to transient game-side writes.
+            gunController.SetDesiredElevation(elevation);
+            yield return new WaitForSeconds(0.25f);
         }
         LastElevationSucceeded = true;
     }
