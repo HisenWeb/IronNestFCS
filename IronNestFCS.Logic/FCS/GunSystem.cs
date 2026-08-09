@@ -207,19 +207,16 @@ public class GunSystem {
             MelonLogger.Error($"[FCS] GunSystem {_surfix}: Elevation lever or gun controller unbound");
             yield break;
         }
+
+        yield return FcsRuntimeClock.WaitUntilFocused();
         if (!AcquireElevationOverride()) {
             yield break;
         }
 
-        // Watchdogs use scaled game time so Alt+Tab/background pause does not consume timeout budget.
-        var deadline = Time.time + Mathf.Max(1f, timeoutSeconds);
+        var deadline = FcsRuntimeClock.Now + Mathf.Max(1f, timeoutSeconds);
 
-        // SetDesiredElevation drives the release build's real internal elevation target.
-        // SetSliderValue alone can be overwritten/clamped by the turret controller.
         gunController.SetDesiredElevation(elevation);
 
-        // Keep the physical lever visually in sync only when the requested value lies
-        // inside this particular slider's advertised output range.
         var sliderMin = Mathf.Min(elevationLever.minOutputValue, elevationLever.maxOutputValue);
         var sliderMax = Mathf.Max(elevationLever.minOutputValue, elevationLever.maxOutputValue);
         if (elevation >= sliderMin && elevation <= sliderMax) {
@@ -231,9 +228,14 @@ public class GunSystem {
                 $"{sliderMin:F2}..{sliderMax:F2}; driving GunController directly");
         }
 
-        yield return new WaitForSeconds(0.1f);
-        while (Mathf.Abs(gunController.CurrentElevation - elevation) > ElevationToleranceDegrees) {
-            if (Time.time >= deadline) {
+        yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
+            if (Mathf.Abs(gunController.CurrentElevation - elevation) <= ElevationToleranceDegrees)
+                break;
+
+            if (FcsRuntimeClock.Now >= deadline) {
                 MelonLogger.Error(
                     $"[FCS] GunSystem {_surfix}: elevation timeout, current={gunController.CurrentElevation:F2}, " +
                     $"desired={gunController.DesiredElevationAngle:F2}, target={elevation:F2}, " +
@@ -241,10 +243,8 @@ public class GunSystem {
                 yield break;
             }
 
-            // The release build's elevation controller is stateful. Reasserting the real
-            // desired target makes the operation resilient to transient game-side writes.
             gunController.SetDesiredElevation(elevation);
-            yield return new WaitForSeconds(0.25f);
+            yield return FcsRuntimeClock.WaitForSeconds(0.25f);
         }
         LastElevationSucceeded = true;
     }
@@ -295,14 +295,16 @@ public class GunSystem {
             yield break;
         }
 
-        var deadline = Time.time + Mathf.Max(1f, timeoutSeconds);
+        var deadline = FcsRuntimeClock.Now + Mathf.Max(1f, timeoutSeconds);
         while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
             var mechanismReady = reloadController == null || !reloadController.working;
             var breechReady = !gunController.ExternalReloadLoweringLocked;
             var motionReady = gunController.elevationChangeVelocity == 0;
             if (mechanismReady && breechReady && motionReady) break;
 
-            if (Time.time >= deadline) {
+            if (FcsRuntimeClock.Now >= deadline) {
                 var state = reloadController == null
                     ? "unknown"
                     : $"{reloadController.CurrentStateIndex}, working={reloadController.working}";
@@ -312,12 +314,11 @@ public class GunSystem {
                     $"elevationVelocity={gunController.elevationChangeVelocity:F3}");
                 yield break;
             }
-            yield return new WaitForSeconds(0.25f);
+            yield return FcsRuntimeClock.WaitForSeconds(0.25f);
         }
 
-        // Small settle gap closes the one-frame race where the animation finishes just before
-        // the interaction controls are re-enabled.
-        yield return new WaitForSeconds(0.5f);
+        yield return FcsRuntimeClock.WaitForSeconds(0.5f);
+        yield return FcsRuntimeClock.WaitUntilFocused();
         LastReloadReadySucceeded = true;
     }
 
@@ -330,16 +331,22 @@ public class GunSystem {
             yield break;
         }
 
-        var deadline = Time.time + Mathf.Max(0.1f, timeoutSeconds);
-        while (!button.isActive || button.nextAllowedClickTime > Time.realtimeSinceStartup) {
-            if (Time.time >= deadline) {
+        var deadline = FcsRuntimeClock.Now + Mathf.Max(0.1f, timeoutSeconds);
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
+            if (button.isActive && button.nextAllowedClickTime <= Time.realtimeSinceStartup)
+                break;
+
+            if (FcsRuntimeClock.Now >= deadline) {
                 FailReloadAction($"reload control timed out: {controlName}");
                 yield break;
             }
-            yield return new WaitForSeconds(0.1f);
+            yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         }
 
-        yield return new WaitForSeconds(0.1f);
+        yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+        yield return FcsRuntimeClock.WaitUntilFocused();
         try {
             button.OnClickDown();
         }
@@ -347,6 +354,9 @@ public class GunSystem {
             FailReloadAction($"reload control click-down failed ({controlName}): {ex.Message}");
             yield break;
         }
+
+        // Once a click starts, always complete the down/up pair even if focus changes in between.
+        // Leaving a LookAtTarget held down is worse than finishing the already-started interaction.
         yield return new WaitForSeconds(0.1f);
         try {
             button.OnClickUp();
@@ -365,6 +375,7 @@ public class GunSystem {
     public IEnumerator LoadBullet(BulletType type) {
         LastReloadActionSucceeded = false;
         LastReloadFailureReason = "";
+        yield return FcsRuntimeClock.WaitUntilFocused();
         RefreshBullets();
         if (bullets.Count == 0 || !bullets.Contains(type.ToString())) {
             FailReloadAction($"No {type} available in cylinder");
@@ -372,11 +383,13 @@ public class GunSystem {
         }
         
         for (var i = 0; i < bullets.Count; ++i) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
             if (bullets.Count > 0 && bullets[0] == type.ToString()) {
                 break;
             }
             NextBullet();
-            yield return new WaitForSeconds(1.5f);
+            yield return FcsRuntimeClock.WaitForSeconds(1.5f);
+            yield return FcsRuntimeClock.WaitUntilFocused();
             RefreshBullets();
         }
         if (bullets.Count == 0 || bullets[0] != type.ToString()) {
@@ -396,10 +409,12 @@ public class GunSystem {
         }
 
         for (var i = 0; i < count; i++) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
             yield return ClickReloadControl(powderButtons[i], $"Button Dispencer ({i + 1})");
             if (!LastReloadActionSucceeded) yield break;
         }
 
+        yield return FcsRuntimeClock.WaitUntilFocused();
         yield return ClickReloadControl(loadPowderButton, "Universal Button Charge Rammer (1)");
     }
 
@@ -417,18 +432,21 @@ public class GunSystem {
         if (gunController == null)
             yield break;
 
-        var startedAt = Time.time;
+        var startedAt = FcsRuntimeClock.Now;
         var minimumRecoveryUntil = startedAt + MinimumPostShotRecoverySeconds;
         var deadline = startedAt + Mathf.Max(MinimumPostShotRecoverySeconds, timeoutSeconds);
 
         while (true) {
-            var minimumDelayDone = Time.time >= minimumRecoveryUntil;
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
+            var now = FcsRuntimeClock.Now;
+            var minimumDelayDone = now >= minimumRecoveryUntil;
             var mechanismReady = reloadController == null || !reloadController.working;
             var breechReady = !gunController.ExternalReloadLoweringLocked;
             var motionReady = gunController.elevationChangeVelocity == 0;
             if (minimumDelayDone && mechanismReady && breechReady && motionReady) break;
 
-            if (Time.time >= deadline) {
+            if (now >= deadline) {
                 var state = reloadController == null
                     ? "unknown"
                     : $"{reloadController.CurrentStateIndex}, working={reloadController.working}";
@@ -439,7 +457,7 @@ public class GunSystem {
                     $"The next task will re-check reload readiness before touching controls.");
                 break;
             }
-            yield return new WaitForSeconds(0.1f);
+            yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         }
     }
 
@@ -450,15 +468,21 @@ public class GunSystem {
             yield break;
         }
 
-        var deadline = Time.time + Mathf.Max(1f, timeoutSeconds);
-        while (!gunController.pendingReload) {
-            if (Time.time >= deadline) {
+        var deadline = FcsRuntimeClock.Now + Mathf.Max(1f, timeoutSeconds);
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
+            if (gunController.pendingReload) {
+                LastFireObserved = true;
+                yield break;
+            }
+
+            if (FcsRuntimeClock.Now >= deadline) {
                 MelonLogger.Error($"[FCS] GunSystem {_surfix}: fire was not observed before timeout");
                 yield break;
             }
-            yield return new WaitForSeconds(0.1f);
+            yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         }
-        LastFireObserved = true;
     }
     
     public int RemainingCharges() {
