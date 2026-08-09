@@ -46,7 +46,7 @@ public class FcsSceneInteractor {
             button.transform.position = new Vector3(x, y, z);
             button.transform.localScale = Vector3.one * 0.02f;
             bulletTypeBtns.Add(button);
-            var text = AddText(type.ToString(), 14f);
+            var text = AddText(type.DisplayName(), 14f);
             text.transform.SetParent(button.transform, false);
             text.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
             text.transform.localScale = Vector3.one * 1.0f;
