@@ -17,7 +17,20 @@ public class Turret {
             return false;
         }
         _turret = turretObj.GetComponent<TurretController>();
-        return _turret != null;
+        if (_turret == null)
+            return false;
+
+        // F9 intentionally discards the old FCS target. The game-side TurretController survives the
+        // Logic reload, so its previous DesiredRotation would otherwise keep slewing toward the abandoned
+        // target. Rebind from the live physical angle to cancel that stale intent without teleporting.
+        try {
+            _turret.DesiredRotation = _turret.CurrentAngle;
+            MelonLogger.Msg($"[FCS] Turret rebind: holding current azimuth {_turret.CurrentAngle:F2}°");
+        }
+        catch (Exception ex) {
+            MelonLogger.Warning($"[FCS] Turret rebind: couldn't cancel stale rotation target: {ex.Message}");
+        }
+        return true;
     }
     
     public IEnumerator SetRotation(float angle, float timeoutSeconds = 45f) {
