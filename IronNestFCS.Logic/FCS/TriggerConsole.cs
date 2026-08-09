@@ -54,76 +54,32 @@ public class TriggerConsole {
         _fire?.AddEnergy(255);
     }
 
-    private static bool TryGetLeverState(LookAtTarget? lever, out bool active) {
-        active = false;
-        if (lever == null) return false;
-        try {
-            active = lever.GetActive();
-            return true;
-        }
-        catch {
-            return false;
-        }
-    }
-
-    private static IEnumerator ThrowLever(LookAtTarget lever) {
-        yield return FcsRuntimeClock.WaitUntilFocused();
-        lever.OnClickDown();
-
-        // The arming lever is a physical two-state lever. Keep the original, proven hold time rather than
-        // routing it through the generic review-console click helper.
-        yield return new WaitForSeconds(0.2f);
-        lever.OnClickUp();
-        yield return FcsRuntimeClock.WaitForSeconds(0.25f);
-    }
-
-    private static IEnumerator SetArmState(LookAtTarget? lever, bool armed, string name) {
-        if (lever == null) {
-            MelonLogger.Error($"[FCS] TriggerConsole: missing {name}");
-            yield break;
-        }
-
-        if (!TryGetLeverState(lever, out var current)) {
-            MelonLogger.Warning($"[FCS] TriggerConsole: can't read {name} state; leaving it unchanged");
-            yield break;
-        }
-
-        if (current == armed)
-            yield break;
-
-        yield return ThrowLever(lever);
-
-        if (TryGetLeverState(lever, out var after)) {
-            if (after != armed) {
-                MelonLogger.Warning(
-                    $"[FCS] TriggerConsole: {name} did not reach requested state {(armed ? "ARMED" : "SAFE")}");
-            }
-        }
-        else {
-            MelonLogger.Warning($"[FCS] TriggerConsole: couldn't verify {name} after lever throw");
-        }
-    }
-
     /// <summary>
-    /// Review-console checks are action switches and are rebuilt by replaying their normal click sequence.
-    /// The two gun arming levers are different: they are durable two-state controls, so every new fire solution
-    /// first places BOTH guns on safe. F9 uses this same hook, which removes any armed state left by an abandoned task.
+    /// F9 invalidates the abandoned fire solution, but the five review switches are rebuilt by the normal
+    /// confirmation sequence and the arming controls must NOT be treated as generic readable toggles.
+    /// In the release build Universal Button Arm Left/Right behave as side-selection actions; GetActive()
+    /// is not a reliable indication of their latched visual/armed state. Touching both sides here caused an
+    /// unnecessary Right->Left handoff that also reset the already-confirmed review console.
     /// </summary>
     public IEnumerator PrepareForNewFireSolution(LeftRight leftRight) {
-        yield return SetArmState(_armLeft, false, "Left arming lever");
-        yield return SetArmState(_armRight, false, "Right arming lever");
+        yield break;
     }
 
     public IEnumerator Arm(LeftRight leftRight) {
-        // Defensive invariant: only the selected gun may be armed. This also self-heals manual/F9 residue.
-        if (leftRight == LeftRight.Left) {
-            yield return SetArmState(_armRight, false, "Right arming lever");
-            yield return SetArmState(_armLeft, true, "Left arming lever");
+        var arm = leftRight == LeftRight.Left ? _armLeft : _armRight;
+        if (arm == null) {
+            MelonLogger.Error($"[FCS] TriggerConsole: missing {leftRight} arming control");
+            yield break;
         }
-        else {
-            yield return SetArmState(_armLeft, false, "Left arming lever");
-            yield return SetArmState(_armRight, true, "Right arming lever");
-        }
+
+        // Preserve the original proven game interaction: issue exactly ONE arm action for the side that owns
+        // the current fire solution. The game handles the opposite side; FCS must not pre-toggle both levers.
+        yield return FcsRuntimeClock.WaitUntilFocused();
+        arm.OnClickDown();
+
+        // Once a lever action has started, always complete it even if focus changes during this short hold.
+        yield return new WaitForSeconds(0.2f);
+        arm.OnClickUp();
         yield return FcsRuntimeClock.WaitForSeconds(1f);
     }
 
