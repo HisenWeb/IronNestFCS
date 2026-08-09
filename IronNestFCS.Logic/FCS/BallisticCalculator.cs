@@ -30,9 +30,14 @@ public class BallisticCalculator {
     private bool lastClickAccepted;
     private bool lastSettleSucceeded;
     private bool lastCalculationSucceeded;
+    private bool lastReadCalculationSucceeded;
     private float lastSettledElevation = float.NaN;
 
-    public bool LastCalculationSucceeded => lastCalculationSucceeded;
+    // FSC reads GetElevation() while it still owns the shared ballistic-console lock, then may inspect this
+    // compatibility property after releasing the lock. Report the success bit captured by that same elevation
+    // read instead of the calculator's live mutable state, so the next user's input invalidation cannot rewrite
+    // the status paired with the elevation value already handed to the task.
+    public bool LastCalculationSucceeded => lastReadCalculationSucceeded;
 
     public bool TryBind() {
         var controls = GameObject.Find("Balistic Calculator Controls");
@@ -52,6 +57,7 @@ public class BallisticCalculator {
         shellDial = GameObject.Find(".Shell Dial")?.GetComponent<DialInteractable>();
 
         lastCalculationSucceeded = false;
+        lastReadCalculationSucceeded = false;
         lastSettledElevation = float.NaN;
 
         return distanceDial != null
@@ -269,6 +275,7 @@ public class BallisticCalculator {
     }
     
     public float GetElevation() {
+        lastReadCalculationSucceeded = lastCalculationSucceeded;
         return lastCalculationSucceeded ? lastSettledElevation : float.NaN;
     }
 
