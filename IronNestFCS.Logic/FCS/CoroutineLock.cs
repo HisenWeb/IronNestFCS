@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 
 namespace IronNestFCS.Logic.FCS;
@@ -24,6 +25,25 @@ public sealed class CoroutineLock {
             yield return null;
         }
         _held = true;
+    }
+
+    /// <summary>
+    /// 可取消的锁等待。等待期间或真正占锁前如果 shouldCancel 返回 true，就直接退出且不会占锁；
+    /// 只有真正取得锁时才调用 onAcquired，调用方可据此区分“取得”与“取消”。
+    /// </summary>
+    public IEnumerator Acquire(Func<bool> shouldCancel, Action onAcquired) {
+        while (_held) {
+            if (shouldCancel())
+                yield break;
+            yield return null;
+        }
+
+        // 锁刚释放和本协程恢复之间也可能发生 F9 / 任务取消，因此占锁前再检查一次。
+        if (shouldCancel())
+            yield break;
+
+        _held = true;
+        onAcquired();
     }
 
     public void Release() {
