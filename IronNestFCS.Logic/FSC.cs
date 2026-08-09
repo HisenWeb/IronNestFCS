@@ -563,6 +563,58 @@ public class FSC
         }
     }
 
+    /// <summary>
+    /// Unified cleanup for an abnormal task exit. This deliberately does NOT bump the global generation:
+    /// F9/Dispose use ResetFirePriorityTracking() for that. Local failures must invalidate the broken pair
+    /// without killing a healthy task on the other gun. The failed task's candidate/session/order is removed,
+    /// while an already committed or fixed non-provisional winner on the other gun is preserved.
+    /// </summary>
+    private void InvalidateFirePriorityForAbnormalTask(ArtilleryTask task, string reason) {
+        var preservedWinner = _firePriorityWinner != null
+                              && !ReferenceEquals(_firePriorityWinner, task)
+                              && IsActiveTask(_firePriorityWinner)
+                              && (!_firePriorityWinnerProvisional
+                                  || ReferenceEquals(_fireLaneCommittedTask, _firePriorityWinner))
+            ? _firePriorityWinner
+            : null;
+
+        if (_leftFireCandidate != null && ReferenceEquals(_leftFireCandidate.Task, task))
+            _leftFireCandidate = null;
+        if (_rightFireCandidate != null && ReferenceEquals(_rightFireCandidate.Task, task))
+            _rightFireCandidate = null;
+        if (_leftFireCandidate != null && !ReferenceEquals(_leftFireCandidate.Task, LeftTask))
+            _leftFireCandidate = null;
+        if (_rightFireCandidate != null && !ReferenceEquals(_rightFireCandidate.Task, RightTask))
+            _rightFireCandidate = null;
+
+        _firePrioritySession = null;
+        _firePriorityWinner = preservedWinner;
+        _firePrioritySecond = null;
+        _firePriorityWinnerProvisional = false;
+        _firePriorityLeftDetail = "";
+        _firePriorityRightDetail = "";
+        _firePriorityOrderText = "";
+
+        if (preservedWinner != null) {
+            if (!ReferenceEquals(_fireLaneCommittedTask, preservedWinner))
+                _fireLaneCommittedTask = null;
+            _firePriorityStatusText =
+                $"首发仲裁：异常清理（{reason}），保持 T{preservedWinner.targetId} 优先";
+        }
+        else {
+            if (ReferenceEquals(_fireLaneCommittedTask, task)
+                || _fireLaneCommittedTask == null
+                || !IsActiveTask(_fireLaneCommittedTask)) {
+                _fireLaneCommittedTask = null;
+            }
+            _firePriorityStatusText = $"首发仲裁：已清理（{reason}）";
+        }
+
+        MelonLogger.Warning(
+            $"[FCS] Fire arbitration invalidated by T{task.targetId}: {reason}; " +
+            $"preservedWinner={(preservedWinner == null ? "none" : $"T{preservedWinner.targetId}")}");
+    }
+
     private void OnTaskAssignedForFirePriority() {
         if (_fireLaneCommittedTask != null || LeftTask == null || RightTask == null)
             return;
@@ -898,7 +950,7 @@ public class FSC
             res.Canceled = true;
     }
 
-    private void ReleaseFirePriority(ArtilleryTask task) {
+    private void ReleaseFirePriorityAfterSuccessfulShot(ArtilleryTask task) {
         var sessionContainedTask = _firePrioritySession != null
                                    && (ReferenceEquals(_firePrioritySession.LeftTask, task)
                                        || ReferenceEquals(_firePrioritySession.RightTask, task));
@@ -950,20 +1002,14 @@ public class FSC
     }
 
     private void ClearSlotWithoutDispatch(LeftRight leftRight) {
-        ArtilleryTask? releasedTask;
         if (leftRight == LeftRight.Left) {
-            releasedTask = LeftTask;
             LeftGun.ReleaseElevationOverride();
             LeftTask = null;
         }
         else {
-            releasedTask = RightTask;
             RightGun.ReleaseElevationOverride();
             RightTask = null;
         }
-
-        if (releasedTask != null)
-            ReleaseFirePriority(releasedTask);
     }
 
     private void ReleaseSlot(LeftRight leftRight) {
@@ -988,7 +1034,9 @@ public class FSC
         task.failureReason = "";
         turret.Canceled = true;
         ReleaseTurretOnce(turret);
+        InvalidateFirePriorityForAbnormalTask(task, $"任务重分类：{reason}");
         ClearSlotWithoutDispatch(leftRight);
+        EvaluateFirePriorityTrigger();
         PrependTask(task);
         MelonLogger.Warning($"[FCS] {leftRight} T{task.targetId}: state changed, reclassifying instead of failing: {reason}");
     }
@@ -1003,7 +1051,9 @@ public class FSC
         task.failureReason = "";
         turret.Canceled = true;
         ReleaseTurretOnce(turret);
+        InvalidateFirePriorityForAbnormalTask(task, $"改派另一门炮：{reason}");
         ClearSlotWithoutDispatch(leftRight);
+        EvaluateFirePriorityTrigger();
         PrependTask(task);
         MelonLogger.Warning(
             $"[FCS] {leftRight} T{task.targetId}: current preloaded configuration rejected ({reason}); trying another gun");
@@ -1026,9 +1076,12 @@ public class FSC
         task.failureReason = reason;
         turret.Canceled = true;
         ReleaseTurretOnce(turret);
+        InvalidateFirePriorityForAbnormalTask(task, $"任务失败：{reason}");
+        ClearSlotWithoutDispatch(leftRight);
+        EvaluateFirePriorityTrigger();
         MelonLogger.Error($"[FCS] {leftRight} T{task.targetId} failed: {reason}");
         RecordTaskResult(task);
-        ReleaseSlot(leftRight);
+        TryDispatch();
     }
 
     private IEnumerator RunTaskRoutine(LeftRight leftRight, ArtilleryTask task, GunTaskMode mode) {
@@ -1309,14 +1362,17 @@ public class FSC
         }
         finally {
             ReleaseTurretOnce(turret);
-            ReleaseFirePriority(task);
         }
 
         if (!gunSys.LastFireObserved) {
-            AbortTask(leftRight, task, turret,
-                _sceneInteractor.AutoFire ? "automatic fire was not observed" : "manual fire wait timed out");
-            yield break;
-        }
+        AbortTask(leftRight, task, turret,
+            _sceneInteractor.AutoFire ? "automatic fire was not observed" : "manual fire wait timed out");
+        yield break;
+    }
+
+    // A fixed Second is promoted only after a real shot is observed. Timeouts and failures
+    // invalidate the broken arbitration instead of pretending the first shot completed.
+    ReleaseFirePriorityAfterSuccessfulShot(task);
 
         task.progress = Progress.BackToIdle;
         yield return gunSys.WaitBackToIdle();
@@ -1399,13 +1455,31 @@ public class FSC
                 continue;
             }
 
-            yield return Turret.SetRotation(task.angel, TurretRotationTimeoutSeconds);
+            yield return Turret.SetRotation(
+                task.angel,
+                TurretRotationTimeoutSeconds,
+                () => res.Canceled
+                      || res.Generation != _firePriorityGeneration
+                      || !IsActiveTask(task)
+                      || !ReferenceEquals(_firePriorityWinner, task));
             yield return FcsRuntimeClock.WaitUntilFocused();
+
+            if (res.Canceled
+                || res.Generation != _firePriorityGeneration
+                || !IsActiveTask(task)
+                || !ReferenceEquals(_firePriorityWinner, task)) {
+                ReleaseTurretOnce(res);
+                if (res.Canceled || res.Generation != _firePriorityGeneration || !IsActiveTask(task))
+                    yield break;
+                yield return null;
+                continue;
+            }
+
             if (!Turret.LastRotationSucceeded) {
                 res.Failed = true;
                 res.FailureReason = $"turret could not reach {task.angel:F1}°";
                 ReleaseTurretOnce(res);
-                ReleaseFirePriority(task);
+                // The owning task routine will observe res.Failed and run the unified abnormal cleanup.
                 yield break;
             }
 
