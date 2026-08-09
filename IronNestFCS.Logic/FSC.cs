@@ -68,7 +68,13 @@ public class FSC
     public string FirePriorityLeftDetail => _firePriorityLeftDetail;
     public string FirePriorityRightDetail => _firePriorityRightDetail;
 
-    private readonly CoroutineLock _deskLock = new();
+    // These are physically distinct shared consoles. A single global "desk" mutex caused cascading stalls:
+    // e.g. Right buying a shell held the same lock that Left needed for the ballistic calculator, and a slow
+    // requisition interaction could even delay a gun that was already ready to enter the trigger console.
+    // Serialize only users of the same physical resource; per-gun reload/aim work remains independent.
+    private readonly CoroutineLock _ballisticConsoleLock = new();
+    private readonly CoroutineLock _requisitionConsoleLock = new();
+    private readonly CoroutineLock _triggerConsoleLock = new();
     private readonly CoroutineLock _turretLock = new();
     private readonly List<object> _runningCoroutines = new();
 
@@ -128,7 +134,9 @@ public class FSC
     {
         _sceneInteractor = new FcsSceneInteractor(this);
         _harmony = new HarmonyInstance(HarmonyId);
-        _deskLock.Reset();
+        _ballisticConsoleLock.Reset();
+        _requisitionConsoleLock.Reset();
+        _triggerConsoleLock.Reset();
         _turretLock.Reset();
         FcsRuntimeClock.Reset();
         ResetPhysicalRecoveryTracking();
@@ -214,12 +222,12 @@ public class FSC
     /// </summary>
     private IEnumerator ResetSharedFireControlsAfterBind() {
         yield return FcsRuntimeClock.WaitUntilFocused();
-        yield return _deskLock.Acquire();
+        yield return _triggerConsoleLock.Acquire();
         try {
             yield return TriggerConsole.PrepareForNewFireSolution(LeftRight.Left);
         }
         finally {
-            _deskLock.Release();
+            _triggerConsoleLock.Release();
         }
     }
 
@@ -232,13 +240,13 @@ public class FSC
             if (charges >= PowderReplenishThreshold) continue;
             MelonLogger.Msg(
                 $"[FCS] AutoReplenish: powder charges {charges} < {PowderReplenishThreshold}, buying one");
-            yield return _deskLock.Acquire();
+            yield return _requisitionConsoleLock.Acquire();
             try {
                 yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return _purchaseDeck.BuyPowders();
             }
             finally {
-                _deskLock.Release();
+                _requisitionConsoleLock.Release();
             }
         }
     }
@@ -1255,10 +1263,14 @@ public class FSC
         bool viable = true;
         string failureReason = "";
 
-        yield return _deskLock.Acquire();
+        // The ballistic calculator is shared, but requisition and trigger consoles are physically independent.
+        // Hold only the calculator lock here so another gun can use Requisition while this one solves, and vice versa.
+        task.progress = Progress.Calculating;
+        MelonLogger.Msg($"[FCS Resource] {leftRight} T{task.targetId}: waiting ballistic console");
+        yield return _ballisticConsoleLock.Acquire();
         try {
+            MelonLogger.Msg($"[FCS Resource] {leftRight} T{task.targetId}: acquired ballistic console");
             yield return FcsRuntimeClock.WaitUntilFocused();
-            task.progress = Progress.Calculating;
             yield return BallisticCalculator.SetDistance(task.distance);
             yield return FcsRuntimeClock.WaitUntilFocused();
             yield return BallisticCalculator.SetDirection(task.angel);
@@ -1271,15 +1283,39 @@ public class FSC
             yield return FcsRuntimeClock.WaitUntilFocused();
             elevation = BallisticCalculator.GetElevation();
             task.elevation = elevation;
+        }
+        finally {
+            _ballisticConsoleLock.Release();
+            MelonLogger.Msg($"[FCS Resource] {leftRight} T{task.targetId}: released ballistic console");
+        }
 
+        if (!BallisticCalculator.LastCalculationSucceeded
+            || float.IsNaN(elevation)
+            || float.IsInfinity(elevation)) {
+            viable = false;
+            failureReason =
+                $"ballistic calculation failed for {task.bulletType.DisplayName()} C{powderCount} at {task.distance:F2}km";
+        }
+        else {
             var stateForRange = GunPhysicalState.Read(sideName);
             if (!stateForRange.IsElevationWithinPhysicalRange(elevation)) {
                 viable = false;
                 failureReason =
                     $"{task.bulletType.DisplayName()} C{powderCount} has no usable elevation for {task.distance:F2}km (E={elevation:F2})";
             }
+        }
 
-            if (viable && mode != GunTaskMode.ReuseLoadedRound) {
+        // Requisition is another shared console. It is serialized independently from ballistic/trigger work.
+        // Therefore a slow BuyShell/BuyPowders path can never freeze the other gun's calculator or fire controls.
+        if (viable && mode != GunTaskMode.ReuseLoadedRound) {
+            if (mode == GunTaskMode.FreshLoad)
+                task.progress = Progress.SelectingBullet;
+
+            MelonLogger.Msg($"[FCS Resource] {leftRight} T{task.targetId}: waiting requisition console");
+            yield return _requisitionConsoleLock.Acquire();
+            try {
+                MelonLogger.Msg($"[FCS Resource] {leftRight} T{task.targetId}: acquired requisition console");
+
                 var powderPurchaseAttempts = 0;
                 while (gunSys.RemainingCharges() < powderCount && powderPurchaseAttempts < 10) {
                     yield return FcsRuntimeClock.WaitUntilFocused();
@@ -1290,34 +1326,34 @@ public class FSC
                     viable = false;
                     failureReason = $"powder unavailable: need {powderCount}, have {gunSys.RemainingCharges()}";
                 }
-            }
 
-            if (viable && mode == GunTaskMode.FreshLoad) {
-                task.progress = Progress.SelectingBullet;
-                if (!gunSys.HaveBulletInCylinder(task.bulletType)) {
-                    if (!gunSys.HaveEmptyShellInCylinder()) {
-                        viable = false;
-                        failureReason = $"no {task.bulletType} shell and cylinder has no empty slot";
-                    }
-                    else {
-                        yield return FcsRuntimeClock.WaitUntilFocused();
-                        yield return _purchaseDeck.BuyShell(task.bulletType, leftRight);
-                        yield return FcsRuntimeClock.WaitUntilFocused();
-                        if (!gunSys.HaveBulletInCylinder(task.bulletType)) {
+                if (viable && mode == GunTaskMode.FreshLoad) {
+                    if (!gunSys.HaveBulletInCylinder(task.bulletType)) {
+                        if (!gunSys.HaveEmptyShellInCylinder()) {
                             viable = false;
-                            failureReason = $"purchase of {task.bulletType} did not reach the cylinder";
+                            failureReason = $"no {task.bulletType} shell and cylinder has no empty slot";
+                        }
+                        else {
+                            yield return FcsRuntimeClock.WaitUntilFocused();
+                            yield return _purchaseDeck.BuyShell(task.bulletType, leftRight);
+                            yield return FcsRuntimeClock.WaitUntilFocused();
+                            if (!gunSys.HaveBulletInCylinder(task.bulletType)) {
+                                viable = false;
+                                failureReason = $"purchase of {task.bulletType} did not reach the cylinder";
+                            }
                         }
                     }
                 }
             }
-        }
-        finally {
-            _deskLock.Release();
+            finally {
+                _requisitionConsoleLock.Release();
+                MelonLogger.Msg($"[FCS Resource] {leftRight} T{task.targetId}: released requisition console");
+            }
         }
 
         if (taskGeneration != _firePriorityGeneration || !ReferenceEquals(GetActiveTask(leftRight), task)) {
             MelonLogger.Warning(
-                $"[FCS] {leftRight} T{task.targetId}: task generation changed during ballistic solve; discarding stale routine");
+                $"[FCS] {leftRight} T{task.targetId}: task generation changed during ballistic/requisition preparation; discarding stale routine");
             yield break;
         }
 
@@ -1528,7 +1564,9 @@ public class FSC
         }
 
         try {
-            yield return _deskLock.Acquire();
+            // Review switches / arming / trigger are one shared console, but they must not be serialized against
+            // ballistic or requisition work happening on the other gun.
+            yield return _triggerConsoleLock.Acquire();
             try {
                 yield return FcsRuntimeClock.WaitUntilFocused();
                 yield return TriggerConsole.PrepareForNewFireSolution(leftRight);
@@ -1550,7 +1588,7 @@ public class FSC
                 }
             }
             finally {
-                _deskLock.Release();
+                _triggerConsoleLock.Release();
             }
 
             var fireTimeout = _sceneInteractor.AutoFire
