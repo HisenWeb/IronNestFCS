@@ -37,6 +37,9 @@ public class FcsWindow
             lineCount += fcs.LeftTask == null ? 1 : 2;
             lineCount += fcs.RightTask == null ? 1 : 2;
             lineCount += 1;
+            if (!string.IsNullOrEmpty(fcs.FirePriorityLeftDetail)) lineCount += 1;
+            if (!string.IsNullOrEmpty(fcs.FirePriorityRightDetail)) lineCount += 1;
+            lineCount += 1;
             lineCount += 1 + queue.Count;
             lineCount += 2;
 
@@ -72,6 +75,12 @@ public class FcsWindow
 
         DrawGun("左", "Left", fcs.LeftTask, Label);
         DrawGun("右", "Right", fcs.RightTask, Label);
+
+        Label(fcs.FirePriorityStatusText);
+        if (!string.IsNullOrEmpty(fcs.FirePriorityLeftDetail))
+            Label($"  {fcs.FirePriorityLeftDetail}");
+        if (!string.IsNullOrEmpty(fcs.FirePriorityRightDetail))
+            Label($"  {fcs.FirePriorityRightDetail}");
 
         Label($"自动开火：{OnOff(fcs.AutoFireEnabled)}    最大装药：{OnOff(fcs.MaxChargeEnabled)}");
 
