@@ -176,7 +176,8 @@ public class FSC
 
     public void EnqueueTask(ArtilleryTask task) {
         task.progress = Progress.Pending;
-        task.startedAt = Time.realtimeSinceStartup;
+        // Use scaled game time so focus-loss pauses are not counted as task runtime.
+        task.startedAt = Time.time;
         task.completedAt = 0f;
         task.failureReason = "";
         task.chargeCount = 0;
@@ -217,7 +218,7 @@ public class FSC
     }
 
     private void RecordTaskResult(ArtilleryTask task) {
-        task.completedAt = Time.realtimeSinceStartup;
+        task.completedAt = Time.time;
         CompletedTaskCount++;
         if (task.progress == Progress.Finished) SuccessfulTaskCount++;
         else if (task.progress == Progress.Failed) FailedTaskCount++;
@@ -326,8 +327,8 @@ public class FSC
         }
 
         task.progress = Progress.WaitLoading;
-        var loadingDeadline = Time.realtimeSinceStartup + LoadingTimeoutSeconds;
-        while (!gunSys.CanFire() && Time.realtimeSinceStartup < loadingDeadline) {
+        var loadingDeadline = Time.time + LoadingTimeoutSeconds;
+        while (!gunSys.CanFire() && Time.time < loadingDeadline) {
             yield return new WaitForSeconds(0.5f);
         }
         if (!gunSys.CanFire()) {
@@ -346,8 +347,8 @@ public class FSC
         var turretWaitTimeout = _sceneInteractor.AutoFire
             ? AutoTurretWaitTimeoutSeconds
             : ManualTurretWaitTimeoutSeconds;
-        var turretDeadline = Time.realtimeSinceStartup + turretWaitTimeout;
-        while (!turret.Ready && !turret.Failed && Time.realtimeSinceStartup < turretDeadline) {
+        var turretDeadline = Time.time + turretWaitTimeout;
+        while (!turret.Ready && !turret.Failed && Time.time < turretDeadline) {
             yield return null;
         }
         if (turret.Failed) {
