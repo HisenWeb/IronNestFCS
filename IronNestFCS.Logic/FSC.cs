@@ -31,7 +31,6 @@ public class FSC
     private const float AutoFireTimeoutSeconds = 25f;
     private const float ManualFireTimeoutSeconds = 300f;
     private const float PhysicalRecoveryTimeoutSeconds = 30f;
-    private const float FirePrioritySolveBufferSeconds = 2.7f;
     private const float FirePriorityScoreTieTolerance = 0.05f;
     private const int RecentTaskLimit = 20;
 
@@ -59,6 +58,9 @@ public class FSC
     public int CompletedTaskCount { get; private set; }
     public int SuccessfulTaskCount { get; private set; }
     public int FailedTaskCount { get; private set; }
+    public string FirePriorityStatusText => _firePriorityStatusText;
+    public string FirePriorityLeftDetail => _firePriorityLeftDetail;
+    public string FirePriorityRightDetail => _firePriorityRightDetail;
 
     private readonly CoroutineLock _deskLock = new();
     private readonly CoroutineLock _turretLock = new();
@@ -71,10 +73,15 @@ public class FSC
 
     private FirePriorityCandidate? _leftFireCandidate;
     private FirePriorityCandidate? _rightFireCandidate;
+    private FirePrioritySession? _firePrioritySession;
     private ArtilleryTask? _firePriorityWinner;
     private ArtilleryTask? _firePrioritySecond;
-    private bool _firePriorityArbitrationRunning;
-    private int _firePriorityArbitrationVersion;
+    private ArtilleryTask? _fireLaneCommittedTask;
+    private int _firePriorityGeneration;
+    private string _firePriorityStatusText = "首发仲裁：未触发";
+    private string _firePriorityLeftDetail = "";
+    private string _firePriorityRightDetail = "";
+    private string _firePriorityOrderText = "";
 
     private enum GunTaskMode {
         FreshLoad,
@@ -175,12 +182,17 @@ public class FSC
     }
 
     private void ResetFirePriorityTracking() {
+        _firePriorityGeneration++;
         _leftFireCandidate = null;
         _rightFireCandidate = null;
+        _firePrioritySession = null;
         _firePriorityWinner = null;
         _firePrioritySecond = null;
-        _firePriorityArbitrationRunning = false;
-        _firePriorityArbitrationVersion++;
+        _fireLaneCommittedTask = null;
+        _firePriorityStatusText = "首发仲裁：未触发（已重置）";
+        _firePriorityLeftDetail = "";
+        _firePriorityRightDetail = "";
+        _firePriorityOrderText = "";
     }
 
     /// <summary>
@@ -253,6 +265,7 @@ public class FSC
                 _taskQueue.Dequeue();
                 if (slot == LeftRight.Left) LeftTask = task;
                 else RightTask = task;
+                OnTaskAssignedForFirePriority();
                 StartTaskRoutine(slot, task, mode);
                 continue;
             }
@@ -411,12 +424,6 @@ public class FSC
         return ReferenceEquals(LeftTask, task) || ReferenceEquals(RightTask, task);
     }
 
-    private FirePriorityCandidate? GetCurrentCandidate(LeftRight side) {
-        var candidate = side == LeftRight.Left ? _leftFireCandidate : _rightFireCandidate;
-        var active = side == LeftRight.Left ? LeftTask : RightTask;
-        return candidate != null && ReferenceEquals(candidate.Task, active) ? candidate : null;
-    }
-
     private ArtilleryTask? GetActiveTask(LeftRight side) {
         return side == LeftRight.Left ? LeftTask : RightTask;
     }
@@ -425,19 +432,46 @@ public class FSC
         return side == LeftRight.Left ? LeftRight.Right : LeftRight.Left;
     }
 
+    private bool TryGetTaskSide(ArtilleryTask task, out LeftRight side) {
+        if (ReferenceEquals(LeftTask, task)) {
+            side = LeftRight.Left;
+            return true;
+        }
+        if (ReferenceEquals(RightTask, task)) {
+            side = LeftRight.Right;
+            return true;
+        }
+        side = LeftRight.Left;
+        return false;
+    }
+
+    private FirePriorityCandidate? GetCurrentCandidate(LeftRight side) {
+        var candidate = side == LeftRight.Left ? _leftFireCandidate : _rightFireCandidate;
+        var active = GetActiveTask(side);
+        return candidate != null
+               && candidate.Generation == _firePriorityGeneration
+               && ReferenceEquals(candidate.Task, active)
+            ? candidate
+            : null;
+    }
+
+    private FirePriorityCandidate? GetCandidateForTask(ArtilleryTask task) {
+        if (!TryGetTaskSide(task, out var side))
+            return null;
+        return GetCurrentCandidate(side);
+    }
+
     private FirePriorityGunPhase GetFirePriorityGunPhase(LeftRight side, ArtilleryTask task) {
         if (!ReferenceEquals(GetActiveTask(side), task))
             return FirePriorityGunPhase.Unavailable;
 
-        if (task.progress == Progress.WaitingForFire)
+        if (ReferenceEquals(_fireLaneCommittedTask, task))
             return FirePriorityGunPhase.FireCommitted;
 
         if (task.progress == Progress.BackToIdle)
             return FirePriorityGunPhase.PostShotRecovery;
 
-        if (task.progress == Progress.Finished
-            || task.progress == Progress.Failed
-            || task.progress == Progress.Pending)
+        if (task.progress == Progress.Finished || task.progress == Progress.Failed)
             return FirePriorityGunPhase.Unavailable;
 
         var physical = GunPhysicalState.Read(side == LeftRight.Left ? "Left" : "Right");
@@ -448,235 +482,355 @@ public class FSC
             || physical.Kind == GunPhysicalStateKind.Unknown)
             return FirePriorityGunPhase.Unavailable;
 
-        // EmptyReady / ShellLoaded / LoadedReady and in-progress reload Recovering all belong to the same
-        // arbitration preparation band. They may be at different exact reload substates; what matters is that
-        // neither gun has crossed into the shared fire path or the post-shot return-to-zero path.
+        // An assigned Pending task, calculation/loading/aiming, and WaitingForFire all remain in the same
+        // pre-commit band. WaitingForFire only means local preparation is complete; the order is not committed
+        // until this task actually acquires the shared turret lock.
         return FirePriorityGunPhase.Preparation;
     }
 
     private static string PhaseName(FirePriorityGunPhase phase) {
         return phase switch {
-            FirePriorityGunPhase.Preparation => "preparation",
-            FirePriorityGunPhase.FireCommitted => "fire-committed",
-            FirePriorityGunPhase.PostShotRecovery => "post-shot-recovery",
-            _ => "unavailable",
+            FirePriorityGunPhase.Preparation => "准备态",
+            FirePriorityGunPhase.FireCommitted => "已取得共享击发权",
+            FirePriorityGunPhase.PostShotRecovery => "击发后复位",
+            _ => "不可用",
         };
     }
 
-    private bool CanArbitrateTogether(FirePriorityCandidate left, FirePriorityCandidate right) {
-        if (!ReferenceEquals(LeftTask, left.Task) || !ReferenceEquals(RightTask, right.Task))
+    private bool CanArbitrateCurrentTasks() {
+        if (LeftTask == null || RightTask == null || _fireLaneCommittedTask != null)
             return false;
 
-        return GetFirePriorityGunPhase(LeftRight.Left, left.Task) == FirePriorityGunPhase.Preparation
-               && GetFirePriorityGunPhase(LeftRight.Right, right.Task) == FirePriorityGunPhase.Preparation;
+        return GetFirePriorityGunPhase(LeftRight.Left, LeftTask) == FirePriorityGunPhase.Preparation
+               && GetFirePriorityGunPhase(LeftRight.Right, RightTask) == FirePriorityGunPhase.Preparation;
     }
 
-    private void CancelFirePriorityArbitration() {
-        _firePriorityArbitrationVersion++;
-        _firePriorityArbitrationRunning = false;
+    private bool SessionMatchesCurrentTasks(FirePrioritySession session) {
+        return session.Generation == _firePriorityGeneration
+               && ReferenceEquals(session.LeftTask, LeftTask)
+               && ReferenceEquals(session.RightTask, RightTask);
     }
 
-    private void RegisterBallisticSolution(LeftRight side, ArtilleryTask task) {
-        var candidate = new FirePriorityCandidate(side, task, FcsRuntimeClock.Now);
-        if (side == LeftRight.Left) _leftFireCandidate = candidate;
-        else _rightFireCandidate = candidate;
-
-        if (ReferenceEquals(_firePriorityWinner, task) || ReferenceEquals(_firePrioritySecond, task))
-            return;
-
-        // Once a previous task already owns the fire lane, do not reopen arbitration. A newly solved task can
-        // only become the committed second task behind that owner. This preserves the already-loaded/unfired gun
-        // over any task that arrives later from the queue.
-        if (_firePriorityWinner != null) {
-            if (_firePrioritySecond == null && !ReferenceEquals(_firePriorityWinner, task)) {
-                _firePrioritySecond = task;
-                MelonLogger.Msg($"[FCS] {side} T{task.targetId}: ballistic solution ready; queued behind committed fire lane owner");
-            }
-            return;
-        }
-
-        TryStartFirePriorityArbitration();
+    private void ClearArbitrationDisplayForNewSession() {
+        _firePriorityLeftDetail = "";
+        _firePriorityRightDetail = "";
+        _firePriorityOrderText = "";
     }
 
-    private void TryStartFirePriorityArbitration() {
-        if (_firePriorityWinner != null || _firePriorityArbitrationRunning)
+    private void UpdateArbitrationWaitingStatus() {
+        if (_firePrioritySession == null)
             return;
 
         var left = GetCurrentCandidate(LeftRight.Left);
         var right = GetCurrentCandidate(LeftRight.Right);
-        if (left == null && right == null)
+        if (left == null && right != null)
+            _firePriorityStatusText = "首发仲裁：等待左炮解算";
+        else if (left != null && right == null)
+            _firePriorityStatusText = "首发仲裁：等待右炮解算";
+        else
+            _firePriorityStatusText = "首发仲裁：等待双炮解算";
+    }
+
+    private void OpenFirePrioritySession(string reason) {
+        if (LeftTask == null || RightTask == null || !CanArbitrateCurrentTasks())
             return;
 
-        if (left != null && right != null) {
-            if (CanArbitrateTogether(left, right)) {
-                ResolveFirePriorityPair(left, right);
+        _firePrioritySession = new FirePrioritySession(_firePriorityGeneration, LeftTask, RightTask);
+        _firePriorityWinner = null;
+        _firePrioritySecond = null;
+        ClearArbitrationDisplayForNewSession();
+        UpdateArbitrationWaitingStatus();
+        MelonLogger.Msg(
+            $"[FCS] Fire arbitration session gen={_firePriorityGeneration}: Left=T{LeftTask.targetId}, " +
+            $"Right=T{RightTask.targetId}; {reason}");
+        TryCompleteFirePrioritySession();
+    }
+
+    private void CancelFirePrioritySession(string reason, bool updateUi = true) {
+        if (_firePrioritySession == null)
+            return;
+
+        MelonLogger.Msg($"[FCS] Fire arbitration session canceled: {reason}");
+        _firePrioritySession = null;
+        if (updateUi) {
+            _firePriorityStatusText = $"首发仲裁：已取消（{reason}）";
+            _firePriorityLeftDetail = "";
+            _firePriorityRightDetail = "";
+            _firePriorityOrderText = "";
+        }
+    }
+
+    private void OnTaskAssignedForFirePriority() {
+        if (_fireLaneCommittedTask != null || LeftTask == null || RightTask == null)
+            return;
+
+        // A previously single task may already have been provisionally selected. If the other gun receives a
+        // task before the shared turret lock is actually acquired, reopen arbitration immediately. This handles
+        // human click delay and queued dispatch without any artificial time window.
+        if (_firePriorityWinner != null
+            && _firePrioritySecond == null
+            && GetCandidateForTask(_firePriorityWinner) != null
+            && CanArbitrateCurrentTasks()) {
+            var previousWinner = _firePriorityWinner;
+            _firePriorityWinner = null;
+            MelonLogger.Msg(
+                $"[FCS] T{previousWinner.targetId}: second synchronized task arrived before fire-lane commit; reopening arbitration");
+            OpenFirePrioritySession("second synchronized task assigned before fire-lane commit");
+            return;
+        }
+
+        if (_firePriorityWinner == null && _firePrioritySession == null) {
+            var left = GetCurrentCandidate(LeftRight.Left);
+            var right = GetCurrentCandidate(LeftRight.Right);
+            if ((left != null || right != null) && CanArbitrateCurrentTasks())
+                OpenFirePrioritySession("task assignment completed a synchronized pair");
+        }
+    }
+
+    private bool RegisterBallisticSolution(LeftRight side, ArtilleryTask task, int generation) {
+        if (generation != _firePriorityGeneration || !ReferenceEquals(GetActiveTask(side), task)) {
+            MelonLogger.Warning(
+                $"[FCS] {side} T{task.targetId}: discarded stale ballistic solution " +
+                $"(solveGen={generation}, currentGen={_firePriorityGeneration}, active={ReferenceEquals(GetActiveTask(side), task)})");
+            return false;
+        }
+
+        var candidate = new FirePriorityCandidate(side, task, FcsRuntimeClock.Now, generation);
+        if (side == LeftRight.Left) _leftFireCandidate = candidate;
+        else _rightFireCandidate = candidate;
+
+        MelonLogger.Msg($"[FCS] {side} T{task.targetId}: ballistic solution registered for arbitration gen={generation}");
+
+        if (ReferenceEquals(_firePriorityWinner, task) || ReferenceEquals(_firePrioritySecond, task))
+            return true;
+
+        // An already committed/selected shot is never preempted. A later solution can only become the fixed
+        // second shot behind it.
+        if (_firePriorityWinner != null) {
+            if (_firePrioritySecond == null && !ReferenceEquals(_firePriorityWinner, task)) {
+                _firePrioritySecond = task;
+                MelonLogger.Msg($"[FCS] {side} T{task.targetId}: queued behind existing fire-lane owner");
+            }
+            return true;
+        }
+
+        if (_firePrioritySession != null) {
+            if (!SessionMatchesCurrentTasks(_firePrioritySession)) {
+                CancelFirePrioritySession("任务已变化", false);
             }
             else {
-                CommitOriginalFireOrder(left, right, "both solutions exist but gun phases are no longer synchronized for arbitration");
+                TryCompleteFirePrioritySession();
+                return true;
             }
-            return;
         }
 
-        var only = left ?? right!;
-        var otherSide = OtherSide(only.Side);
-        var otherTask = GetActiveTask(otherSide);
-        if (otherTask == null) {
-            SetFirePriority(only.Task, null,
-                $"{only.Side} T{only.Task.targetId} is the only active solved task");
-            return;
-        }
-
-        var ownPhase = GetFirePriorityGunPhase(only.Side, only.Task);
-        var otherPhase = GetFirePriorityGunPhase(otherSide, otherTask);
-        if (ownPhase != FirePriorityGunPhase.Preparation
-            || otherPhase != FirePriorityGunPhase.Preparation) {
-            SetFirePriority(
-                only.Task,
-                otherTask,
-                $"state gate skipped arbitration: {only.Side}={PhaseName(ownPhase)}, {otherSide}={PhaseName(otherPhase)}");
-            return;
-        }
-
-        _firePriorityArbitrationRunning = true;
-        var version = ++_firePriorityArbitrationVersion;
-        MelonLogger.Msg(
-            $"[FCS] {only.Side} T{only.Task.targetId}: synchronized preparation detected; " +
-            $"waiting up to {FirePrioritySolveBufferSeconds:F1}s for the other gun's ballistic solution");
-        _runningCoroutines.Add(MelonCoroutines.Start(FirePrioritySolveBuffer(only, version)));
+        EvaluateFirePriorityTrigger();
+        return true;
     }
 
-    private IEnumerator FirePrioritySolveBuffer(FirePriorityCandidate first, int version) {
-        var deadline = FcsRuntimeClock.Now + FirePrioritySolveBufferSeconds;
-        try {
-            while (version == _firePriorityArbitrationVersion
-                   && _firePriorityWinner == null
-                   && IsActiveTask(first.Task)) {
-                yield return FcsRuntimeClock.WaitUntilFocused();
+    private void EvaluateFirePriorityTrigger() {
+        if (_firePriorityWinner != null)
+            return;
 
-                var left = GetCurrentCandidate(LeftRight.Left);
-                var right = GetCurrentCandidate(LeftRight.Right);
-                if (left != null && right != null) {
-                    if (CanArbitrateTogether(left, right)) {
-                        ResolveFirePriorityPair(left, right);
-                    }
-                    else {
-                        CommitOriginalFireOrder(left, right,
-                            "both solutions arrived after the synchronized preparation gate had closed");
-                    }
-                    yield break;
-                }
-
-                var otherSide = OtherSide(first.Side);
-                var otherTask = GetActiveTask(otherSide);
-                if (otherTask == null) {
-                    SetFirePriority(first.Task, null,
-                        $"{first.Side} T{first.Task.targetId} lost its competing active task during solve buffer");
-                    yield break;
-                }
-
-                var firstPhase = GetFirePriorityGunPhase(first.Side, first.Task);
-                var otherPhase = GetFirePriorityGunPhase(otherSide, otherTask);
-                if (firstPhase != FirePriorityGunPhase.Preparation
-                    || otherPhase != FirePriorityGunPhase.Preparation) {
-                    SetFirePriority(
-                        first.Task,
-                        otherTask,
-                        $"state gate closed during solve buffer: {first.Side}={PhaseName(firstPhase)}, " +
-                        $"{otherSide}={PhaseName(otherPhase)}");
-                    yield break;
-                }
-
-                if (FcsRuntimeClock.Now >= deadline)
-                    break;
-
-                yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+        if (_fireLaneCommittedTask != null) {
+            if (IsActiveTask(_fireLaneCommittedTask)) {
+                _firePriorityWinner = _fireLaneCommittedTask;
+                var other = ReferenceEquals(LeftTask, _fireLaneCommittedTask) ? RightTask : LeftTask;
+                if (other != null && GetCandidateForTask(other) != null)
+                    _firePrioritySecond = other;
+                _firePriorityStatusText = $"首发仲裁：顺序锁定 T{_fireLaneCommittedTask.targetId}";
             }
-
-            if (version != _firePriorityArbitrationVersion
-                || _firePriorityWinner != null
-                || !IsActiveTask(first.Task))
-                yield break;
-
-            var finalLeft = GetCurrentCandidate(LeftRight.Left);
-            var finalRight = GetCurrentCandidate(LeftRight.Right);
-            if (finalLeft != null && finalRight != null && CanArbitrateTogether(finalLeft, finalRight)) {
-                ResolveFirePriorityPair(finalLeft, finalRight);
-                yield break;
-            }
-
-            var finalOtherTask = GetActiveTask(OtherSide(first.Side));
-            SetFirePriority(
-                first.Task,
-                finalOtherTask,
-                $"{first.Side} T{first.Task.targetId} kept original first-solved order after " +
-                $"{FirePrioritySolveBufferSeconds:F1}s synchronized solve buffer expired");
+            return;
         }
-        finally {
-            if (version == _firePriorityArbitrationVersion)
-                _firePriorityArbitrationRunning = false;
+
+        var left = GetCurrentCandidate(LeftRight.Left);
+        var right = GetCurrentCandidate(LeftRight.Right);
+
+        if (LeftTask == null && RightTask == null)
+            return;
+
+        if (LeftTask == null) {
+            if (right != null)
+                SetSingleFirePriority(right.Task, "仅右炮有当前任务");
+            return;
         }
+        if (RightTask == null) {
+            if (left != null)
+                SetSingleFirePriority(left.Task, "仅左炮有当前任务");
+            return;
+        }
+
+        if (CanArbitrateCurrentTasks()) {
+            if (left != null || right != null)
+                OpenFirePrioritySession("双炮处于同步准备态");
+            return;
+        }
+
+        ResolveStateGateFallback(left, right);
     }
 
-    private void CommitOriginalFireOrder(
-        FirePriorityCandidate left,
-        FirePriorityCandidate right,
+    private void TryCompleteFirePrioritySession() {
+        var session = _firePrioritySession;
+        if (session == null)
+            return;
+
+        if (!SessionMatchesCurrentTasks(session)) {
+            CancelFirePrioritySession("任务已变化");
+            EvaluateFirePriorityTrigger();
+            return;
+        }
+
+        if (!CanArbitrateCurrentTasks()) {
+            CancelFirePrioritySession("双炮状态不再同步", false);
+            ResolveStateGateFallback(GetCurrentCandidate(LeftRight.Left), GetCurrentCandidate(LeftRight.Right));
+            return;
+        }
+
+        var left = GetCurrentCandidate(LeftRight.Left);
+        var right = GetCurrentCandidate(LeftRight.Right);
+        if (left == null || right == null) {
+            UpdateArbitrationWaitingStatus();
+            return;
+        }
+
+        ResolveFirePriorityPair(left, right);
+    }
+
+    private void ResolveStateGateFallback(FirePriorityCandidate? left, FirePriorityCandidate? right) {
+        var leftPhase = LeftTask == null
+            ? FirePriorityGunPhase.Unavailable
+            : GetFirePriorityGunPhase(LeftRight.Left, LeftTask);
+        var rightPhase = RightTask == null
+            ? FirePriorityGunPhase.Unavailable
+            : GetFirePriorityGunPhase(LeftRight.Right, RightTask);
+
+        if (leftPhase == FirePriorityGunPhase.FireCommitted && LeftTask != null) {
+            _firePriorityWinner = LeftTask;
+            if (right != null && rightPhase == FirePriorityGunPhase.Preparation)
+                _firePrioritySecond = right.Task;
+            _firePriorityStatusText = $"首发仲裁：顺序锁定 T{LeftTask.targetId}";
+            return;
+        }
+        if (rightPhase == FirePriorityGunPhase.FireCommitted && RightTask != null) {
+            _firePriorityWinner = RightTask;
+            if (left != null && leftPhase == FirePriorityGunPhase.Preparation)
+                _firePrioritySecond = left.Task;
+            _firePriorityStatusText = $"首发仲裁：顺序锁定 T{RightTask.targetId}";
+            return;
+        }
+
+        var leftEligible = left != null && leftPhase == FirePriorityGunPhase.Preparation;
+        var rightEligible = right != null && rightPhase == FirePriorityGunPhase.Preparation;
+
+        if (leftEligible && !rightEligible) {
+            SetSingleFirePriority(left!.Task, $"右炮为{PhaseName(rightPhase)}");
+            return;
+        }
+        if (rightEligible && !leftEligible) {
+            SetSingleFirePriority(right!.Task, $"左炮为{PhaseName(leftPhase)}");
+            return;
+        }
+
+        if (leftEligible && rightEligible) {
+            OpenFirePrioritySession("状态门恢复为同步准备态");
+            return;
+        }
+
+        _firePriorityStatusText =
+            $"首发仲裁：未触发（左炮{PhaseName(leftPhase)} / 右炮{PhaseName(rightPhase)}）";
+        _firePriorityLeftDetail = "";
+        _firePriorityRightDetail = "";
+    }
+
+    private void SetSingleFirePriority(ArtilleryTask task, string reason) {
+        _firePrioritySession = null;
+        _firePriorityWinner = task;
+        _firePrioritySecond = null;
+        _firePriorityOrderText = "";
+        _firePriorityLeftDetail = "";
+        _firePriorityRightDetail = "";
+        _firePriorityStatusText = $"首发仲裁：未触发（{reason}，T{task.targetId}优先）";
+        MelonLogger.Msg($"[FCS] Fire priority: T{task.targetId} first; {reason}");
+    }
+
+    private void SetPairFirePriority(
+        FirePriorityCandidate winner,
+        FirePriorityCandidate loser,
         string reason) {
-        var winner = FirstByOriginalOrder(left, right);
-        var loser = ReferenceEquals(winner, left) ? right : left;
-        SetFirePriority(winner.Task, loser.Task, reason + "; keeping original solved order");
+        _firePrioritySession = null;
+        _firePriorityWinner = winner.Task;
+        _firePrioritySecond = loser.Task;
+        _firePriorityOrderText = $"T{winner.Task.targetId} → T{loser.Task.targetId}";
+        _firePriorityStatusText = $"首发仲裁：已完成 {_firePriorityOrderText}";
+        MelonLogger.Msg(
+            $"[FCS] Fire priority: T{winner.Task.targetId} first, second=T{loser.Task.targetId}; {reason}");
     }
 
     private void ResolveFirePriorityPair(FirePriorityCandidate left, FirePriorityCandidate right) {
+        if (!CanArbitrateCurrentTasks()) {
+            ResolveStateGateFallback(left, right);
+            return;
+        }
+
+        var turretController = GameObject.Find("TurretSystem")?.GetComponent<TurretController>();
+        if (turretController == null) {
+            var winnerFallback = FirstByOriginalOrder(left, right);
+            var loserFallback = ReferenceEquals(winnerFallback, left) ? right : left;
+            _firePriorityLeftDetail = $"左T{left.Task.targetId}：已解算（炮塔方位不可用）";
+            _firePriorityRightDetail = $"右T{right.Task.targetId}：已解算（炮塔方位不可用）";
+            SetPairFirePriority(
+                winnerFallback,
+                loserFallback,
+                "turret angle unavailable; keeping original solved order");
+            return;
+        }
+
+        var currentAzimuth = turretController.CurrentAngle;
+        var leftElevation = GunPhysicalState.Read("Left").Elevation;
+        var rightElevation = GunPhysicalState.Read("Right").Elevation;
+
+        var leftAzimuthDelta = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, -left.Task.angel));
+        var rightAzimuthDelta = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, -right.Task.angel));
+        var leftElevationDelta = Mathf.Abs(left.Task.elevation - leftElevation);
+        var rightElevationDelta = Mathf.Abs(right.Task.elevation - rightElevation);
+        var leftScore = leftAzimuthDelta + leftElevationDelta;
+        var rightScore = rightAzimuthDelta + rightElevationDelta;
+
+        _firePriorityLeftDetail =
+            $"左T{left.Task.targetId}：{leftScore:F1}°（方{leftAzimuthDelta:F1} + 仰{leftElevationDelta:F1}）";
+        _firePriorityRightDetail =
+            $"右T{right.Task.targetId}：{rightScore:F1}°（方{rightAzimuthDelta:F1} + 仰{rightElevationDelta:F1}）";
+
         FirePriorityCandidate winner;
         FirePriorityCandidate loser;
         string reason;
 
-        var turretController = GameObject.Find("TurretSystem")?.GetComponent<TurretController>();
-        if (turretController == null) {
+        if (Mathf.Abs(leftScore - rightScore) <= FirePriorityScoreTieTolerance) {
             winner = FirstByOriginalOrder(left, right);
             loser = ReferenceEquals(winner, left) ? right : left;
-            reason = "turret angle unavailable; falling back to original solved order";
+            reason =
+                $"alignment scores tied; currentAz={currentAzimuth:F1}°, " +
+                $"Left T{left.Task.targetId}={leftScore:F1}°, Right T{right.Task.targetId}={rightScore:F1}°; " +
+                "keeping original solved order";
+        }
+        else if (leftScore < rightScore) {
+            winner = left;
+            loser = right;
+            reason =
+                $"currentAz={currentAzimuth:F1}°, Left T{left.Task.targetId}={leftScore:F1}° " +
+                $"(az {leftAzimuthDelta:F1}+el {leftElevationDelta:F1}) < Right T{right.Task.targetId}={rightScore:F1}° " +
+                $"(az {rightAzimuthDelta:F1}+el {rightElevationDelta:F1})";
         }
         else {
-            var currentAzimuth = turretController.CurrentAngle;
-            var leftElevation = GunPhysicalState.Read("Left").Elevation;
-            var rightElevation = GunPhysicalState.Read("Right").Elevation;
-
-            var leftAzimuthDelta = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, -left.Task.angel));
-            var rightAzimuthDelta = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, -right.Task.angel));
-            var leftElevationDelta = Mathf.Abs(left.Task.elevation - leftElevation);
-            var rightElevationDelta = Mathf.Abs(right.Task.elevation - rightElevation);
-            var leftScore = leftAzimuthDelta + leftElevationDelta;
-            var rightScore = rightAzimuthDelta + rightElevationDelta;
-
-            if (Mathf.Abs(leftScore - rightScore) <= FirePriorityScoreTieTolerance) {
-                winner = FirstByOriginalOrder(left, right);
-                loser = ReferenceEquals(winner, left) ? right : left;
-                reason =
-                    $"alignment scores tied; currentAz={currentAzimuth:F1}°, " +
-                    $"Left T{left.Task.targetId}={leftScore:F1}° (az {leftAzimuthDelta:F1}+el {leftElevationDelta:F1}), " +
-                    $"Right T{right.Task.targetId}={rightScore:F1}° (az {rightAzimuthDelta:F1}+el {rightElevationDelta:F1}); " +
-                    "keeping original solved order";
-            }
-            else if (leftScore < rightScore) {
-                winner = left;
-                loser = right;
-                reason =
-                    $"currentAz={currentAzimuth:F1}°, Left T{left.Task.targetId}={leftScore:F1}° " +
-                    $"(az {leftAzimuthDelta:F1}+el {leftElevationDelta:F1}) < Right T{right.Task.targetId}={rightScore:F1}° " +
-                    $"(az {rightAzimuthDelta:F1}+el {rightElevationDelta:F1})";
-            }
-            else {
-                winner = right;
-                loser = left;
-                reason =
-                    $"currentAz={currentAzimuth:F1}°, Right T{right.Task.targetId}={rightScore:F1}° " +
-                    $"(az {rightAzimuthDelta:F1}+el {rightElevationDelta:F1}) < Left T{left.Task.targetId}={leftScore:F1}° " +
-                    $"(az {leftAzimuthDelta:F1}+el {leftElevationDelta:F1})";
-            }
+            winner = right;
+            loser = left;
+            reason =
+                $"currentAz={currentAzimuth:F1}°, Right T{right.Task.targetId}={rightScore:F1}° " +
+                $"(az {rightAzimuthDelta:F1}+el {rightElevationDelta:F1}) < Left T{left.Task.targetId}={leftScore:F1}° " +
+                $"(az {leftAzimuthDelta:F1}+el {leftElevationDelta:F1})";
         }
 
-        SetFirePriority(winner.Task, loser.Task, reason);
+        SetPairFirePriority(winner, loser, reason);
     }
 
     private static FirePriorityCandidate FirstByOriginalOrder(
@@ -689,60 +843,81 @@ public class FSC
         return left;
     }
 
-    private void SetFirePriority(ArtilleryTask winner, ArtilleryTask? second, string reason) {
-        CancelFirePriorityArbitration();
-        _firePriorityWinner = winner;
-        _firePrioritySecond = second != null && !ReferenceEquals(second, winner) ? second : null;
+    private bool CommitFireLane(ArtilleryTask task, int generation) {
+        if (generation != _firePriorityGeneration
+            || !ReferenceEquals(_firePriorityWinner, task)
+            || !IsActiveTask(task))
+            return false;
 
-        var secondText = _firePrioritySecond == null ? "none" : $"T{_firePrioritySecond.targetId}";
-        MelonLogger.Msg(
-            $"[FCS] Fire priority: T{winner.targetId} first, second={secondText}; {reason}");
+        _fireLaneCommittedTask = task;
+        _firePriorityStatusText = !string.IsNullOrEmpty(_firePriorityOrderText)
+            ? $"首发仲裁：顺序锁定 {_firePriorityOrderText}"
+            : $"首发仲裁：T{task.targetId} 已取得共享击发权";
+        MelonLogger.Msg($"[FCS] T{task.targetId}: shared fire lane committed");
+        return true;
     }
 
     private IEnumerator WaitForFirePriority(ArtilleryTask task, TurretReservation res) {
-        // This waiter is intentionally passive. Priority calculation is event-triggered by valid ballistic
-        // solutions plus synchronized gun states; waiting tasks never recalculate or poll scoring every frame.
-        while (!res.Canceled && !ReferenceEquals(_firePriorityWinner, task)) {
-            if (!IsActiveTask(task)) {
-                res.Canceled = true;
-                yield break;
-            }
-
+        // Pure Promise.all-like wait: no scoring timeout and no polling/recalculation. The winner is produced by
+        // task-assignment/ballistic-solution events. F9 changes the generation, which cancels stale waiters.
+        while (!res.Canceled
+               && res.Generation == _firePriorityGeneration
+               && IsActiveTask(task)
+               && !ReferenceEquals(_firePriorityWinner, task)) {
             yield return FcsRuntimeClock.WaitUntilFocused();
             yield return null;
         }
+
+        if (res.Generation != _firePriorityGeneration || !IsActiveTask(task))
+            res.Canceled = true;
     }
 
     private void ReleaseFirePriority(ArtilleryTask task) {
-        var removedCandidate = false;
-        if (_leftFireCandidate != null && ReferenceEquals(_leftFireCandidate.Task, task)) {
+        var sessionContainedTask = _firePrioritySession != null
+                                   && (ReferenceEquals(_firePrioritySession.LeftTask, task)
+                                       || ReferenceEquals(_firePrioritySession.RightTask, task));
+        if (sessionContainedTask)
+            CancelFirePrioritySession("任务被取消或重新分配", false);
+
+        if (_leftFireCandidate != null && ReferenceEquals(_leftFireCandidate.Task, task))
             _leftFireCandidate = null;
-            removedCandidate = true;
-        }
-        if (_rightFireCandidate != null && ReferenceEquals(_rightFireCandidate.Task, task)) {
+        if (_rightFireCandidate != null && ReferenceEquals(_rightFireCandidate.Task, task))
             _rightFireCandidate = null;
-            removedCandidate = true;
-        }
 
         if (ReferenceEquals(_firePrioritySecond, task))
             _firePrioritySecond = null;
 
         if (ReferenceEquals(_firePriorityWinner, task)) {
-            _firePriorityWinner = null;
             var next = _firePrioritySecond;
+            _firePriorityWinner = null;
             _firePrioritySecond = null;
-            CancelFirePriorityArbitration();
+            if (ReferenceEquals(_fireLaneCommittedTask, task))
+                _fireLaneCommittedTask = null;
 
-            if (next != null && IsActiveTask(next)) {
+            if (next != null
+                && IsActiveTask(next)
+                && GetCandidateForTask(next) != null
+                && TryGetTaskSide(next, out var nextSide)
+                && GetFirePriorityGunPhase(nextSide, next) == FirePriorityGunPhase.Preparation) {
                 _firePriorityWinner = next;
-                MelonLogger.Msg($"[FCS] Fire priority: promoting T{next.targetId} after previous lane owner released");
+                _firePriorityStatusText = !string.IsNullOrEmpty(_firePriorityOrderText)
+                    ? $"首发仲裁：第二炮优先 T{next.targetId}（{_firePriorityOrderText}）"
+                    : $"首发仲裁：T{next.targetId} 优先";
+                MelonLogger.Msg($"[FCS] Fire priority: promoting T{next.targetId} after previous shot released");
                 return;
             }
         }
 
-        if (_firePriorityWinner == null && removedCandidate) {
-            CancelFirePriorityArbitration();
-            TryStartFirePriorityArbitration();
+        if (_firePriorityWinner == null) {
+            EvaluateFirePriorityTrigger();
+
+            if (_firePriorityWinner == null
+                && _firePrioritySession == null
+                && GetCurrentCandidate(LeftRight.Left) == null
+                && GetCurrentCandidate(LeftRight.Right) == null
+                && !string.IsNullOrEmpty(_firePriorityOrderText)) {
+                _firePriorityStatusText = $"首发仲裁：本轮完成 {_firePriorityOrderText}";
+            }
         }
     }
 
@@ -831,9 +1006,10 @@ public class FSC
     private IEnumerator RunTaskRoutine(LeftRight leftRight, ArtilleryTask task, GunTaskMode mode) {
         yield return FcsRuntimeClock.WaitUntilFocused();
 
+        var taskGeneration = _firePriorityGeneration;
         var gunSys = leftRight == LeftRight.Left ? LeftGun : RightGun;
         var sideName = leftRight == LeftRight.Left ? "Left" : "Right";
-        var turret = new TurretReservation();
+        var turret = new TurretReservation(task, taskGeneration);
 
         var initialState = GunPhysicalState.Read(sideName);
         if (mode == GunTaskMode.FreshLoad && !initialState.EmptyReady) {
@@ -929,6 +1105,12 @@ public class FSC
             _deskLock.Release();
         }
 
+        if (taskGeneration != _firePriorityGeneration || !ReferenceEquals(GetActiveTask(leftRight), task)) {
+            MelonLogger.Warning(
+                $"[FCS] {leftRight} T{task.targetId}: task generation changed during ballistic solve; discarding stale routine");
+            yield break;
+        }
+
         if (!viable) {
             if (mode == GunTaskMode.ReuseLoadedRound) {
                 RetryOnAnotherGun(leftRight, task, turret, failureReason);
@@ -956,10 +1138,11 @@ public class FSC
                 $"[FCS] {leftRight} T{task.targetId}: reusing chambered {task.bulletType.DisplayName()} C{powderCount}");
         }
 
-        // Register one durable solution. State-gated arbitration is triggered from this event only; it is not
-        // recalculated from Update(). If both guns are still in the preparation band, a short one-shot buffer
-        // gives the other active task a chance to finish its physical calculator pass.
-        RegisterBallisticSolution(leftRight, task);
+        // Promise.all-like synchronization: valid solutions are registered once. If both guns are in the
+        // preparation band, the first solution waits for the second real result; there is no artificial timer.
+        // A reset changes taskGeneration, so a late pre-reset result can never join the new arbitration session.
+        if (!RegisterBallisticSolution(leftRight, task, taskGeneration))
+            yield break;
         _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
 
         if (mode != GunTaskMode.ReuseLoadedRound) {
@@ -1119,21 +1302,42 @@ public class FSC
         public LeftRight Side { get; }
         public ArtilleryTask Task { get; }
         public float SolvedAt { get; }
+        public int Generation { get; }
 
-        public FirePriorityCandidate(LeftRight side, ArtilleryTask task, float solvedAt) {
+        public FirePriorityCandidate(LeftRight side, ArtilleryTask task, float solvedAt, int generation) {
             Side = side;
             Task = task;
             SolvedAt = solvedAt;
+            Generation = generation;
+        }
+    }
+
+    private sealed class FirePrioritySession {
+        public int Generation { get; }
+        public ArtilleryTask LeftTask { get; }
+        public ArtilleryTask RightTask { get; }
+
+        public FirePrioritySession(int generation, ArtilleryTask leftTask, ArtilleryTask rightTask) {
+            Generation = generation;
+            LeftTask = leftTask;
+            RightTask = rightTask;
         }
     }
 
     private sealed class TurretReservation {
+        public ArtilleryTask Task { get; }
+        public int Generation { get; }
         public bool Acquired;
         public bool Ready;
         public bool Failed;
         public bool Canceled;
         public bool Released;
         public string FailureReason = "";
+
+        public TurretReservation(ArtilleryTask task, int generation) {
+            Task = task;
+            Generation = generation;
+        }
     }
 
     private IEnumerator ReserveTurretAndRotate(ArtilleryTask task, TurretReservation res) {
@@ -1144,7 +1348,17 @@ public class FSC
         yield return _turretLock.Acquire();
         res.Acquired = true;
         yield return FcsRuntimeClock.WaitUntilFocused();
-        if (res.Canceled) {
+        if (res.Canceled
+            || res.Generation != _firePriorityGeneration
+            || !ReferenceEquals(_firePriorityWinner, task)
+            || !IsActiveTask(task)) {
+            res.Canceled = true;
+            ReleaseTurretOnce(res);
+            yield break;
+        }
+
+        if (!CommitFireLane(task, res.Generation)) {
+            res.Canceled = true;
             ReleaseTurretOnce(res);
             yield break;
         }
@@ -1169,6 +1383,8 @@ public class FSC
     private void ReleaseTurretOnce(TurretReservation res) {
         if (res.Acquired && !res.Released) {
             res.Released = true;
+            if (ReferenceEquals(_fireLaneCommittedTask, res.Task))
+                _fireLaneCommittedTask = null;
             _turretLock.Release();
         }
     }
