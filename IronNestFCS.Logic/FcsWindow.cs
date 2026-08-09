@@ -9,10 +9,12 @@ namespace IronNestFCS.Logic;
 /// </summary>
 public class FcsWindow
 {
+    private const int RecentDisplayLimit = 8;
+
     private readonly FSC fcs;
 
     private bool showWindow = true;
-    private Rect defaultWindowRect = new(40, 40, 410, 220);
+    private Rect defaultWindowRect = new(40, 40, 430, 220);
 
     public FcsWindow(FSC fcs)
     {
@@ -26,14 +28,21 @@ public class FcsWindow
 
         var queue = fcs.QueueCan;
         var recent = fcs.RecentTasks;
+        var recentItems = recent.ToArray();
+        var recentStart = Math.Max(0, recentItems.Length - RecentDisplayLimit);
+
         var lineCount = 2;
         if (fcs.IsBound) {
-            lineCount = 7; // left/right headings + idle/task lines + queue/recent headings
-            if (fcs.LeftTask != null) lineCount += 1;
-            if (fcs.RightTask != null) lineCount += 1;
-            lineCount += queue.Count;
-            foreach (var task in recent) {
+            lineCount = 0;
+            lineCount += fcs.LeftTask == null ? 1 : 2;
+            lineCount += fcs.RightTask == null ? 1 : 2;
+            lineCount += 1; // 自动开火 / 最大装药状态
+            lineCount += 1 + queue.Count; // 队列标题 + 队列内容
+            lineCount += 2; // 本轮统计 + 近期记录标题
+
+            for (var i = recentStart; i < recentItems.Length; i++) {
                 lineCount += 1;
+                var task = recentItems[i];
                 if (task.progress == Progress.Failed && !string.IsNullOrEmpty(task.failureReason))
                     lineCount += 1;
             }
@@ -41,7 +50,7 @@ public class FcsWindow
 
         var windowRect = defaultWindowRect;
         windowRect.height = 42f + lineCount * 24f;
-        GUI.Box(windowRect, "IronNest FCS");
+        GUI.Box(windowRect, "IronNest 火控系统");
         
         float x = windowRect.x + 10f;
         float w = windowRect.width - 20f;
@@ -56,42 +65,67 @@ public class FcsWindow
 
         if (!fcs.IsBound)
         {
-            Label("Waiting for Iron Nest fire-control scene.");
-            Label("Press F9 to retry binding after the scene is ready.");
+            Label("等待 Iron Nest 火控场景加载。 ");
+            Label("场景就绪后按 F9 重新初始化火控逻辑。 ");
             return;
         }
 
-        DrawGun("Left", fcs.LeftTask, Label);
-        DrawGun("Right", fcs.RightTask, Label);
+        DrawGun("左", fcs.LeftTask, Label);
+        DrawGun("右", fcs.RightTask, Label);
 
-        Label($"Queued: {queue.Count}");
+        Label($"自动开火：{OnOff(fcs.AutoFireEnabled)}    最大装药：{OnOff(fcs.MaxChargeEnabled)}");
+
+        Label($"等待队列：{queue.Count}");
         foreach (var item in queue)
         {
-            Label($"  T{item.targetId} {item.bulletType}  {item.angel:F1}°/{item.distance:F2}km  {ConvertPosition(item.position)}");
+            Label($"  T{item.targetId} {item.bulletType}  方位 {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}");
         }
 
-        Label($"Recent: {recent.Count}");
-        foreach (var item in recent)
+        Label($"本轮：完成 {fcs.CompletedTaskCount}    成功 {fcs.SuccessfulTaskCount}    失败 {fcs.FailedTaskCount}");
+        var shownRecent = recentItems.Length - recentStart;
+        Label($"近期记录：最近 {shownRecent} 条（内部保留 {recent.Count}/20）");
+        for (var i = recentStart; i < recentItems.Length; i++)
         {
-            var result = item.progress == Progress.Finished ? "OK" : "FAILED";
+            var item = recentItems[i];
+            var result = item.progress == Progress.Finished ? "成功" : "失败";
             var duration = item.completedAt > item.startedAt ? item.completedAt - item.startedAt : 0f;
-            Label($"  {result} T{item.targetId} {item.bulletType}  C{item.chargeCount} E{item.elevation:F1}°  {duration:F0}s");
+            Label($"  {result} T{item.targetId} {item.bulletType}  装药{item.chargeCount} 仰角{item.elevation:F1}°  {duration:F0}秒");
             if (item.progress == Progress.Failed && !string.IsNullOrEmpty(item.failureReason)) {
-                Label($"    {item.failureReason}");
+                Label($"    原因：{item.failureReason}");
             }
         }
     }
 
+    private static string OnOff(bool value) => value ? "开" : "关";
+
     private static void DrawGun(string name, ArtilleryTask? task, Action<string> label)
     {
         if (task == null) {
-            label($"{name} Gun: Idle");
+            label($"{name}炮：空闲");
             return;
         }
 
         var elapsed = task.startedAt > 0f ? Time.realtimeSinceStartup - task.startedAt : 0f;
-        label($"{name} Gun: T{task.targetId} {task.bulletType}  {task.progress}  {elapsed:F0}s");
-        label($"  {task.angel:F1}° / {task.distance:F2}km   Charge {task.chargeCount}   Elev {task.elevation:F1}°");
+        label($"{name}炮：T{task.targetId} {task.bulletType}  {ProgressText(task.progress)}  {elapsed:F0}秒");
+        label($"  方位 {task.angel:F1}° / 距离 {task.distance:F2}km   装药 {task.chargeCount}   仰角 {task.elevation:F1}°");
+    }
+
+    private static string ProgressText(Progress progress)
+    {
+        return progress switch {
+            Progress.Pending => "等待",
+            Progress.Calculating => "弹道解算",
+            Progress.SelectingBullet => "选弹",
+            Progress.LoadingBullet => "装弹",
+            Progress.LoadingPowder => "装药",
+            Progress.WaitLoading => "等待装填完成",
+            Progress.Aiming => "瞄准",
+            Progress.WaitingForFire => "等待开火",
+            Progress.BackToIdle => "复位",
+            Progress.Finished => "完成",
+            Progress.Failed => "失败",
+            _ => progress.ToString()
+        };
     }
 
     /// <summary>计算坐标点所对应的区域字符串。</summary>
