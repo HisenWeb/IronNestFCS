@@ -2,7 +2,9 @@
 
 Baseline: `f3d2173022cc0433f3adb9347ec17d20b1a304ae`
 
-This branch exists only to reduce `FSC.cs` responsibilities without changing runtime behavior.
+Status: **full extraction landed on `refactor/fsc-modularization`; compile/runtime validation pending.**
+
+This branch exists only to reduce `FSC.cs` responsibilities without intentionally changing runtime behavior. Per the chosen refactor strategy, the modules were extracted as one complete structural pass; intermediate commits are not treated as independently runnable checkpoints. The branch head is the validation unit.
 
 ## Non-negotiable behavior invariants
 
@@ -22,10 +24,10 @@ This branch exists only to reduce `FSC.cs` responsibilities without changing run
 - Do not change ETA constants or the 4 deg/s : 2 deg/s azimuth/elevation model.
 - Do not change trigger safety ordering.
 
-## Target modules
+## Extracted modules
 
-### 1. `Scheduling/FirePriorityModels.cs`
-Pure state/data types currently nested in `FSC`:
+### `Scheduling/FirePriorityModels.cs`
+Pure state/data types formerly nested in `FSC`:
 - `GunTaskMode`
 - `FirePriorityGunPhase`
 - `FireReadyEstimate`
@@ -33,17 +35,16 @@ Pure state/data types currently nested in `FSC`:
 - `FirePrioritySession`
 - `TurretReservation`
 
-No runtime behavior should change in this step.
-
-### 2. `Scheduling/FireReadyEstimator.cs`
+### `Scheduling/FireReadyEstimator.cs`
 Pure ETA calculation and formatting:
 - load/elevation/azimuth ETA calculation
 - alignment fallback
 - ETA detail formatting
+- original-order tie breaking
 
-Inputs are snapshots; this module must not mutate game state.
+Inputs are snapshots; this module does not mutate game state.
 
-### 3. `Scheduling/FirePriorityCoordinator.cs`
+### `Scheduling/FirePriorityCoordinator.cs`
 Owns arbitration state and transitions:
 - left/right candidates
 - session
@@ -53,76 +54,79 @@ Owns arbitration state and transitions:
 - state-gate fallback
 - pair resolution
 - abnormal-task invalidation
-- post-shot promotion
+- turret-lane ownership state
+- late hard commit
+- post-shot Second promotion
 
-This module must preserve the existing Promise.all-like synchronized arbitration semantics.
+The Promise.all-like synchronized arbitration semantics are preserved.
 
-### 4. `Scheduling/TurretScheduler.cs`
-Owns shared turret-lane coordination:
-- turret reservation lifecycle
+### `Scheduling/TurretScheduler.cs`
+Owns the physical shared turret lane:
+- turret coroutine lock
+- reservation lifecycle
 - queue eligibility
-- winner ownership
 - Second prequeue
 - provisional preemption
-- hard-commit handoff
+- cancellation-safe F9/generation checks
+- physical rotation and release
 
-It must not own trigger-console interactions.
+It does not own trigger-console interactions.
 
-### 5. `Execution/GunTaskRunner.cs`
+### `Execution/GunTaskRunner.cs`
 Owns a single gun task pipeline:
 - ballistic solve
 - requisition
 - physical load/reload
 - elevation
-- waiting for turret readiness
-- trigger-console execution after hard commit
-- post-shot recovery
+- concurrent turret reservation
+- wait for turret readiness
+- trigger-console execution only after hard commit
+- post-shot recovery handoff
 
-It delegates arbitration/turret decisions instead of owning global scheduling state.
+It delegates global arbitration and queue ownership instead of storing them itself.
 
-### 6. `Scheduling/TaskDispatcher.cs`
+### `Scheduling/TaskDispatcher.cs`
 Owns:
-- queue dispatch
+- pending/recent queues
+- left/right active slots
 - physical-state-based gun selection
+- physical recovery gate
 - requeue/retry/reclassification
-- slot release
+- task result counters and slot release
 
-It must continue to treat physical state as authoritative.
+Physical state remains authoritative.
 
-### 7. `FSC.cs`
-Final role:
+### `Infrastructure/SharedConsoleCoordinator.cs`
+Owns the three non-turret shared console locks:
+- ballistic
+- requisition
+- trigger
+
+Also owns F9 fire-control baseline reset and background powder replenishment.
+
+### `Infrastructure/SceneExposureService.cs`
+Owns the optional map-entity exposure loop.
+
+### `FSC.cs`
+Reduced to the composition root/public facade:
 - bind/update/dispose lifecycle
 - dependency wiring
-- public facade used by UI/scene interaction
-- starting background loops
-
-## Refactor sequence
-
-Each stage should compile independently and be reviewable as a behavior-preserving move.
-
-1. Extract data-only types.
-2. Extract pure ETA functions.
-3. Extract fire-priority coordinator state/transitions.
-4. Extract turret scheduler.
-5. Extract per-gun task runner.
-6. Extract dispatcher.
-7. Reduce `FSC.cs` to composition/lifecycle.
-
-Do not combine behavioral fixes with these commits. Any discovered runtime bug should be fixed on `master` first and then merged/rebased into this branch before continuing structural work.
+- public UI/scene API
+- coroutine tracking
 
 ## Validation gates
 
-After each structural stage:
+Before merging back to `master`:
 
 - local `dotnet build` against the game directory
-- no changes to public UI-visible semantics unless purely textual
 - normal dual-gun continuous fire test
-- same-target-order arbitration test
+- synchronized arbitration / ETA order test
 - Second prequeue handoff test
 - F9 during ballistic calculation
 - F9 during shell loading
 - F9 during powder staging
 - F9 during turret slew
 - F9 before Review/Arm
+- verify existing `[FCS Stall]`, `[FCS ReloadTrace]`, `[FCS BALLISTIC TRACE]`, and `[FCS PrepProbe]` diagnostics remain readable
 
-Only merge back to `master` after the branch passes the same gameplay scenarios as its baseline.
+Any behavioral bug discovered during validation should be fixed deliberately and called out separately from the structural extraction before this branch is merged.
