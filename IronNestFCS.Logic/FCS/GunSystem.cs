@@ -6,7 +6,6 @@ using UnityEngine;
 
 namespace IronNestFCS.Logic.FCS;
 
-
 public enum BulletType {
     AP = 1,
     APHE = 2,
@@ -34,22 +33,30 @@ public class GunSystem {
     private string _surfix = "";
 
     private CylinderShellSelector? shellSelector;
-    
-    private List<string?> bullets = new();
+    private readonly List<string?> bullets = new();
     private LookAtTarget? nextBulletButton;
     private LookAtTarget? loadBulletButton;
-    private List<LookAtTarget> powderButtons = new();
+    private readonly List<LookAtTarget> powderButtons = new();
     private LookAtTarget? loadPowderButton;
     private GunController? gunController;
     private LinearSliderInteractable? elevationLever;
     private OdometerDisplay? remainingCharges;
+    private TextMeshPro? shellId;
 
-    private TextMeshPro shellId;
+    public bool LastElevationSucceeded { get; private set; }
+    public bool LastFireObserved { get; private set; }
 
     public bool TryBind(string surfix) {
-        this._surfix = surfix;
-        
-        var gunSystem = GameObject.Find("Gun System " + surfix).transform;
+        _surfix = surfix;
+        powderButtons.Clear();
+
+        var gunSystemObject = GameObject.Find("Gun System " + surfix);
+        if (gunSystemObject == null) {
+            MelonLogger.Error($"[FCS] GunSystem {surfix}: Can't find Gun System");
+            return false;
+        }
+        var gunSystem = gunSystemObject.transform;
+
         var reloadingConsole = gunSystem.Find("--Reloading Console");
         if (reloadingConsole == null) {
             MelonLogger.Error($"[FCS] GunSystem {surfix}: Can't find --Reloading Console");
@@ -57,14 +64,11 @@ public class GunSystem {
         }
 
         remainingCharges = reloadingConsole.GetComponentInChildren<OdometerDisplay>();
-        
-        nextBulletButton = 
-            reloadingConsole.Find("Universal Button Move Cylinder")
-                .GetComponent<LookAtTarget>();    
+        var nextBulletObject = reloadingConsole.Find("Universal Button Move Cylinder");
+        nextBulletButton = nextBulletObject?.GetComponent<LookAtTarget>();
         shellSelector = gunSystem.GetComponentInChildren<CylinderShellSelector>();
-        
-        shellId = GameObject.Find("Shell ID " + surfix)
-            .GetComponent<TextMeshPro>();
+
+        shellId = GameObject.Find("Shell ID " + surfix)?.GetComponent<TextMeshPro>();
         var loadShell = reloadingConsole.FindChild("Universal Button Load shell Rammer");
         if (loadShell == null) {
             MelonLogger.Error($"[FCS] GunSystem {surfix}: Can't find Universal Button Load shell Rammer");
@@ -73,6 +77,10 @@ public class GunSystem {
         loadBulletButton = loadShell.GetComponent<LookAtTarget>();
 
         var powderController = reloadingConsole.Find("PowderChargeController");
+        if (powderController == null) {
+            MelonLogger.Error($"[FCS] GunSystem {surfix}: Can't find PowderChargeController");
+            return false;
+        }
         for (var i = 0; i < powderController.childCount; ++i) {
             var child = powderController.GetChild(i);
             if (!child.name.StartsWith("Button Dispencer")) continue;
@@ -84,28 +92,51 @@ public class GunSystem {
             powderButtons.Add(button);
         }
 
-        loadPowderButton = reloadingConsole.FindChild("Universal Button Charge Rammer (1)").GetComponent<LookAtTarget>();
-        gunController = GameObject.Find("Gun"+surfix).GetComponent<GunController>();
-        elevationLever = GameObject.Find(".Elevation Lever Baseplate")?.transform.FindChild(".Elevation Lever " + surfix)
-            .GetComponent<LinearSliderInteractable>();
-        return true;
+        var loadPowderObject = reloadingConsole.FindChild("Universal Button Charge Rammer (1)");
+        loadPowderButton = loadPowderObject?.GetComponent<LookAtTarget>();
+        gunController = GameObject.Find("Gun" + surfix)?.GetComponent<GunController>();
+        var elevationBase = GameObject.Find(".Elevation Lever Baseplate");
+        elevationLever = elevationBase?.transform.FindChild(".Elevation Lever " + surfix)
+            ?.GetComponent<LinearSliderInteractable>();
+
+        var ok = remainingCharges != null
+                 && nextBulletButton != null
+                 && shellSelector != null
+                 && loadBulletButton != null
+                 && powderButtons.Count >= 6
+                 && loadPowderButton != null
+                 && gunController != null
+                 && elevationLever != null;
+        if (!ok) {
+            MelonLogger.Error($"[FCS] GunSystem {surfix}: one or more controls could not be bound");
+        }
+        return ok;
     }
     
     public bool CanFire() {
         return gunController != null && gunController.CanFire;
     }
 
-    public IEnumerator SetElevation(float elevation) {
+    public IEnumerator SetElevation(float elevation, float timeoutSeconds = 30f) {
+        LastElevationSucceeded = false;
         if (elevationLever == null || gunController == null) {
             MelonLogger.Error($"[FCS] GunSystem {_surfix}: Elevation lever or gun controller unbound");
             yield break;
         }
+
+        var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
         elevationLever.SetSliderValue(elevation);
         yield return new WaitForSeconds(0.1f);
         while (!Mathf.Approximately(gunController.CurrentElevation, elevation)) {
+            if (Time.realtimeSinceStartup >= deadline) {
+                MelonLogger.Error(
+                    $"[FCS] GunSystem {_surfix}: elevation timeout, current={gunController.CurrentElevation:F2}, target={elevation:F2}");
+                yield break;
+            }
             elevationLever.SetSliderValue(elevation);
-            yield return new WaitForSeconds(1f);
+            yield return new WaitForSeconds(0.5f);
         }
+        LastElevationSucceeded = true;
     }
     
     public string? BulletInChamber() {
@@ -128,50 +159,50 @@ public class GunSystem {
     public void NextBullet() {
         if (nextBulletButton == null) {
             MelonLogger.Error($"[FCS] GunSystem {_surfix}: NextBulletButton unbound");
+            return;
         }
         MelonLogger.Msg("[GunSystem] NextBullet");
-        nextBulletButton!.OnClickDown();
+        nextBulletButton.OnClickDown();
     }
     
     /// <summary>
-    /// 装填指定弹种：先把弹仓转到目标弹，再按装填。转弹仓每步之间要等 1 秒
-    /// （游戏有转动动画/物理）。返回 IEnumerator，调用方用 yield return 等待它跑完。
-    /// 必须走协程而非 async：continuation 要留在主线程才能安全访问 IL2CPP 对象。
+    /// 装填指定弹种：先把弹仓转到目标弹，再按装填。转弹仓每步之间要等动画/物理完成。
     /// </summary>
     public IEnumerator LoadBullet(BulletType type) {
         RefreshBullets();
-        var index = bullets.IndexOf(type.ToString());
-        if (index == -1) {
-            MelonLogger.Error($"[FCS] GunSystem {_surfix}: " +
-                              $"No {type} available in cylinder, current bullets: {string.Join(", ", bullets)}");
+        if (bullets.Count == 0 || !bullets.Contains(type.ToString())) {
+            MelonLogger.Error($"[FCS] GunSystem {_surfix}: No {type} available in cylinder");
             yield break;
         }
         
         for (var i = 0; i < bullets.Count; ++i) {
-            if (bullets[0] == type.ToString()) {
+            if (bullets.Count > 0 && bullets[0] == type.ToString()) {
                 break;
-            };
+            }
             NextBullet();
             yield return new WaitForSeconds(1.5f);
             RefreshBullets();
         }
-        if (bullets[0] != type.ToString()) {
-            MelonLogger.Error($"[FCS] GunSystem {_surfix}: Can't find {type} after rotation, " +
-                              $"current: {string.Join(", ", bullets)}");
+        if (bullets.Count == 0 || bullets[0] != type.ToString()) {
+            MelonLogger.Error($"[FCS] GunSystem {_surfix}: Can't find {type} after rotation, current: {string.Join(", ", bullets)}");
             yield break;
         }
-        yield return FcsSceneInteractor.WaitAndClick(loadBulletButton!);
+        yield return FcsSceneInteractor.WaitAndClick(loadBulletButton);
     }
 
     private IEnumerator SelectPowder(int count) {
+        if (count < 0 || count > powderButtons.Count) {
+            MelonLogger.Error($"[FCS] GunSystem {_surfix}: invalid powder count {count}, available buttons={powderButtons.Count}");
+            yield break;
+        }
         for (var i = 0; i < count; i++) {
-            yield return FcsSceneInteractor.WaitAndClick(powderButtons[i]!);
+            yield return FcsSceneInteractor.WaitAndClick(powderButtons[i]);
         }
     }
 
     public IEnumerator LoadPowder(int count) {
         yield return SelectPowder(count);
-        yield return FcsSceneInteractor.WaitAndClick(loadPowderButton!);
+        yield return FcsSceneInteractor.WaitAndClick(loadPowderButton);
     }
 
     public bool HaveBulletInCylinder(BulletType type) {
@@ -184,21 +215,42 @@ public class GunSystem {
         return bullets.Contains(null);
     }
 
-    public IEnumerator WaitBackToIdle() {
-        while (gunController != null && gunController.elevationChangeVelocity != 0) {
+    public IEnumerator WaitBackToIdle(float timeoutSeconds = 30f) {
+        if (gunController == null)
+            yield break;
+
+        var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
+        while (gunController.elevationChangeVelocity != 0) {
+            if (Time.realtimeSinceStartup >= deadline) {
+                MelonLogger.Warning($"[FCS] GunSystem {_surfix}: return-to-idle movement timed out; releasing task slot anyway");
+                break;
+            }
             yield return new WaitForSeconds(0.1f);
         }
-        yield return new WaitForSeconds(13);
+        // Preserve the original post-shot recovery delay, but the movement wait above is now bounded.
+        yield return new WaitForSeconds(13f);
     }
 
-    public IEnumerator WaitFire() {
-        while (gunController != null && !gunController.pendingReload) {
+    public IEnumerator WaitFire(float timeoutSeconds = 20f) {
+        LastFireObserved = false;
+        if (gunController == null) {
+            MelonLogger.Error($"[FCS] GunSystem {_surfix}: gun controller unbound while waiting for fire");
+            yield break;
+        }
+
+        var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
+        while (!gunController.pendingReload) {
+            if (Time.realtimeSinceStartup >= deadline) {
+                MelonLogger.Error($"[FCS] GunSystem {_surfix}: fire was not observed before timeout");
+                yield break;
+            }
             yield return new WaitForSeconds(0.1f);
         }
+        LastFireObserved = true;
     }
     
     public int RemainingCharges() {
-        return (int)remainingCharges.CurrentNumber;
+        return remainingCharges == null ? 0 : (int)remainingCharges.CurrentNumber;
     }
 
 }

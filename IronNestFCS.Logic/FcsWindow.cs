@@ -1,24 +1,18 @@
 using MelonLoader;
 using UnityEngine;
+using IronNestFCS.Logic.FCS;
 
 namespace IronNestFCS.Logic;
 
 /// <summary>
-/// 火控系统的 IMGUI 窗口。只负责绘制与把用户操作转发给 <see cref="FSC"/>。
-/// 不含领域逻辑——按钮点击后调用 logic 的方法。
-///
-/// 实现说明：在 MelonLoader IL2CPP 下，MelonMod.OnGUI 每帧只触发一次，
-/// 无法保证 IMGUI 所需的 Layout / event 多 pass。GUILayout 依赖 Layout pass
-/// 预算尺寸，pass 不一致时 controlID 会错位，表现为"只有第一个按钮能点"。
-/// 因此这里改用绝对 Rect 的 GUI.* API（不走布局系统），并且不套 GUI.Window
-/// （避免回调委托封送丢失 pass）。控件 controlID 仅取决于调用顺序，稳定可靠。
+/// 火控系统的 IMGUI 状态窗口。使用绝对 Rect，避免 IL2CPP 下 GUILayout pass 不完整导致控件错位。
 /// </summary>
 public class FcsWindow
 {
     private readonly FSC fcs;
 
     private bool showWindow = true;
-    private Rect defaultWindowRect = new(40, 40, 260, 170);
+    private Rect defaultWindowRect = new(40, 40, 410, 220);
 
     public FcsWindow(FSC fcs)
     {
@@ -30,76 +24,84 @@ public class FcsWindow
         if (!showWindow)
             return;
 
+        var queue = fcs.QueueCan;
+        var recent = fcs.RecentTasks;
+        var lineCount = 2;
+        if (fcs.IsBound) {
+            lineCount = 7; // left/right headings + idle/task lines + queue/recent headings
+            if (fcs.LeftTask != null) lineCount += 1;
+            if (fcs.RightTask != null) lineCount += 1;
+            lineCount += queue.Count;
+            foreach (var task in recent) {
+                lineCount += 1;
+                if (task.progress == Progress.Failed && !string.IsNullOrEmpty(task.failureReason))
+                    lineCount += 1;
+            }
+        }
+
         var windowRect = defaultWindowRect;
-
-        if (fcs.LeftTask != null) {
-            windowRect.height += 28f;
-        }
-        if (fcs.RightTask != null) {
-            windowRect.height += 28f;
-        }
-        windowRect.height += fcs.QueueCan.Count * 28f;
-
-        // 背景框
+        windowRect.height = 42f + lineCount * 24f;
         GUI.Box(windowRect, "IronNest FCS");
         
         float x = windowRect.x + 10f;
         float w = windowRect.width - 20f;
         float y = windowRect.y + 25f;
-        const float h = 24f;
-        const float gap = 4f;
+        const float h = 21f;
+        const float gap = 3f;
+
+        void Label(string text) {
+            GUI.Label(new Rect(x, y, w, h), text);
+            y += h + gap;
+        }
 
         if (!fcs.IsBound)
         {
-            GUI.Label(new Rect(x, y, w, h), "Waiting for game start.");
-            y += h + gap;
-            GUI.Label(new Rect(x, y, w, h), "Or press F9 to manually reload.");
+            Label("Waiting for Iron Nest fire-control scene.");
+            Label("Press F9 to retry binding after the scene is ready.");
             return;
         }
 
-        GUI.Label(new Rect(x, y, w, h), "Left Gun:");
-        y += h + gap;
-        if (fcs.LeftTask != null) {
-            GUI.Label(new Rect(x, y, w, h), $"  T{fcs.LeftTask.targetId} {fcs.LeftTask.bulletType} {fcs.LeftTask.progress}");
-            y += h + gap;
-            GUI.Label(new Rect(x, y, w, h), $"  Target: {fcs.LeftTask.angel:F1}°, {fcs.LeftTask.distance:F2}km");
-            y += h + gap;
-        }
-        else {
-            GUI.Label(new Rect(x, y, w, h), "  Idle");
-            y += h + gap;
-        }
-        GUI.Label(new Rect(x, y, w, h), "Right Gun:");
-        y += h + gap;
-        if (fcs.RightTask != null) {
-            GUI.Label(new Rect(x, y, w, h), $"  T{fcs.RightTask.targetId} {fcs.RightTask.bulletType} {fcs.RightTask.progress}");
-            y += h + gap;
-            GUI.Label(new Rect(x, y, w, h), $"  Target: {fcs.RightTask.angel:F1}°, {fcs.RightTask.distance:F2}km");
-            y += h + gap;
-        }
-        else {
-            GUI.Label(new Rect(x, y, w, h), "  Idle");
-            y += h + gap;
-        }
+        DrawGun("Left", fcs.LeftTask, Label);
+        DrawGun("Right", fcs.RightTask, Label);
 
-        GUI.Label(new Rect(x, y, w, h), $"Queued: {fcs.PendingCount}");
-        y += h + gap;
-        foreach (var item in fcs.QueueCan)
+        Label($"Queued: {queue.Count}");
+        foreach (var item in queue)
         {
-            GUI.Label(new Rect(x, y, w, h), $"  target{item.targetId} { ConvertPosition(item.position)} {item.angel,5:F1}°/{item.distance,5:F2}km {item.bulletType.ToString()} ");
-            y += h + gap;
+            Label($"  T{item.targetId} {item.bulletType}  {item.angel:F1}°/{item.distance:F2}km  {ConvertPosition(item.position)}");
         }
 
+        Label($"Recent: {recent.Count}");
+        foreach (var item in recent)
+        {
+            var result = item.progress == Progress.Finished ? "OK" : "FAILED";
+            var duration = item.completedAt > item.startedAt ? item.completedAt - item.startedAt : 0f;
+            Label($"  {result} T{item.targetId} {item.bulletType}  C{item.chargeCount} E{item.elevation:F1}°  {duration:F0}s");
+            if (item.progress == Progress.Failed && !string.IsNullOrEmpty(item.failureReason)) {
+                Label($"    {item.failureReason}");
+            }
+        }
     }
 
-    /// <summary> 计算坐标点所对应的区域字符串 </summary>
+    private static void DrawGun(string name, ArtilleryTask? task, Action<string> label)
+    {
+        if (task == null) {
+            label($"{name} Gun: Idle");
+            return;
+        }
+
+        var elapsed = task.startedAt > 0f ? Time.realtimeSinceStartup - task.startedAt : 0f;
+        label($"{name} Gun: T{task.targetId} {task.bulletType}  {task.progress}  {elapsed:F0}s");
+        label($"  {task.angel:F1}° / {task.distance:F2}km   Charge {task.chargeCount}   Elev {task.elevation:F1}°");
+    }
+
+    /// <summary>计算坐标点所对应的区域字符串。</summary>
     public static string ConvertPosition(Vector3 position)
     {
         int leterIndex = (int)position.x;
         string zoneCol = leterIndex >= 0 && leterIndex < 26 ? ((char)('A' + leterIndex)).ToString() : "#";
         int zoneRow = (int)position.y + 1;
-        int subCol = (int)(position.x * 10) % 10;  // B: 第一位小数
-        int subRow = (int)(position.y * 10) % 10;  // B: 第一位小数
+        int subCol = (int)(position.x * 10) % 10;
+        int subRow = (int)(position.y * 10) % 10;
 
         return $"{zoneCol}{zoneRow}  {subCol}:{subRow}";
     }
