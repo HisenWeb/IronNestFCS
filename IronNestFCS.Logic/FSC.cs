@@ -989,7 +989,7 @@ public class FSC
                 _firePriorityWinner = next;
                 _firePriorityWinnerProvisional = false;
                 // The previous real shot is still asynchronously clearing the shared Review Console. The promoted
-                // second shot may prepare in parallel with turret rotation, but only after that reset settles.
+                // second shot may pre-confirm Review switches in parallel with turret rotation, but only after that reset settles.
                 _triggerResetRequiredTask = next;
                 _firePriorityStatusText = !string.IsNullOrEmpty(_firePriorityOrderText)
                     ? $"首发仲裁：第二炮优先 T{next.targetId}（{_firePriorityOrderText}）"
@@ -1098,7 +1098,8 @@ public class FSC
     private IEnumerator PrepareTriggerConsoleForTask(
         LeftRight leftRight,
         ArtilleryTask task,
-        bool waitForPreviousShotReset) {
+        bool waitForPreviousShotReset,
+        bool armWhenPrepared) {
         yield return _deskLock.Acquire();
         try {
             yield return FcsRuntimeClock.WaitUntilFocused();
@@ -1116,8 +1117,10 @@ public class FSC
             yield return TriggerConsole.ConfirmElevation();
             yield return FcsRuntimeClock.WaitUntilFocused();
             yield return TriggerConsole.ReadyToFire();
-            yield return FcsRuntimeClock.WaitUntilFocused();
-            yield return TriggerConsole.Arm(leftRight);
+            if (armWhenPrepared) {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                yield return TriggerConsole.Arm(leftRight);
+            }
         }
         finally {
             _deskLock.Release();
@@ -1356,7 +1359,7 @@ public class FSC
         var turretDeadline = FcsRuntimeClock.Now + turretWaitTimeout;
 
         // Wait until this task owns the shared fire lane. A promoted fixed Second can then prepare the shared
-        // Review Console while the turret is still slewing. Ordinary/first shots keep the original safer order:
+        // Review Console while the turret is still slewing, but stays disarmed. Ordinary/first shots keep the original safer order:
         // turret arrives first, then Review/Arm is enabled.
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
@@ -1378,8 +1381,8 @@ public class FSC
 
         if (waitForPreviousShotReset) {
             // The previous shot has been positively observed, so this fixed Second owns the next fire slot. Wait
-            // only for the game's asynchronous control reset, then re-enable Review/Arm while azimuth keeps moving.
-            yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true);
+            // only for the game's asynchronous control reset, then re-enable Review while azimuth keeps moving; Arm waits for turret.Ready.
+            yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true, armWhenPrepared: false);
             triggerPrepared = true;
         }
 
@@ -1398,8 +1401,25 @@ public class FSC
             yield break;
         }
 
-        if (!triggerPrepared)
-            yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: false);
+        if (!triggerPrepared) {
+            yield return PrepareTriggerConsoleForTask(
+                leftRight,
+                task,
+                waitForPreviousShotReset: false,
+                armWhenPrepared: true);
+        }
+        else {
+            // Review may be pre-confirmed during the promoted Second's turret slew, but the gun stays safe.
+            // Arm only after turret.Ready proves the shared azimuth has physically reached its target.
+            yield return _deskLock.Acquire();
+            try {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                yield return TriggerConsole.Arm(leftRight);
+            }
+            finally {
+                _deskLock.Release();
+            }
+        }
 
         try {
             if (_sceneInteractor.AutoFire) {
