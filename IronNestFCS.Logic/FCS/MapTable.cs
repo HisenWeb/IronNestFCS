@@ -106,15 +106,18 @@ public class MapTable {
             yield break;
         }
 
-        // Scaled game time prevents a focus-loss pause from consuming the stabilization budget.
-        var deadline = Time.time + Mathf.Max(0.5f, timeoutSeconds);
+        var deadline = FcsRuntimeClock.Now + Mathf.Max(0.5f, timeoutSeconds);
         var previousRelative = Vector3.zero;
         var havePrevious = false;
         var stableSamples = 0;
         var sampleCount = 0;
         var lastDelta = 0f;
 
-        while (Time.time < deadline) {
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            if (FcsRuntimeClock.Now >= deadline)
+                break;
+
             var markerLocal = artillery.localPosition;
             var turretLocal = turret.localPosition;
             var relative = markerLocal - turretLocal;
@@ -142,7 +145,7 @@ public class MapTable {
                 yield break;
             }
 
-            yield return new WaitForSeconds(MarkerSampleIntervalSeconds);
+            yield return FcsRuntimeClock.WaitForSeconds(MarkerSampleIntervalSeconds);
         }
 
         MelonLogger.Warning(
