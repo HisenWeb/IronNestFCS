@@ -31,7 +31,13 @@ public class FSC
     private const float AutoFireTimeoutSeconds = 25f;
     private const float ManualFireTimeoutSeconds = 300f;
     private const float PhysicalRecoveryTimeoutSeconds = 30f;
-    private const float FirePriorityScoreTieTolerance = 0.05f;
+    // Release-build probes: turret azimuth ~= 4 deg/s, gun elevation ~= 2 deg/s.
+    // FreshLoad probe pairs converged at 32.20s / 32.27s from ballistic registration to LoadedReady.
+    private const float AzimuthSlewDegreesPerSecond = 4f;
+    private const float ElevationSlewDegreesPerSecond = 2f;
+    private const float FreshLoadReadySeconds = 32.25f;
+    private const float FirePriorityEtaTieToleranceSeconds = 0.10f;
+    private const float FirePriorityAlignmentTieTolerance = 0.05f;
     private const int RecentTaskLimit = 20;
 
     private HarmonyInstance? _harmony;
@@ -639,7 +645,7 @@ public class FSC
         }
     }
 
-    private bool RegisterBallisticSolution(LeftRight side, ArtilleryTask task, int generation) {
+    private bool RegisterBallisticSolution(LeftRight side, ArtilleryTask task, int generation, GunTaskMode mode) {
         if (generation != _firePriorityGeneration || !ReferenceEquals(GetActiveTask(side), task)) {
             MelonLogger.Warning(
                 $"[FCS] {side} T{task.targetId}: discarded stale ballistic solution " +
@@ -647,7 +653,7 @@ public class FSC
             return false;
         }
 
-        var candidate = new FirePriorityCandidate(side, task, FcsRuntimeClock.Now, generation);
+        var candidate = new FirePriorityCandidate(side, task, FcsRuntimeClock.Now, generation, mode);
         if (side == LeftRight.Left) _leftFireCandidate = candidate;
         else _rightFireCandidate = candidate;
 
@@ -840,6 +846,80 @@ public class FSC
             $"[FCS] Fire priority: T{winner.Task.targetId} first, second=T{loser.Task.targetId}; {reason}");
     }
 
+    private FireReadyEstimate EstimateFireReady(
+        FirePriorityCandidate candidate,
+        GunPhysicalState physical,
+        float currentAzimuth) {
+        var azimuthDelta = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, -candidate.Task.angel));
+        var elevationDelta = Mathf.Abs(candidate.Task.elevation - physical.Elevation);
+        var azimuthSeconds = azimuthDelta / AzimuthSlewDegreesPerSecond;
+        var elevationSeconds = elevationDelta / ElevationSlewDegreesPerSecond;
+
+        var loadKnown = true;
+        var loadSeconds = 0f;
+        var loadLabel = "已装填";
+        var physicalMatchesTask = physical.LoadedReady
+                                  && physical.ShellType == candidate.Task.bulletType
+                                  && physical.PowderCharges == candidate.Task.chargeCount;
+
+        if (physicalMatchesTask) {
+            loadSeconds = 0f;
+        }
+        else if (physical.LoadedReady) {
+            loadKnown = false;
+            loadLabel = "实装弹药与任务不一致";
+        }
+        else if (candidate.Mode == GunTaskMode.FreshLoad) {
+            var elapsed = Mathf.Max(0f, FcsRuntimeClock.Now - candidate.SolvedAt);
+            loadSeconds = Mathf.Max(0f, FreshLoadReadySeconds - elapsed);
+            loadLabel = $"FreshLoad 已过{elapsed:F1}s";
+
+            // The 32.25s baseline is an estimate, not a readiness override. If the real gun is still loading
+            // after the measured baseline, stop trusting the estimate and fall back to the old alignment model.
+            if (elapsed > FreshLoadReadySeconds && !physical.LoadedReady) {
+                loadKnown = false;
+                loadLabel = $"FreshLoad 超过{FreshLoadReadySeconds:F2}s仍未就绪";
+            }
+        }
+        else if (candidate.Mode == GunTaskMode.ReuseLoadedRound) {
+            loadKnown = false;
+            loadLabel = "复用弹物理状态已变化";
+        }
+        else {
+            // CompleteShellLoaded begins with shell-in-chamber/C0. We have not yet measured a reliable remaining
+            // powder/final-sequence ETA, so do not invent one for scheduling.
+            loadKnown = false;
+            loadLabel = "半装填ETA待测";
+        }
+
+        var localSeconds = loadKnown ? loadSeconds + elevationSeconds : float.NaN;
+        var totalSeconds = loadKnown ? Mathf.Max(localSeconds, azimuthSeconds) : float.NaN;
+        var alignmentScore = Mathf.Max(azimuthDelta, elevationDelta * 2f);
+
+        return new FireReadyEstimate(
+            loadKnown,
+            loadLabel,
+            loadSeconds,
+            elevationSeconds,
+            azimuthSeconds,
+            totalSeconds,
+            alignmentScore);
+    }
+
+    private static string FormatEtaDetail(
+        string sideLabel,
+        FirePriorityCandidate candidate,
+        FireReadyEstimate eta) {
+        if (eta.LoadKnown) {
+            return
+                $"{sideLabel}T{candidate.Task.targetId}：预计{eta.TotalSeconds:F1}s（装{eta.LoadSeconds:F1}+仰{eta.ElevationSeconds:F1} / 方{eta.AzimuthSeconds:F1}）";
+        }
+
+        var alignmentSeconds = Mathf.Max(eta.ElevationSeconds, eta.AzimuthSeconds);
+        return
+            $"{sideLabel}T{candidate.Task.targetId}：ETA待测（{eta.LoadLabel}；仅对准{alignmentSeconds:F1}s）";
+    }
+
     private void ResolveFirePriorityPair(FirePriorityCandidate left, FirePriorityCandidate right) {
         if (!CanArbitrateCurrentTasks()) {
             ResolveStateGateFallback(left, right);
@@ -860,55 +940,68 @@ public class FSC
         }
 
         var currentAzimuth = turretController.CurrentAngle;
-        var leftElevation = GunPhysicalState.Read("Left").Elevation;
-        var rightElevation = GunPhysicalState.Read("Right").Elevation;
+        var leftPhysical = GunPhysicalState.Read("Left");
+        var rightPhysical = GunPhysicalState.Read("Right");
+        var leftEta = EstimateFireReady(left, leftPhysical, currentAzimuth);
+        var rightEta = EstimateFireReady(right, rightPhysical, currentAzimuth);
 
-        var leftAzimuthDelta = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, -left.Task.angel));
-        var rightAzimuthDelta = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, -right.Task.angel));
-        var leftElevationDelta = Mathf.Abs(left.Task.elevation - leftElevation);
-        var rightElevationDelta = Mathf.Abs(right.Task.elevation - rightElevation);
-
-        // Measured release-build slew rates are approximately AZ=4 deg/s and EL=2 deg/s.
-        // Use azimuth degrees as the common time-equivalent unit: 1 degree of elevation costs the
-        // same time as 2 degrees of azimuth. Since both axes move in parallel, readiness is gated
-        // by the slower remaining axis rather than by the sum of both movements.
-        var leftElevationEquivalent = leftElevationDelta * 2f;
-        var rightElevationEquivalent = rightElevationDelta * 2f;
-        var leftScore = Mathf.Max(leftAzimuthDelta, leftElevationEquivalent);
-        var rightScore = Mathf.Max(rightAzimuthDelta, rightElevationEquivalent);
-
-        _firePriorityLeftDetail =
-            $"左T{left.Task.targetId}：{leftScore:F1}（方{leftAzimuthDelta:F1} / 仰{leftElevationDelta:F1}×2={leftElevationEquivalent:F1}）";
-        _firePriorityRightDetail =
-            $"右T{right.Task.targetId}：{rightScore:F1}（方{rightAzimuthDelta:F1} / 仰{rightElevationDelta:F1}×2={rightElevationEquivalent:F1}）";
+        _firePriorityLeftDetail = FormatEtaDetail("左", left, leftEta);
+        _firePriorityRightDetail = FormatEtaDetail("右", right, rightEta);
 
         FirePriorityCandidate winner;
         FirePriorityCandidate loser;
         string reason;
 
-        if (Mathf.Abs(leftScore - rightScore) <= FirePriorityScoreTieTolerance) {
-            winner = FirstByOriginalOrder(left, right);
-            loser = ReferenceEquals(winner, left) ? right : left;
-            reason =
-                $"alignment scores tied; currentAz={currentAzimuth:F1}°, " +
-                $"Left T{left.Task.targetId}={leftScore:F1}°, Right T{right.Task.targetId}={rightScore:F1}°; " +
-                "keeping original solved order";
-        }
-        else if (leftScore < rightScore) {
-            winner = left;
-            loser = right;
-            reason =
-                $"currentAz={currentAzimuth:F1}°, Left T{left.Task.targetId}={leftScore:F1}° " +
-                $"(az {leftAzimuthDelta:F1}, el {leftElevationDelta:F1}x2={leftElevationEquivalent:F1}) < Right T{right.Task.targetId}={rightScore:F1} " +
-                $"(az {rightAzimuthDelta:F1}, el {rightElevationDelta:F1}x2={rightElevationEquivalent:F1})";
+        if (leftEta.LoadKnown && rightEta.LoadKnown) {
+            if (Mathf.Abs(leftEta.TotalSeconds - rightEta.TotalSeconds) <= FirePriorityEtaTieToleranceSeconds) {
+                winner = FirstByOriginalOrder(left, right);
+                loser = ReferenceEquals(winner, left) ? right : left;
+                reason =
+                    $"fire-ready ETA tied; currentAz={currentAzimuth:F1}°, " +
+                    $"Left T{left.Task.targetId}={leftEta.TotalSeconds:F1}s " +
+                    $"(load {leftEta.LoadSeconds:F1}+el {leftEta.ElevationSeconds:F1}, az {leftEta.AzimuthSeconds:F1}), " +
+                    $"Right T{right.Task.targetId}={rightEta.TotalSeconds:F1}s " +
+                    $"(load {rightEta.LoadSeconds:F1}+el {rightEta.ElevationSeconds:F1}, az {rightEta.AzimuthSeconds:F1}); " +
+                    "keeping original solved order";
+            }
+            else if (leftEta.TotalSeconds < rightEta.TotalSeconds) {
+                winner = left;
+                loser = right;
+                reason =
+                    $"ETA Left T{left.Task.targetId}={leftEta.TotalSeconds:F1}s " +
+                    $"(load {leftEta.LoadSeconds:F1}+el {leftEta.ElevationSeconds:F1}, az {leftEta.AzimuthSeconds:F1}) < " +
+                    $"Right T{right.Task.targetId}={rightEta.TotalSeconds:F1}s " +
+                    $"(load {rightEta.LoadSeconds:F1}+el {rightEta.ElevationSeconds:F1}, az {rightEta.AzimuthSeconds:F1})";
+            }
+            else {
+                winner = right;
+                loser = left;
+                reason =
+                    $"ETA Right T{right.Task.targetId}={rightEta.TotalSeconds:F1}s " +
+                    $"(load {rightEta.LoadSeconds:F1}+el {rightEta.ElevationSeconds:F1}, az {rightEta.AzimuthSeconds:F1}) < " +
+                    $"Left T{left.Task.targetId}={leftEta.TotalSeconds:F1}s " +
+                    $"(load {leftEta.LoadSeconds:F1}+el {leftEta.ElevationSeconds:F1}, az {leftEta.AzimuthSeconds:F1})";
+            }
         }
         else {
-            winner = right;
-            loser = left;
+            // At least one load phase has no measured ETA yet. Fall back to the already-tested normalized
+            // alignment comparison rather than fabricating a load duration.
+            if (Mathf.Abs(leftEta.AlignmentScore - rightEta.AlignmentScore) <= FirePriorityAlignmentTieTolerance) {
+                winner = FirstByOriginalOrder(left, right);
+                loser = ReferenceEquals(winner, left) ? right : left;
+            }
+            else if (leftEta.AlignmentScore < rightEta.AlignmentScore) {
+                winner = left;
+                loser = right;
+            }
+            else {
+                winner = right;
+                loser = left;
+            }
+
             reason =
-                $"currentAz={currentAzimuth:F1}°, Right T{right.Task.targetId}={rightScore:F1}° " +
-                $"(az {rightAzimuthDelta:F1}, el {rightElevationDelta:F1}x2={rightElevationEquivalent:F1}) < Left T{left.Task.targetId}={leftScore:F1} " +
-                $"(az {leftAzimuthDelta:F1}, el {leftElevationDelta:F1}x2={leftElevationEquivalent:F1})";
+                $"load ETA unavailable; alignment fallback: Left T{left.Task.targetId}={leftEta.AlignmentScore:F1} " +
+                $"({leftEta.LoadLabel}), Right T{right.Task.targetId}={rightEta.AlignmentScore:F1} ({rightEta.LoadLabel})";
         }
 
         SetPairFirePriority(winner, loser, reason);
@@ -1278,7 +1371,7 @@ public class FSC
         // Promise.all-like synchronization: valid solutions are registered once. If both guns are in the
         // preparation band, the first solution waits for the second real result; there is no artificial timer.
         // A reset changes taskGeneration, so a late pre-reset result can never join the new arbitration session.
-        if (!RegisterBallisticSolution(leftRight, task, taskGeneration))
+        if (!RegisterBallisticSolution(leftRight, task, taskGeneration, mode))
             yield break;
         _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
 
@@ -1488,17 +1581,51 @@ public class FSC
         ReleaseSlot(leftRight);
     }
 
+    private sealed class FireReadyEstimate {
+        public bool LoadKnown { get; }
+        public string LoadLabel { get; }
+        public float LoadSeconds { get; }
+        public float ElevationSeconds { get; }
+        public float AzimuthSeconds { get; }
+        public float TotalSeconds { get; }
+        public float AlignmentScore { get; }
+
+        public FireReadyEstimate(
+            bool loadKnown,
+            string loadLabel,
+            float loadSeconds,
+            float elevationSeconds,
+            float azimuthSeconds,
+            float totalSeconds,
+            float alignmentScore) {
+            LoadKnown = loadKnown;
+            LoadLabel = loadLabel;
+            LoadSeconds = loadSeconds;
+            ElevationSeconds = elevationSeconds;
+            AzimuthSeconds = azimuthSeconds;
+            TotalSeconds = totalSeconds;
+            AlignmentScore = alignmentScore;
+        }
+    }
+
     private sealed class FirePriorityCandidate {
         public LeftRight Side { get; }
         public ArtilleryTask Task { get; }
         public float SolvedAt { get; }
         public int Generation { get; }
+        public GunTaskMode Mode { get; }
 
-        public FirePriorityCandidate(LeftRight side, ArtilleryTask task, float solvedAt, int generation) {
+        public FirePriorityCandidate(
+            LeftRight side,
+            ArtilleryTask task,
+            float solvedAt,
+            int generation,
+            GunTaskMode mode) {
             Side = side;
             Task = task;
             SolvedAt = solvedAt;
             Generation = generation;
+            Mode = mode;
         }
     }
 
