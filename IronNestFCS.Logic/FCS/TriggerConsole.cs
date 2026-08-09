@@ -6,6 +6,14 @@ using UnityEngine;
 namespace IronNestFCS.Logic.FCS;
 
 public class TriggerConsole {
+    private const float ReviewOnZ = 0f;
+    private const float ReviewOffZ = -90f;
+    private const float ReviewPoseTolerance = 10f;
+    private const float ArmOnX = -50f;
+    private const float ArmOffX = -32f;
+    private const float ArmPoseTolerance = 4f;
+    private const float PoseTransitionTimeoutSeconds = 2f;
+
     private LookAtTarget? _taskCheck;
     private LookAtTarget? _bulletCheck;
     private LookAtTarget? _rotationCheck;
@@ -13,11 +21,22 @@ public class TriggerConsole {
     private LookAtTarget? _readyFire;
     private LookAtTarget? _armLeft;
     private LookAtTarget? _armRight;
+
+    // Physical truth discovered from the release build with TriggerConsoleProbe:
+    // review switch knob Z: OFF=-90°, ON=0°;
+    // arming lever parent X: OFF=-32°, ON=-50°.
+    private Transform? _taskPose;
+    private Transform? _bulletPose;
+    private Transform? _rotationPose;
+    private Transform? _elevationPose;
+    private Transform? _readyPose;
+    private Transform? _armLeftPose;
+    private Transform? _armRightPose;
+
     private SliderEnergyMomentumSpinner? _fire;
 
-    // TryBind runs again after F9. FSC already calls PrepareForNewFireSolution once immediately after a
-    // successful bind, so use that first call as the one-and-only hot-reload reset hook. Later task calls must
-    // never clear the shared console again; they only reconcile the controls they need to ON.
+    // TryBind runs again after F9. FSC calls PrepareForNewFireSolution once immediately after a successful bind;
+    // that first call is the hot-reload reset hook. Later calls belong to normal tasks and only reconcile ON state.
     private bool _resetPendingAfterBind;
 
     public bool TryBind() {
@@ -27,95 +46,130 @@ public class TriggerConsole {
             return false;
         }
 
-        var buttons = new List<LookAtTarget>();
+        var controls = new List<(LookAtTarget button, Transform pose)>();
         var console = consoleObject.transform;
         for (var i = 0; i < console.childCount; ++i) {
             var child = console.GetChild(i);
             if (!child.name.StartsWith(".Check Switch")) continue;
+
             var button = child.GetComponentInChildren<LookAtTarget>();
-            if (button != null)
-                buttons.Add(button);
+            var pose = FindReviewPose(child);
+            if (button != null && pose != null)
+                controls.Add((button, pose));
         }
 
-        if (buttons.Count != 5) {
-            MelonLogger.Error($"[FCS] Can't bind trigger console: expected 5 review switches, found {buttons.Count}");
+        if (controls.Count != 5) {
+            MelonLogger.Error($"[FCS] Can't bind trigger console: expected 5 review switches with physical knobs, found {controls.Count}");
             return false;
         }
 
-        _taskCheck = buttons[0];
-        _bulletCheck = buttons[1];
-        _rotationCheck = buttons[2];
-        _elevationCheck = buttons[3];
-        _readyFire = buttons[4];
-        _armLeft = GameObject.Find(".ArmingLeverParent Left")?.GetComponentInChildren<LookAtTarget>();
-        _armRight = GameObject.Find(".ArmingLeverParent Right")?.GetComponentInChildren<LookAtTarget>();
+        _taskCheck = controls[0].button;
+        _taskPose = controls[0].pose;
+        _bulletCheck = controls[1].button;
+        _bulletPose = controls[1].pose;
+        _rotationCheck = controls[2].button;
+        _rotationPose = controls[2].pose;
+        _elevationCheck = controls[3].button;
+        _elevationPose = controls[3].pose;
+        _readyFire = controls[4].button;
+        _readyPose = controls[4].pose;
+
+        var armLeftObject = GameObject.Find(".ArmingLeverParent Left");
+        var armRightObject = GameObject.Find(".ArmingLeverParent Right");
+        _armLeftPose = armLeftObject?.transform;
+        _armRightPose = armRightObject?.transform;
+        _armLeft = armLeftObject?.GetComponentInChildren<LookAtTarget>();
+        _armRight = armRightObject?.GetComponentInChildren<LookAtTarget>();
         _fire = GameObject.Find(".Trigger Core")?.transform.FindChild(".Generator Spinner")
             ?.GetComponentInChildren<SliderEnergyMomentumSpinner>();
 
-        var ok = _armLeft != null && _armRight != null && _fire != null;
+        var ok = _armLeft != null && _armRight != null &&
+                 _armLeftPose != null && _armRightPose != null && _fire != null;
         if (ok) {
             _resetPendingAfterBind = true;
-            LogLatchedStates("bind");
+            LogPhysicalStates("bind");
         }
         return ok;
+    }
+
+    private static Transform? FindReviewPose(Transform root) {
+        var transforms = root.GetComponentsInChildren<Transform>(true);
+        foreach (var t in transforms) {
+            if (t != null && t != root && t.name.StartsWith("knob_25_003"))
+                return t;
+        }
+        return null;
     }
 
     public void Fire() {
         _fire?.AddEnergy(255);
     }
 
-    private static bool TryGetClickedState(LookAtTarget? control, out bool clicked) {
-        clicked = false;
-        if (control == null) return false;
-        try {
-            // LookAtTarget.GetActive()/isActive describe interaction availability and are not a reliable
-            // representation of a physical toggle's latched position. `isClicked` is the durable click target
-            // state used by the control/animator and survives Logic hot reloads.
-            clicked = control.isClicked;
-            return true;
-        }
-        catch {
-            return false;
-        }
+    private static float NormalizeAngle(float angle) {
+        angle %= 360f;
+        if (angle > 180f) angle -= 360f;
+        if (angle < -180f) angle += 360f;
+        return angle;
     }
 
-    private static IEnumerator EnsureReviewConfirmed(LookAtTarget? control, string name) {
-        if (control == null) {
-            MelonLogger.Error($"[FCS] TriggerConsole: missing {name}");
-            yield break;
-        }
+    private static bool TryReadReviewState(Transform? pose, out bool on, out float z) {
+        on = false;
+        z = 0f;
+        if (pose == null) return false;
 
-        if (TryGetClickedState(control, out var current) && current) {
-            MelonLogger.Msg($"[FCS] TriggerConsole: {name} already confirmed; preserving latched state");
-            yield break;
-        }
-
-        yield return FcsSceneInteractor.WaitAndClick(control);
-        yield return FcsRuntimeClock.WaitForSeconds(0.15f);
-
-        if (TryGetClickedState(control, out var after) && !after) {
-            MelonLogger.Warning($"[FCS] TriggerConsole: {name} click did not latch ON");
-        }
+        z = NormalizeAngle(pose.localEulerAngles.z);
+        var onDistance = Mathf.Abs(Mathf.DeltaAngle(z, ReviewOnZ));
+        var offDistance = Mathf.Abs(Mathf.DeltaAngle(z, ReviewOffZ));
+        on = onDistance < offDistance;
+        return Mathf.Min(onDistance, offDistance) <= ReviewPoseTolerance;
     }
 
-    private static IEnumerator EnsureReviewCleared(LookAtTarget? control, string name) {
-        if (control == null) {
-            MelonLogger.Error($"[FCS] TriggerConsole: missing {name}");
+    private static bool TryReadArmState(Transform? pose, out bool on, out float x) {
+        on = false;
+        x = 0f;
+        if (pose == null) return false;
+
+        x = NormalizeAngle(pose.localEulerAngles.x);
+        var onDistance = Mathf.Abs(Mathf.DeltaAngle(x, ArmOnX));
+        var offDistance = Mathf.Abs(Mathf.DeltaAngle(x, ArmOffX));
+        on = onDistance < offDistance;
+        return Mathf.Min(onDistance, offDistance) <= ArmPoseTolerance;
+    }
+
+    private static IEnumerator EnsureReviewState(LookAtTarget? control, Transform? pose, bool desiredOn, string name) {
+        if (control == null || pose == null) {
+            MelonLogger.Error($"[FCS] TriggerConsole: missing {name} control/pose");
             yield break;
         }
 
-        if (!TryGetClickedState(control, out var current)) {
-            MelonLogger.Warning($"[FCS] TriggerConsole: can't read {name} during F9 reset; leaving it unchanged");
-            yield break;
+        var deadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+        bool current;
+        float angle;
+        while (!TryReadReviewState(pose, out current, out angle)) {
+            if (FcsRuntimeClock.Now >= deadline) {
+                MelonLogger.Warning($"[FCS] TriggerConsole: {name} physical pose ambiguous at Z={angle:F1}°; not toggling blindly");
+                yield break;
+            }
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return new WaitForSeconds(0.05f);
         }
-        if (!current)
+
+        if (current == desiredOn)
             yield break;
 
         yield return FcsSceneInteractor.WaitAndClick(control);
-        yield return FcsRuntimeClock.WaitForSeconds(0.15f);
 
-        if (TryGetClickedState(control, out var after) && after) {
-            MelonLogger.Warning($"[FCS] TriggerConsole: {name} did not clear during F9 reset");
+        deadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            if (TryReadReviewState(pose, out var after, out angle) && after == desiredOn)
+                yield break;
+            if (FcsRuntimeClock.Now >= deadline) {
+                MelonLogger.Warning(
+                    $"[FCS] TriggerConsole: {name} did not reach {(desiredOn ? "ON" : "OFF")} physical pose; Z={angle:F1}°");
+                yield break;
+            }
+            yield return new WaitForSeconds(0.05f);
         }
     }
 
@@ -126,120 +180,125 @@ public class TriggerConsole {
         // Once an arm action starts, always complete the down/up pair even if focus changes during the hold.
         yield return new WaitForSeconds(0.2f);
         arm.OnClickUp();
-        yield return FcsRuntimeClock.WaitForSeconds(0.25f);
     }
 
-    private static IEnumerator EnsureArmSelected(LookAtTarget? arm, string name) {
-        if (arm == null) {
-            MelonLogger.Error($"[FCS] TriggerConsole: missing {name} arming control");
+    private static IEnumerator EnsureArmState(LookAtTarget? arm, Transform? pose, bool desiredOn, string name) {
+        if (arm == null || pose == null) {
+            MelonLogger.Error($"[FCS] TriggerConsole: missing {name} arming control/pose");
             yield break;
         }
 
-        if (TryGetClickedState(arm, out var current) && current) {
-            MelonLogger.Msg($"[FCS] TriggerConsole: {name} already armed; preserving latched state");
-            yield break;
+        var deadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+        bool current;
+        float angle;
+        while (!TryReadArmState(pose, out current, out angle)) {
+            if (FcsRuntimeClock.Now >= deadline) {
+                MelonLogger.Warning($"[FCS] TriggerConsole: {name} arm pose ambiguous at X={angle:F1}°; not toggling blindly");
+                yield break;
+            }
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return new WaitForSeconds(0.05f);
         }
 
-        // Preserve the original proven arming interaction. Do not touch the opposite gun during a normal task;
-        // selecting a side is game-owned and the game itself handles any previous side selection.
-        yield return ThrowArm(arm);
-
-        if (TryGetClickedState(arm, out var after) && !after) {
-            MelonLogger.Warning($"[FCS] TriggerConsole: {name} arm action did not latch ON");
-        }
-    }
-
-    private static IEnumerator EnsureArmCleared(LookAtTarget? arm, string name) {
-        if (arm == null) {
-            MelonLogger.Error($"[FCS] TriggerConsole: missing {name} arming control");
-            yield break;
-        }
-
-        if (!TryGetClickedState(arm, out var current)) {
-            MelonLogger.Warning($"[FCS] TriggerConsole: can't read {name} during F9 reset; leaving it unchanged");
-            yield break;
-        }
-        if (!current)
+        if (current == desiredOn)
             yield break;
 
         yield return ThrowArm(arm);
 
-        if (TryGetClickedState(arm, out var after) && after) {
-            MelonLogger.Warning($"[FCS] TriggerConsole: {name} did not clear during F9 reset");
+        deadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            if (TryReadArmState(pose, out var after, out angle) && after == desiredOn)
+                yield break;
+            if (FcsRuntimeClock.Now >= deadline) {
+                MelonLogger.Warning(
+                    $"[FCS] TriggerConsole: {name} arm did not reach {(desiredOn ? "ON" : "OFF")} physical pose; X={angle:F1}°");
+                yield break;
+            }
+            yield return new WaitForSeconds(0.05f);
         }
     }
 
-    private void LogLatchedStates(string reason) {
-        static string S(LookAtTarget? c) => TryGetClickedState(c, out var v) ? (v ? "ON" : "OFF") : "?";
+    private static string ReviewStateText(Transform? pose) {
+        return TryReadReviewState(pose, out var on, out var z)
+            ? $"{(on ? "ON" : "OFF")}({z:F0}°)"
+            : $"?({z:F0}°)";
+    }
+
+    private static string ArmStateText(Transform? pose) {
+        return TryReadArmState(pose, out var on, out var x)
+            ? $"{(on ? "ON" : "OFF")}({x:F0}°)"
+            : $"?({x:F0}°)";
+    }
+
+    private void LogPhysicalStates(string reason) {
         MelonLogger.Msg(
-            $"[FCS] TriggerConsole state ({reason}): " +
-            $"Task={S(_taskCheck)} Bullet={S(_bulletCheck)} Rotation={S(_rotationCheck)} " +
-            $"Elevation={S(_elevationCheck)} Ready={S(_readyFire)} ArmL={S(_armLeft)} ArmR={S(_armRight)}");
+            $"[FCS] TriggerConsole physical ({reason}): " +
+            $"Task={ReviewStateText(_taskPose)} Bullet={ReviewStateText(_bulletPose)} " +
+            $"Rotation={ReviewStateText(_rotationPose)} Elevation={ReviewStateText(_elevationPose)} " +
+            $"Ready={ReviewStateText(_readyPose)} ArmL={ArmStateText(_armLeftPose)} ArmR={ArmStateText(_armRightPose)}");
     }
 
-    private IEnumerator ResetLatchedFireControlsAfterBind() {
-        LogLatchedStates("before F9 reset");
+    private IEnumerator ResetPhysicalFireControlsAfterBind() {
+        LogPhysicalStates("before F9 reset");
 
-        // Clear arming first. Disarming may itself invalidate some review checks; every review state is re-read
-        // afterwards, so controls already cleared by the game are left untouched.
-        yield return EnsureArmCleared(_armLeft, "Left");
-        yield return EnsureArmCleared(_armRight, "Right");
+        // Arming is independent of the FCS task object and survives Logic hot reload. Clear only controls that
+        // are physically ON; never infer state from LookAtTarget.GetActive()/isClicked.
+        yield return EnsureArmState(_armLeft, _armLeftPose, false, "Left");
+        yield return EnsureArmState(_armRight, _armRightPose, false, "Right");
 
-        // Walk the confirmation dependency chain backwards. This avoids tearing down an upstream prerequisite
-        // while a downstream switch is still latched and potentially no longer interactable.
-        yield return EnsureReviewCleared(_readyFire, "ReadyToFire");
-        yield return EnsureReviewCleared(_elevationCheck, "ElevationCheck");
-        yield return EnsureReviewCleared(_rotationCheck, "RotationCheck");
-        yield return EnsureReviewCleared(_bulletCheck, "BulletCheck");
-        yield return EnsureReviewCleared(_taskCheck, "TaskCheck");
+        // Clear the review dependency chain backwards, re-reading the physical pose before every action.
+        yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire");
+        yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck");
+        yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck");
+        yield return EnsureReviewState(_bulletCheck, _bulletPose, false, "BulletCheck");
+        yield return EnsureReviewState(_taskCheck, _taskPose, false, "TaskCheck");
 
-        LogLatchedStates("after F9 reset");
+        LogPhysicalStates("after F9 reset");
     }
 
     /// <summary>
-    /// The first call after TryBind is the F9/startup recovery hook and clears only the shared trigger-console
-    /// latches. Shell, powder, elevation and the rest of each gun's physical state are deliberately untouched.
-    /// All later calls belong to normal tasks and must not reset shared controls.
+    /// The first call after TryBind is the F9/startup recovery hook and resets the shared trigger console from
+    /// its REAL physical poses. Shell, powder, elevation and the rest of each gun's physical state are untouched.
+    /// Later calls belong to normal tasks and must not clear shared controls.
     /// </summary>
     public IEnumerator PrepareForNewFireSolution(LeftRight leftRight) {
         if (_resetPendingAfterBind) {
-            // Clear first so two callers can never both run the reset if scheduling overlaps.
             _resetPendingAfterBind = false;
-            yield return ResetLatchedFireControlsAfterBind();
+            yield return ResetPhysicalFireControlsAfterBind();
             yield break;
         }
 
-        LogLatchedStates("before fire solution");
+        LogPhysicalStates("before fire solution");
     }
 
     public IEnumerator Arm(LeftRight leftRight) {
-        if (leftRight == LeftRight.Left) {
-            yield return EnsureArmSelected(_armLeft, "Left");
-        }
-        else {
-            yield return EnsureArmSelected(_armRight, "Right");
-        }
+        if (leftRight == LeftRight.Left)
+            yield return EnsureArmState(_armLeft, _armLeftPose, true, "Left");
+        else
+            yield return EnsureArmState(_armRight, _armRightPose, true, "Right");
+
         yield return FcsRuntimeClock.WaitForSeconds(0.75f);
-        LogLatchedStates("after arm");
+        LogPhysicalStates("after arm");
     }
 
     public IEnumerator ConfirmTask() {
-        yield return EnsureReviewConfirmed(_taskCheck, "TaskCheck");
+        yield return EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck");
     }
 
     public IEnumerator ConfirmBullet() {
-        yield return EnsureReviewConfirmed(_bulletCheck, "BulletCheck");
+        yield return EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck");
     }
 
     public IEnumerator ConfirmRotation() {
-        yield return EnsureReviewConfirmed(_rotationCheck, "RotationCheck");
+        yield return EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck");
     }
 
     public IEnumerator ConfirmElevation() {
-        yield return EnsureReviewConfirmed(_elevationCheck, "ElevationCheck");
+        yield return EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck");
     }
 
     public IEnumerator ReadyToFire() {
-        yield return EnsureReviewConfirmed(_readyFire, "ReadyToFire");
+        yield return EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire");
     }
 }
