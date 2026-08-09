@@ -76,6 +76,9 @@ public class FSC
     private FirePrioritySession? _firePrioritySession;
     private ArtilleryTask? _firePriorityWinner;
     private ArtilleryTask? _firePrioritySecond;
+    // The turret-lane owner may still be preempted while it is only slewing/holding azimuth.
+    // _fireLaneCommittedTask is the later hard-commit boundary immediately before Review Console work.
+    private ArtilleryTask? _turretLaneOwnerTask;
     private ArtilleryTask? _fireLaneCommittedTask;
     private bool _firePriorityWinnerProvisional;
     private int _firePriorityGeneration;
@@ -189,6 +192,7 @@ public class FSC
         _firePrioritySession = null;
         _firePriorityWinner = null;
         _firePrioritySecond = null;
+        _turretLaneOwnerTask = null;
         _fireLaneCommittedTask = null;
         _firePriorityWinnerProvisional = false;
         _firePriorityStatusText = "首发仲裁：未触发（已重置）";
@@ -566,17 +570,16 @@ public class FSC
     /// <summary>
     /// Unified cleanup for an abnormal task exit. This deliberately does NOT bump the global generation:
     /// F9/Dispose use ResetFirePriorityTracking() for that. Local failures must invalidate the broken pair
-    /// without killing a healthy task on the other gun. The failed task's candidate/session/order is removed,
-    /// while an already committed or fixed non-provisional winner on the other gun is preserved.
+    /// without killing a healthy task on the other gun. A healthy winner is preserved together with whether
+    /// it is still provisional; only the later Review/Arm hard-commit is non-preemptible.
     /// </summary>
     private void InvalidateFirePriorityForAbnormalTask(ArtilleryTask task, string reason) {
         var preservedWinner = _firePriorityWinner != null
                               && !ReferenceEquals(_firePriorityWinner, task)
                               && IsActiveTask(_firePriorityWinner)
-                              && (!_firePriorityWinnerProvisional
-                                  || ReferenceEquals(_fireLaneCommittedTask, _firePriorityWinner))
             ? _firePriorityWinner
             : null;
+        var preservedWinnerProvisional = preservedWinner != null && _firePriorityWinnerProvisional;
 
         if (_leftFireCandidate != null && ReferenceEquals(_leftFireCandidate.Task, task))
             _leftFireCandidate = null;
@@ -590,16 +593,22 @@ public class FSC
         _firePrioritySession = null;
         _firePriorityWinner = preservedWinner;
         _firePrioritySecond = null;
-        _firePriorityWinnerProvisional = false;
+        _firePriorityWinnerProvisional = preservedWinnerProvisional;
         _firePriorityLeftDetail = "";
         _firePriorityRightDetail = "";
         _firePriorityOrderText = "";
 
+        if (ReferenceEquals(_turretLaneOwnerTask, task)
+            || (_turretLaneOwnerTask != null && !IsActiveTask(_turretLaneOwnerTask))) {
+            _turretLaneOwnerTask = null;
+        }
+
         if (preservedWinner != null) {
             if (!ReferenceEquals(_fireLaneCommittedTask, preservedWinner))
                 _fireLaneCommittedTask = null;
-            _firePriorityStatusText =
-                $"首发仲裁：异常清理（{reason}），保持 T{preservedWinner.targetId} 优先";
+            _firePriorityStatusText = preservedWinnerProvisional
+                ? $"首发仲裁：异常清理（{reason}），保持 T{preservedWinner.targetId} 临时优先"
+                : $"首发仲裁：异常清理（{reason}），保持 T{preservedWinner.targetId} 优先";
         }
         else {
             if (ReferenceEquals(_fireLaneCommittedTask, task)
@@ -619,22 +628,9 @@ public class FSC
         if (_fireLaneCommittedTask != null || LeftTask == null || RightTask == null)
             return;
 
-        // Only a provisional single-gun winner may be reopened. A promoted second shot from an already-arbitrated
-        // pair is fixed and must stay ahead of any freshly dispatched task, even while the other gun recovers.
-        if (_firePriorityWinner != null
-            && _firePriorityWinnerProvisional
-            && _firePrioritySecond == null
-            && GetCandidateForTask(_firePriorityWinner) != null
-            && CanArbitrateCurrentTasks()) {
-            var previousWinner = _firePriorityWinner;
-            _firePriorityWinner = null;
-            _firePriorityWinnerProvisional = false;
-            MelonLogger.Msg(
-                $"[FCS] T{previousWinner.targetId}: second synchronized task arrived before fire-lane commit; reopening arbitration");
-            OpenFirePrioritySession("second synchronized task assigned before fire-lane commit");
-            return;
-        }
-
+        // Assignment alone is not enough reason to interrupt a provisional turret owner. Let it keep slewing
+        // while the newly assigned task performs its real ballistic solve; RegisterBallisticSolution reopens
+        // arbitration only when that second candidate actually exists.
         if (_firePriorityWinner == null && _firePrioritySession == null) {
             var left = GetCurrentCandidate(LeftRight.Left);
             var right = GetCurrentCandidate(LeftRight.Right);
@@ -661,8 +657,8 @@ public class FSC
             return true;
 
         if (_firePriorityWinner != null) {
-            // If a single-gun winner has not actually committed the shared turret yet, a newly solved second task
-            // still belongs to the same synchronized preparation round. Reopen Promise.all-style arbitration.
+            // Until Review/Arm hard-commit, even a promoted previous Second remains provisional. A newly solved
+            // task on the recovered gun may therefore reopen arbitration while the current winner is still slewing.
             if (_firePriorityWinnerProvisional
                 && _fireLaneCommittedTask == null
                 && _firePrioritySecond == null
@@ -676,12 +672,11 @@ public class FSC
                 return true;
             }
 
-            // A committed or promoted shot is never preempted. A later solution can only become the fixed second
-            // shot behind it.
+            // If arbitration cannot reopen (for example because the winner has already hard-committed), the
+            // new solution can only queue behind the current winner. Do not change provisional state here.
             if (_firePrioritySecond == null && !ReferenceEquals(_firePriorityWinner, task)) {
                 _firePrioritySecond = task;
-                _firePriorityWinnerProvisional = false;
-                MelonLogger.Msg($"[FCS] {side} T{task.targetId}: queued behind existing fire-lane owner");
+                MelonLogger.Msg($"[FCS] {side} T{task.targetId}: queued behind current fire priority");
             }
             return true;
         }
@@ -836,7 +831,9 @@ public class FSC
         _firePrioritySession = null;
         _firePriorityWinner = winner.Task;
         _firePrioritySecond = loser.Task;
-        _firePriorityWinnerProvisional = false;
+        // Pair order is still provisional until the winner has both azimuth and elevation ready and is
+        // about to touch Review Console. Before that point a later synchronized candidate may preempt it.
+        _firePriorityWinnerProvisional = true;
         _firePriorityOrderText = $"T{winner.Task.targetId} → T{loser.Task.targetId}";
         _firePriorityStatusText = $"首发仲裁：已完成 {_firePriorityOrderText}";
         MelonLogger.Msg(
@@ -927,18 +924,36 @@ public class FSC
         return left;
     }
 
-    private bool CommitFireLane(ArtilleryTask task, int generation) {
+    private bool ClaimTurretLane(ArtilleryTask task, int generation) {
         if (generation != _firePriorityGeneration
             || !ReferenceEquals(_firePriorityWinner, task)
             || !IsActiveTask(task))
             return false;
 
+        _turretLaneOwnerTask = task;
+        _firePriorityStatusText = !string.IsNullOrEmpty(_firePriorityOrderText)
+            ? $"首发仲裁：临时顺序 {_firePriorityOrderText}（T{task.targetId} 使用方位）"
+            : $"首发仲裁：T{task.targetId} 临时优先（使用共享方位）";
+        MelonLogger.Msg($"[FCS] T{task.targetId}: shared turret lane claimed provisionally");
+        return true;
+    }
+
+    private bool CommitFireLane(ArtilleryTask task, int generation, TurretReservation reservation) {
+        if (generation != _firePriorityGeneration
+            || !ReferenceEquals(_firePriorityWinner, task)
+            || !IsActiveTask(task)
+            || !reservation.Acquired
+            || !reservation.Ready
+            || !ReferenceEquals(_turretLaneOwnerTask, task))
+            return false;
+
         _fireLaneCommittedTask = task;
+        reservation.HardCommitted = true;
         _firePriorityWinnerProvisional = false;
         _firePriorityStatusText = !string.IsNullOrEmpty(_firePriorityOrderText)
             ? $"首发仲裁：顺序锁定 {_firePriorityOrderText}"
             : $"首发仲裁：T{task.targetId} 已取得共享击发权";
-        MelonLogger.Msg($"[FCS] T{task.targetId}: shared fire lane committed");
+        MelonLogger.Msg($"[FCS] T{task.targetId}: shared fire lane hard-committed before Review Console");
         return true;
     }
 
@@ -946,18 +961,17 @@ public class FSC
         if (ReferenceEquals(_firePriorityWinner, task))
             return true;
 
-        // Once a pair has been resolved and First has actually committed the shared fire lane, let the fixed
-        // Second enter CoroutineLock.Acquire() immediately. It waits behind First while that lock is held,
-        // reproducing the pre-decoupling reservation pipeline without allowing Second to rotate out of order.
+        // Once First physically owns the turret lane, let Second prequeue behind the held lock immediately.
+        // Turret ownership itself is still provisional; only the later Review/Arm boundary is hard-committed.
         return ReferenceEquals(_firePrioritySecond, task)
                && _firePriorityWinner != null
-               && ReferenceEquals(_fireLaneCommittedTask, _firePriorityWinner)
+               && ReferenceEquals(_turretLaneOwnerTask, _firePriorityWinner)
                && IsActiveTask(_firePriorityWinner);
     }
 
     private IEnumerator WaitForTurretQueueEligibility(ArtilleryTask task, TurretReservation res) {
-        // Event/state gate only: no scoring timeout. A resolved First may enter immediately; its fixed Second may
-        // prequeue only after First owns the lane. Reset/generation changes still cancel stale reservations.
+        // Event/state gate only: no scoring timeout. A resolved First may enter immediately; Second may prequeue
+        // after First physically owns the turret lane. Reset/generation changes still cancel stale reservations.
         while (!res.Canceled
                && res.Generation == _firePriorityGeneration
                && IsActiveTask(task)
@@ -999,11 +1013,13 @@ public class FSC
                 && TryGetTaskSide(next, out var nextSide)
                 && GetFirePriorityGunPhase(nextSide, next) == FirePriorityGunPhase.Preparation) {
                 _firePriorityWinner = next;
-                _firePriorityWinnerProvisional = false;
+                // The previous Second gets an immediate head start on the turret, but remains preemptible until
+                // azimuth + elevation are both ready and it hard-commits immediately before Review Console.
+                _firePriorityWinnerProvisional = true;
                 _firePriorityStatusText = !string.IsNullOrEmpty(_firePriorityOrderText)
-                    ? $"首发仲裁：第二炮优先 T{next.targetId}（{_firePriorityOrderText}）"
-                    : $"首发仲裁：T{next.targetId} 优先";
-                MelonLogger.Msg($"[FCS] Fire priority: promoting T{next.targetId} after previous shot released");
+                    ? $"首发仲裁：第二炮临时优先 T{next.targetId}（{_firePriorityOrderText}）"
+                    : $"首发仲裁：T{next.targetId} 临时优先";
+                MelonLogger.Msg($"[FCS] Fire priority: promoting T{next.targetId} provisionally after previous shot");
                 return;
             }
         }
@@ -1390,19 +1406,32 @@ public class FSC
             ? AutoTurretWaitTimeoutSeconds
             : ManualTurretWaitTimeoutSeconds;
         var turretDeadline = FcsRuntimeClock.Now + turretWaitTimeout;
+
+        // Hard commit only after BOTH local elevation and shared azimuth are physically ready. Until this exact
+        // boundary, a provisional winner (including a promoted previous Second) may lose re-arbitration and its
+        // live TurretReservation will release/requeue the shared turret without touching Review/Arm controls.
         while (true) {
-            yield return FcsRuntimeClock.WaitUntilFocused();
-            if (turret.Ready || turret.Failed) break;
-            if (FcsRuntimeClock.Now >= turretDeadline) break;
+            while (true) {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                if (turret.Ready || turret.Failed) break;
+                if (FcsRuntimeClock.Now >= turretDeadline) break;
+                yield return null;
+            }
+            if (turret.Failed) {
+                AbortTask(leftRight, task, turret, turret.FailureReason);
+                yield break;
+            }
+            if (!turret.Ready && FcsRuntimeClock.Now >= turretDeadline) {
+                AbortTask(leftRight, task, turret, $"turret reservation timed out after {turretWaitTimeout:F0}s");
+                yield break;
+            }
+
+            if (CommitFireLane(task, taskGeneration, turret))
+                break;
+
+            // Arbitration changed between Ready observation and commit. Do not touch shared fire controls; wait
+            // for this task to win again and reacquire/reach its azimuth normally.
             yield return null;
-        }
-        if (turret.Failed) {
-            AbortTask(leftRight, task, turret, turret.FailureReason);
-            yield break;
-        }
-        if (!turret.Ready) {
-            AbortTask(leftRight, task, turret, $"turret reservation timed out after {turretWaitTimeout:F0}s");
-            yield break;
         }
 
         try {
@@ -1493,6 +1522,7 @@ public class FSC
         public bool Failed;
         public bool Canceled;
         public bool Released;
+        public bool HardCommitted;
         public string FailureReason = "";
 
         public TurretReservation(ArtilleryTask task, int generation) {
@@ -1507,11 +1537,12 @@ public class FSC
             if (res.Canceled)
                 yield break;
 
-            // First and the already-fixed Second can both reach this Acquire. First gets the free lock; Second
-            // reaches it only after First has committed, so it waits behind the held lock and is ready to take over
-            // immediately after a confirmed shot releases it.
+            // First and Second can both reach this Acquire. First gets the free lock; Second may prequeue once
+            // First physically owns the turret, so it is ready to take over immediately after lock release.
             res.Released = false;
             res.Acquired = false;
+            res.Ready = false;
+            res.HardCommitted = false;
             yield return _turretLock.Acquire(
                 () => res.Canceled
                       || res.Generation != _firePriorityGeneration
@@ -1541,7 +1572,7 @@ public class FSC
                 continue;
             }
 
-            if (!CommitFireLane(task, res.Generation)) {
+            if (!ClaimTurretLane(task, res.Generation)) {
                 ReleaseTurretOnce(res);
                 yield return null;
                 continue;
@@ -1576,7 +1607,28 @@ public class FSC
             }
 
             res.Ready = true;
-            yield break;
+
+            // Keep the reservation coroutine alive after azimuth reaches target. If this provisional owner loses
+            // arbitration before the main task hard-commits, release the turret and re-enter the normal queue.
+            // This also covers the case where azimuth finishes before the gun's own elevation is ready.
+            while (!res.Canceled
+                   && res.Generation == _firePriorityGeneration
+                   && IsActiveTask(task)
+                   && !res.HardCommitted
+                   && ReferenceEquals(_firePriorityWinner, task)) {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                yield return null;
+            }
+
+            if (res.HardCommitted)
+                yield break;
+
+            res.Ready = false;
+            ReleaseTurretOnce(res);
+            if (res.Canceled || res.Generation != _firePriorityGeneration || !IsActiveTask(task))
+                yield break;
+
+            yield return null;
         }
     }
 
@@ -1584,6 +1636,10 @@ public class FSC
         if (res.Acquired && !res.Released) {
             res.Released = true;
             res.Acquired = false;
+            res.Ready = false;
+            res.HardCommitted = false;
+            if (ReferenceEquals(_turretLaneOwnerTask, res.Task))
+                _turretLaneOwnerTask = null;
             if (ReferenceEquals(_fireLaneCommittedTask, res.Task))
                 _fireLaneCommittedTask = null;
             _turretLock.Release();
