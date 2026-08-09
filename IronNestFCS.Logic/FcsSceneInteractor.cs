@@ -132,7 +132,7 @@ public class FcsSceneInteractor {
     }
 
     private IEnumerator QueueStableTarget(int targetId, BulletType bulletType, GameObject button) {
-        var clickedAt = Time.realtimeSinceStartup;
+        var clickedAt = Time.time;
         ArtilleryTask? task = null;
         yield return fcs.MapTable.GetStableMarkTarget(targetId, result => task = result);
 
@@ -143,8 +143,8 @@ public class FcsSceneInteractor {
         }
 
         // Preserve the old one-second anti-double-click cooldown. Stable sampling normally consumes
-        // about 0.2 s of it; only wait for the remainder.
-        var remainingCooldown = 1f - (Time.realtimeSinceStartup - clickedAt);
+        // about 0.2 s of it; only wait for the remainder. Game time pauses when the game is paused.
+        var remainingCooldown = 1f - (Time.time - clickedAt);
         if (remainingCooldown > 0f) {
             yield return new WaitForSeconds(remainingCooldown);
         }
@@ -239,9 +239,11 @@ public class FcsSceneInteractor {
             yield break;
         }
 
-        var deadline = Time.realtimeSinceStartup + Mathf.Max(0.1f, timeoutSeconds);
+        // Our timeout budget follows game time; the game's own nextAllowedClickTime remains on
+        // realtimeSinceStartup because that is the clock the LookAtTarget field itself uses.
+        var deadline = Time.time + Mathf.Max(0.1f, timeoutSeconds);
         while (button.isActive == false || button.nextAllowedClickTime > Time.realtimeSinceStartup) {
-            if (Time.realtimeSinceStartup >= deadline) {
+            if (Time.time >= deadline) {
                 MelonLogger.Error($"[FCS] WaitAndClick timeout: {button.gameObject.name}");
                 yield break;
             }
