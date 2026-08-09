@@ -36,9 +36,9 @@ public class FcsWindow
             lineCount = 0;
             lineCount += fcs.LeftTask == null ? 1 : 2;
             lineCount += fcs.RightTask == null ? 1 : 2;
-            lineCount += 1; // 自动开火 / 最大装药状态
-            lineCount += 1 + queue.Count; // 队列标题 + 队列内容
-            lineCount += 2; // 本轮统计 + 近期记录标题
+            lineCount += 1;
+            lineCount += 1 + queue.Count;
+            lineCount += 2;
 
             for (var i = recentStart; i < recentItems.Length; i++) {
                 lineCount += 1;
@@ -105,7 +105,7 @@ public class FcsWindow
             return;
         }
 
-        var elapsed = task.startedAt > 0f ? Time.time - task.startedAt : 0f;
+        var elapsed = task.startedAt > 0f ? FcsRuntimeClock.Now - task.startedAt : 0f;
         label($"{name}炮：T{task.targetId} {task.bulletType}  {ProgressText(task.progress)}  {elapsed:F0}秒");
         label($"  方位 {task.angel:F1}° / 距离 {task.distance:F2}km   装药 {task.chargeCount}   仰角 {task.elevation:F1}°");
     }
