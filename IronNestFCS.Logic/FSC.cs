@@ -31,6 +31,8 @@ public class FSC
     private const float AutoFireTimeoutSeconds = 25f;
     private const float ManualFireTimeoutSeconds = 300f;
     private const float PhysicalRecoveryTimeoutSeconds = 30f;
+    private const float FirePrioritySolveBufferSeconds = 2.7f;
+    private const float FirePriorityScoreTieTolerance = 0.05f;
     private const int RecentTaskLimit = 20;
 
     private HarmonyInstance? _harmony;
@@ -67,6 +69,12 @@ public class FSC
     private bool _leftRecoveryTimeoutLogged;
     private bool _rightRecoveryTimeoutLogged;
 
+    private FirePriorityCandidate? _leftFireCandidate;
+    private FirePriorityCandidate? _rightFireCandidate;
+    private ArtilleryTask? _firePriorityWinner;
+    private ArtilleryTask? _firePrioritySecond;
+    private float _firePriorityWindowDeadline = -1f;
+
     private enum GunTaskMode {
         FreshLoad,
         CompleteShellLoaded,
@@ -99,6 +107,7 @@ public class FSC
         _turretLock.Reset();
         FcsRuntimeClock.Reset();
         ResetPhysicalRecoveryTracking();
+        ResetFirePriorityTracking();
 
         IsBound = TryBindSafe(nameof(MapTable), MapTable.TryBind)
                   && TryBindSafe(nameof(BallisticCalculator), BallisticCalculator.TryBind)
@@ -142,6 +151,7 @@ public class FSC
         LeftTask = null;
         RightTask = null;
         ResetPhysicalRecoveryTracking();
+        ResetFirePriorityTracking();
 
         _sceneInteractor.ShutDown();
         try { _harmony?.UnpatchSelf(); }
@@ -154,6 +164,14 @@ public class FSC
         _rightRecoveryStartedAt = -1f;
         _leftRecoveryTimeoutLogged = false;
         _rightRecoveryTimeoutLogged = false;
+    }
+
+    private void ResetFirePriorityTracking() {
+        _leftFireCandidate = null;
+        _rightFireCandidate = null;
+        _firePriorityWinner = null;
+        _firePrioritySecond = null;
+        _firePriorityWindowDeadline = -1f;
     }
 
     /// <summary>
@@ -380,12 +398,207 @@ public class FSC
         _runningCoroutines.Add(handle);
     }
 
+    private bool IsActiveTask(ArtilleryTask task) {
+        return ReferenceEquals(LeftTask, task) || ReferenceEquals(RightTask, task);
+    }
+
+    private FirePriorityCandidate? GetCurrentCandidate(LeftRight side) {
+        var candidate = side == LeftRight.Left ? _leftFireCandidate : _rightFireCandidate;
+        var active = side == LeftRight.Left ? LeftTask : RightTask;
+        return candidate != null && ReferenceEquals(candidate.Task, active) ? candidate : null;
+    }
+
+    private void RegisterBallisticSolution(LeftRight side, ArtilleryTask task) {
+        var candidate = new FirePriorityCandidate(side, task, FcsRuntimeClock.Now);
+        if (side == LeftRight.Left) _leftFireCandidate = candidate;
+        else _rightFireCandidate = candidate;
+
+        if (ReferenceEquals(_firePriorityWinner, task) || ReferenceEquals(_firePrioritySecond, task))
+            return;
+
+        if (_firePriorityWinner != null) {
+            if (_firePrioritySecond == null && !ReferenceEquals(_firePriorityWinner, task)) {
+                _firePrioritySecond = task;
+                MelonLogger.Msg($"[FCS] {side} T{task.targetId}: ballistic solution ready; queued behind committed fire lane owner");
+            }
+            return;
+        }
+
+        var otherTask = side == LeftRight.Left ? RightTask : LeftTask;
+        if (otherTask == null) {
+            SetFirePriority(task, null,
+                $"{side} T{task.targetId} is the only active solved task");
+            return;
+        }
+
+        if (_firePriorityWindowDeadline < 0f) {
+            _firePriorityWindowDeadline = candidate.SolvedAt + FirePrioritySolveBufferSeconds;
+            MelonLogger.Msg(
+                $"[FCS] {side} T{task.targetId}: ballistic solution ready; waiting up to {FirePrioritySolveBufferSeconds:F1}s for the other active gun");
+        }
+
+        TryResolveFirePriority();
+    }
+
+    private void TryResolveFirePriority() {
+        if (_firePriorityWinner != null)
+            return;
+
+        var left = GetCurrentCandidate(LeftRight.Left);
+        var right = GetCurrentCandidate(LeftRight.Right);
+        if (left == null && right == null)
+            return;
+
+        if (left != null && right != null) {
+            ResolveFirePriorityPair(left, right);
+            return;
+        }
+
+        var only = left ?? right!;
+        var otherTask = only.Side == LeftRight.Left ? RightTask : LeftTask;
+        if (otherTask == null) {
+            SetFirePriority(only.Task, null,
+                $"{only.Side} T{only.Task.targetId} has no competing active task");
+            return;
+        }
+
+        if (_firePriorityWindowDeadline < 0f)
+            _firePriorityWindowDeadline = only.SolvedAt + FirePrioritySolveBufferSeconds;
+
+        if (FcsRuntimeClock.Now < _firePriorityWindowDeadline)
+            return;
+
+        SetFirePriority(
+            only.Task,
+            otherTask,
+            $"{only.Side} T{only.Task.targetId} kept original first-solved order after {FirePrioritySolveBufferSeconds:F1}s solve buffer expired");
+    }
+
+    private void ResolveFirePriorityPair(FirePriorityCandidate left, FirePriorityCandidate right) {
+        FirePriorityCandidate winner;
+        FirePriorityCandidate loser;
+        string reason;
+
+        var turretController = GameObject.Find("TurretSystem")?.GetComponent<TurretController>();
+        if (turretController == null) {
+            winner = FirstByOriginalOrder(left, right);
+            loser = ReferenceEquals(winner, left) ? right : left;
+            reason = "turret angle unavailable; falling back to original solved order";
+        }
+        else {
+            var currentAzimuth = turretController.CurrentAngle;
+            var leftElevation = GunPhysicalState.Read("Left").Elevation;
+            var rightElevation = GunPhysicalState.Read("Right").Elevation;
+
+            var leftAzimuthDelta = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, -left.Task.angel));
+            var rightAzimuthDelta = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, -right.Task.angel));
+            var leftElevationDelta = Mathf.Abs(left.Task.elevation - leftElevation);
+            var rightElevationDelta = Mathf.Abs(right.Task.elevation - rightElevation);
+            var leftScore = leftAzimuthDelta + leftElevationDelta;
+            var rightScore = rightAzimuthDelta + rightElevationDelta;
+
+            if (Mathf.Abs(leftScore - rightScore) <= FirePriorityScoreTieTolerance) {
+                winner = FirstByOriginalOrder(left, right);
+                loser = ReferenceEquals(winner, left) ? right : left;
+                reason =
+                    $"alignment scores tied; currentAz={currentAzimuth:F1}°, " +
+                    $"Left T{left.Task.targetId}={leftScore:F1}° (az {leftAzimuthDelta:F1}+el {leftElevationDelta:F1}), " +
+                    $"Right T{right.Task.targetId}={rightScore:F1}° (az {rightAzimuthDelta:F1}+el {rightElevationDelta:F1}); " +
+                    "keeping original solved order";
+            }
+            else if (leftScore < rightScore) {
+                winner = left;
+                loser = right;
+                reason =
+                    $"currentAz={currentAzimuth:F1}°, Left T{left.Task.targetId}={leftScore:F1}° " +
+                    $"(az {leftAzimuthDelta:F1}+el {leftElevationDelta:F1}) < Right T{right.Task.targetId}={rightScore:F1}° " +
+                    $"(az {rightAzimuthDelta:F1}+el {rightElevationDelta:F1})";
+            }
+            else {
+                winner = right;
+                loser = left;
+                reason =
+                    $"currentAz={currentAzimuth:F1}°, Right T{right.Task.targetId}={rightScore:F1}° " +
+                    $"(az {rightAzimuthDelta:F1}+el {rightElevationDelta:F1}) < Left T{left.Task.targetId}={leftScore:F1}° " +
+                    $"(az {leftAzimuthDelta:F1}+el {leftElevationDelta:F1})";
+            }
+        }
+
+        SetFirePriority(winner.Task, loser.Task, reason);
+    }
+
+    private static FirePriorityCandidate FirstByOriginalOrder(
+        FirePriorityCandidate left,
+        FirePriorityCandidate right) {
+        if (left.SolvedAt < right.SolvedAt)
+            return left;
+        if (right.SolvedAt < left.SolvedAt)
+            return right;
+        return left;
+    }
+
+    private void SetFirePriority(ArtilleryTask winner, ArtilleryTask? second, string reason) {
+        _firePriorityWinner = winner;
+        _firePrioritySecond = second != null && !ReferenceEquals(second, winner) ? second : null;
+        _firePriorityWindowDeadline = -1f;
+
+        var secondText = _firePrioritySecond == null ? "none" : $"T{_firePrioritySecond.targetId}";
+        MelonLogger.Msg(
+            $"[FCS] Fire priority: T{winner.targetId} first, second={secondText}; {reason}");
+    }
+
+    private IEnumerator WaitForFirePriority(ArtilleryTask task, TurretReservation res) {
+        while (!res.Canceled) {
+            TryResolveFirePriority();
+            if (ReferenceEquals(_firePriorityWinner, task))
+                yield break;
+
+            if (!IsActiveTask(task)) {
+                res.Canceled = true;
+                yield break;
+            }
+
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return null;
+        }
+    }
+
+    private void ReleaseFirePriority(ArtilleryTask task) {
+        if (_leftFireCandidate != null && ReferenceEquals(_leftFireCandidate.Task, task))
+            _leftFireCandidate = null;
+        if (_rightFireCandidate != null && ReferenceEquals(_rightFireCandidate.Task, task))
+            _rightFireCandidate = null;
+
+        if (ReferenceEquals(_firePrioritySecond, task))
+            _firePrioritySecond = null;
+
+        if (ReferenceEquals(_firePriorityWinner, task)) {
+            _firePriorityWinner = null;
+            var next = _firePrioritySecond;
+            _firePrioritySecond = null;
+            _firePriorityWindowDeadline = -1f;
+
+            if (next != null && IsActiveTask(next)) {
+                _firePriorityWinner = next;
+                MelonLogger.Msg($"[FCS] Fire priority: promoting T{next.targetId} after previous lane owner released");
+                return;
+            }
+        }
+
+        if (_firePriorityWinner == null)
+            TryResolveFirePriority();
+    }
+
     private void ClearSlotWithoutDispatch(LeftRight leftRight) {
         if (leftRight == LeftRight.Left) {
+            if (LeftTask != null)
+                ReleaseFirePriority(LeftTask);
             LeftGun.ReleaseElevationOverride();
             LeftTask = null;
         }
         else {
+            if (RightTask != null)
+                ReleaseFirePriority(RightTask);
             RightGun.ReleaseElevationOverride();
             RightTask = null;
         }
@@ -451,6 +664,7 @@ public class FSC
         task.failureReason = reason;
         turret.Canceled = true;
         ReleaseTurretOnce(turret);
+        ReleaseFirePriority(task);
         MelonLogger.Error($"[FCS] {leftRight} T{task.targetId} failed: {reason}");
         RecordTaskResult(task);
         ReleaseSlot(leftRight);
@@ -480,12 +694,6 @@ public class FSC
             RequeueForPhysicalReclassification(
                 leftRight, task, turret, $"expected loaded {task.bulletType.DisplayName()}, got {initialState.Summary()}");
             yield break;
-        }
-
-        // Normal and shell-only recovery can select their charge from the new target, so turret rotation may
-        // overlap their loading. A fully loaded round has a fixed charge: solve/validate it first, then move turret.
-        if (mode != GunTaskMode.ReuseLoadedRound) {
-            _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
         }
 
         int powderCount;
@@ -588,9 +796,15 @@ public class FSC
 
             MelonLogger.Msg(
                 $"[FCS] {leftRight} T{task.targetId}: reusing chambered {task.bulletType.DisplayName()} C{powderCount}");
-            _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
         }
-        else {
+
+        // Only the shared fire-lane ownership is optimized. Once a task has a valid ballistic solution,
+        // its original loading/elevation pipeline continues normally. The reservation coroutine may wait up to
+        // 2.7 s for the other active gun's solution, then the chosen winner rotates the shared turret in parallel.
+        RegisterBallisticSolution(leftRight, task);
+        _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
+
+        if (mode != GunTaskMode.ReuseLoadedRound) {
             if (mode == GunTaskMode.FreshLoad) {
                 var beforeShellLoad = GunPhysicalState.Read(sideName);
                 if (!beforeShellLoad.EmptyReady) {
@@ -726,6 +940,7 @@ public class FSC
         }
         finally {
             ReleaseTurretOnce(turret);
+            ReleaseFirePriority(task);
         }
 
         if (!gunSys.LastFireObserved) {
@@ -742,6 +957,18 @@ public class FSC
         ReleaseSlot(leftRight);
     }
 
+    private sealed class FirePriorityCandidate {
+        public LeftRight Side { get; }
+        public ArtilleryTask Task { get; }
+        public float SolvedAt { get; }
+
+        public FirePriorityCandidate(LeftRight side, ArtilleryTask task, float solvedAt) {
+            Side = side;
+            Task = task;
+            SolvedAt = solvedAt;
+        }
+    }
+
     private sealed class TurretReservation {
         public bool Acquired;
         public bool Ready;
@@ -752,6 +979,10 @@ public class FSC
     }
 
     private IEnumerator ReserveTurretAndRotate(ArtilleryTask task, TurretReservation res) {
+        yield return WaitForFirePriority(task, res);
+        if (res.Canceled)
+            yield break;
+
         yield return _turretLock.Acquire();
         res.Acquired = true;
         yield return FcsRuntimeClock.WaitUntilFocused();
@@ -766,12 +997,14 @@ public class FSC
             res.Failed = true;
             res.FailureReason = $"turret could not reach {task.angel:F1}°";
             ReleaseTurretOnce(res);
+            ReleaseFirePriority(task);
             yield break;
         }
 
         res.Ready = true;
         if (res.Canceled) {
             ReleaseTurretOnce(res);
+            ReleaseFirePriority(task);
         }
     }
 
