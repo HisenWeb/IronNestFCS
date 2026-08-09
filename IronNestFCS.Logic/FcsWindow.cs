@@ -91,12 +91,30 @@ public class FcsWindow
             var duration = item.completedAt > item.startedAt ? item.completedAt - item.startedAt : 0f;
             Label($"  {result} T{item.targetId} {item.bulletType.DisplayName()}  装药{item.chargeCount} 仰角{item.elevation:F1}°  {duration:F0}秒");
             if (item.progress == Progress.Failed && !string.IsNullOrEmpty(item.failureReason)) {
-                Label($"    原因：{item.failureReason}");
+                Label($"    原因：{LocalizeFailureReason(item.failureReason)}");
             }
         }
     }
 
     private static string OnOff(bool value) => value ? "开" : "关";
+
+    private static string LocalizeFailureReason(string reason)
+    {
+        const string incompatiblePrefix = "no compatible gun for current physical loads;";
+        if (reason.StartsWith(incompatiblePrefix, StringComparison.Ordinal))
+        {
+            var detail = reason.Substring(incompatiblePrefix.Length).Trim();
+            detail = detail
+                .Replace("Left=", "左炮=")
+                .Replace("Right=", "右炮=")
+                .Replace("loaded ", "已装填 ")
+                .Replace("shell-loaded ", "已入膛 ")
+                .Replace("empty", "空炮");
+            return $"当前实装弹药无法匹配任务；{detail}";
+        }
+
+        return reason;
+    }
 
     private static void DrawGun(string name, string side, ArtilleryTask? task, Action<string> label)
     {
