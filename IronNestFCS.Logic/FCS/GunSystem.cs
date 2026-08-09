@@ -283,11 +283,10 @@ public class GunSystem {
     }
 
     /// <summary>
-    /// Wait until the release-version reload mechanism is no longer executing an animation/action.
-    /// Reload state indices are data-driven and are NOT stable semantic values: an idle gun can be
-    /// in state 1, 3, or another index depending on the current reload definition. Therefore never
-    /// assume that state 0 means "ready". The controller's working flag is the authoritative signal
-    /// used by the game's own reload flow before another legitimate action can be issued.
+    /// Wait for a release-build reload interaction handoff that has been verified by the physical-state probe.
+    /// `reloadController.working` is NOT a readiness signal in this build: it stays false through long portions
+    /// of states 0..9. The safe interaction nodes we observed are state 3/BreechOpen for an empty gun and
+    /// state 5/SelectPowderCharge for a chambered shell with no powder.
     /// </summary>
     public IEnumerator WaitForReloadReady(float timeoutSeconds = ReloadControlTimeoutSeconds) {
         LastReloadReadySucceeded = false;
@@ -300,18 +299,18 @@ public class GunSystem {
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
 
-            var mechanismReady = reloadController == null || !reloadController.working;
+            var physical = GunPhysicalState.Read(_surfix);
+            var interactionReady = reloadController == null
+                ? !gunController.ExternalReloadLoweringLocked
+                : physical.EmptyReady || physical.ShellLoaded;
             var breechReady = !gunController.ExternalReloadLoweringLocked;
             var motionReady = gunController.elevationChangeVelocity == 0;
-            if (mechanismReady && breechReady && motionReady) break;
+            if (interactionReady && breechReady && motionReady) break;
 
             if (FcsRuntimeClock.Now >= deadline) {
-                var state = reloadController == null
-                    ? "unknown"
-                    : $"{reloadController.CurrentStateIndex}, working={reloadController.working}";
                 MelonLogger.Error(
-                    $"[FCS] GunSystem {_surfix}: reload mechanism did not become ready; " +
-                    $"state={state}, breechLocked={gunController.ExternalReloadLoweringLocked}, " +
+                    $"[FCS] GunSystem {_surfix}: reload mechanism did not reach a safe interaction handoff; " +
+                    $"physical={physical.Summary()}, breechLocked={gunController.ExternalReloadLoweringLocked}, " +
                     $"elevationVelocity={gunController.elevationChangeVelocity:F3}");
                 yield break;
             }
@@ -480,30 +479,36 @@ public class GunSystem {
         if (gunController == null)
             yield break;
 
-        // The game itself keeps running in the background, so already-started recoil/reload recovery
-        // is allowed to count toward the minimum recovery delay. The watchdog still uses FCS active
-        // time so an unfocused window can never cause a timeout by itself.
+        // Once the shot has been observed FCS no longer owns the firing elevation. Release the override now so
+        // the game's reload/recovery system can lower the barrel and complete its normal return-to-load cycle.
+        ReleaseElevationOverride();
+
+        // The release-build probe showed a long empty state-0 interval after firing, followed later by
+        // 1/BreachUnlocking -> 2/GuideDeploy -> 3/BreechOpen. `working` remained false through much of this,
+        // so the old minimum-delay + !working test completed the task too early and the UI switched to idle
+        // while the gun was still physically returning. Keep BackToIdle alive until the verified final handoff.
         var minimumRecoveryUntilGameTime = Time.time + MinimumPostShotRecoverySeconds;
         var deadline = FcsRuntimeClock.Now + Mathf.Max(MinimumPostShotRecoverySeconds, timeoutSeconds);
 
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
 
+            var physical = GunPhysicalState.Read(_surfix);
             var minimumDelayDone = Time.time >= minimumRecoveryUntilGameTime;
-            var mechanismReady = reloadController == null || !reloadController.working;
-            var breechReady = !gunController.ExternalReloadLoweringLocked;
             var motionReady = gunController.elevationChangeVelocity == 0;
-            if (minimumDelayDone && mechanismReady && breechReady && motionReady) break;
+            var recoveryComplete = reloadController == null
+                ? !gunController.ExternalReloadLoweringLocked && motionReady
+                : physical.EmptyReady && motionReady;
+
+            if (minimumDelayDone && recoveryComplete)
+                break;
 
             if (FcsRuntimeClock.Now >= deadline) {
-                var state = reloadController == null
-                    ? "unknown"
-                    : $"{reloadController.CurrentStateIndex}, working={reloadController.working}";
                 MelonLogger.Warning(
                     $"[FCS] GunSystem {_surfix}: post-shot recovery timed out; " +
-                    $"state={state}, breechLocked={gunController.ExternalReloadLoweringLocked}, " +
+                    $"physical={physical.Summary()}, breechLocked={gunController.ExternalReloadLoweringLocked}, " +
                     $"elevationVelocity={gunController.elevationChangeVelocity:F3}. " +
-                    $"The next task will re-check reload readiness before touching controls.");
+                    $"The next task will re-check the physical reload state before touching controls.");
                 break;
             }
             yield return FcsRuntimeClock.WaitForSeconds(0.1f);
