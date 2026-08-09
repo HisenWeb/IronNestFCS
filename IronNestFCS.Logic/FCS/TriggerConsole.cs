@@ -54,29 +54,76 @@ public class TriggerConsole {
         _fire?.AddEnergy(255);
     }
 
-    /// <summary>
-    /// The review-console switches are game actions, not a reliable generic toggle API. GetActive() is useful
-    /// for some two-state cockpit levers, but treating it as the authoritative ON/OFF position here caused
-    /// valid confirmation clicks to be skipped. Keep this hook as a no-op so existing FSC call sites remain
-    /// compatible; a new firing solution is rebuilt by replaying the normal confirmation sequence below.
-    /// </summary>
-    public IEnumerator PrepareForNewFireSolution(LeftRight leftRight) {
-        yield break;
+    private static bool TryGetLeverState(LookAtTarget? lever, out bool active) {
+        active = false;
+        if (lever == null) return false;
+        try {
+            active = lever.GetActive();
+            return true;
+        }
+        catch {
+            return false;
+        }
     }
 
-    public IEnumerator Arm(LeftRight leftRight) {
-        var arm = leftRight == LeftRight.Left ? _armLeft : _armRight;
-        if (arm == null) {
-            MelonLogger.Error($"[FCS] TriggerConsole: missing {leftRight} arming lever");
+    private static IEnumerator ThrowLever(LookAtTarget lever) {
+        yield return FcsRuntimeClock.WaitUntilFocused();
+        lever.OnClickDown();
+
+        // The arming lever is a physical two-state lever. Keep the original, proven hold time rather than
+        // routing it through the generic review-console click helper.
+        yield return new WaitForSeconds(0.2f);
+        lever.OnClickUp();
+        yield return FcsRuntimeClock.WaitForSeconds(0.25f);
+    }
+
+    private static IEnumerator SetArmState(LookAtTarget? lever, bool armed, string name) {
+        if (lever == null) {
+            MelonLogger.Error($"[FCS] TriggerConsole: missing {name}");
             yield break;
         }
 
-        yield return FcsRuntimeClock.WaitUntilFocused();
-        arm.OnClickDown();
+        if (!TryGetLeverState(lever, out var current)) {
+            MelonLogger.Warning($"[FCS] TriggerConsole: can't read {name} state; leaving it unchanged");
+            yield break;
+        }
 
-        // Complete an already-started lever click even if focus changes in this short interval.
-        yield return new WaitForSeconds(0.2f);
-        arm.OnClickUp();
+        if (current == armed)
+            yield break;
+
+        yield return ThrowLever(lever);
+
+        if (TryGetLeverState(lever, out var after)) {
+            if (after != armed) {
+                MelonLogger.Warning(
+                    $"[FCS] TriggerConsole: {name} did not reach requested state {(armed ? "ARMED" : "SAFE")}");
+            }
+        }
+        else {
+            MelonLogger.Warning($"[FCS] TriggerConsole: couldn't verify {name} after lever throw");
+        }
+    }
+
+    /// <summary>
+    /// Review-console checks are action switches and are rebuilt by replaying their normal click sequence.
+    /// The two gun arming levers are different: they are durable two-state controls, so every new fire solution
+    /// first places BOTH guns on safe. F9 uses this same hook, which removes any armed state left by an abandoned task.
+    /// </summary>
+    public IEnumerator PrepareForNewFireSolution(LeftRight leftRight) {
+        yield return SetArmState(_armLeft, false, "Left arming lever");
+        yield return SetArmState(_armRight, false, "Right arming lever");
+    }
+
+    public IEnumerator Arm(LeftRight leftRight) {
+        // Defensive invariant: only the selected gun may be armed. This also self-heals manual/F9 residue.
+        if (leftRight == LeftRight.Left) {
+            yield return SetArmState(_armRight, false, "Right arming lever");
+            yield return SetArmState(_armLeft, true, "Left arming lever");
+        }
+        else {
+            yield return SetArmState(_armLeft, false, "Left arming lever");
+            yield return SetArmState(_armRight, true, "Right arming lever");
+        }
         yield return FcsRuntimeClock.WaitForSeconds(1f);
     }
 
