@@ -31,7 +31,7 @@ public class FSC
     private const float ManualTurretWaitTimeoutSeconds = 300f;
     private const float AutoFireTimeoutSeconds = 25f;
     private const float ManualFireTimeoutSeconds = 300f;
-    private const int RecentTaskLimit = 4;
+    private const int RecentTaskLimit = 20;
 
     private HarmonyInstance? _harmony;
     
@@ -53,6 +53,11 @@ public class FSC
     public int PendingCount => _taskQueue.Count;
     public Queue<ArtilleryTask> QueueCan => new Queue<ArtilleryTask>(_taskQueue);
     public Queue<ArtilleryTask> RecentTasks => new Queue<ArtilleryTask>(_recentTasks);
+    public bool AutoFireEnabled => _sceneInteractor.AutoFire;
+    public bool MaxChargeEnabled => _sceneInteractor.maxCharge;
+    public int CompletedTaskCount { get; private set; }
+    public int SuccessfulTaskCount { get; private set; }
+    public int FailedTaskCount { get; private set; }
 
     /// <summary>
     /// 弹道计算器、采购台和确认台是共享短操作硬件。
@@ -213,6 +218,10 @@ public class FSC
 
     private void RecordTaskResult(ArtilleryTask task) {
         task.completedAt = Time.realtimeSinceStartup;
+        CompletedTaskCount++;
+        if (task.progress == Progress.Finished) SuccessfulTaskCount++;
+        else if (task.progress == Progress.Failed) FailedTaskCount++;
+
         _recentTasks.Enqueue(task);
         while (_recentTasks.Count > RecentTaskLimit)
             _recentTasks.Dequeue();
