@@ -11,7 +11,6 @@ public class PurchaseDeck {
     private Dictionary<BulletType, Transform> bulletCards = new();
     private LookAtTarget? _buyButton;
     
-    
     public bool TryBind() {
         var requisitionConsole = GameObject.Find("Requisition Console").transform;
         var cards = requisitionConsole.GetComponentsInChildren<PunchcardRuntime>();
@@ -28,13 +27,12 @@ public class PurchaseDeck {
             }
         }
         _buyButton = requisitionConsole.FindChild("Universal Button").GetComponent<LookAtTarget>();
-        
         return true;
     }
     
     private DialInteractable GetLeftRightDial() {
         var consoleBox = GameObject.Find("Console Box").transform;
-        return  consoleBox.GetComponentInChildren<DialInteractable>();
+        return consoleBox.GetComponentInChildren<DialInteractable>();
     }
 
     public IEnumerator BuyShell(BulletType type, LeftRight leftRight) {
@@ -43,10 +41,13 @@ public class PurchaseDeck {
             MelonLogger.Error($"[FCS] BuyShell: Can't find {type} card");
             yield break;
         }
+
+        yield return FcsRuntimeClock.WaitUntilFocused();
         var target = new Vector3(6.4814f, -2.4675f, -22.0968f);
         card.position = target;
         card.GetComponent<DraggableItem>().MoveToSlot();
-        yield return new WaitForSeconds(0.5f);
+        yield return FcsRuntimeClock.WaitForSeconds(0.5f);
+        yield return FcsRuntimeClock.WaitUntilFocused();
         
         switch (leftRight) {
             case LeftRight.Left:
@@ -57,7 +58,7 @@ public class PurchaseDeck {
                 break;
         }
         yield return FcsSceneInteractor.WaitAndClick(_buyButton);
-        yield return new WaitForSeconds(2f);
+        yield return FcsRuntimeClock.WaitForSeconds(2f);
     }
 
     public IEnumerator BuyPowders() {
@@ -65,12 +66,13 @@ public class PurchaseDeck {
             MelonLogger.Error("[FCS] BuyPowders: Can't find PowderCharges card");
             yield break;
         }
+
+        yield return FcsRuntimeClock.WaitUntilFocused();
         _powderCard.position = new Vector3(6.4814f, -2.4675f, -22.0968f);
         _powderCard.GetComponent<DraggableItem>().MoveToSlot();
-        // 与 BuyShell 一致：等卡牌入槽稳定后再点购买，避免点击早于入槽导致本次采购无效。
-        yield return new WaitForSeconds(0.5f);
+        yield return FcsRuntimeClock.WaitForSeconds(0.5f);
         yield return FcsSceneInteractor.WaitAndClick(_buyButton);
-        yield return new WaitForSeconds(2f);
+        yield return FcsRuntimeClock.WaitForSeconds(2f);
     }
     
 }
