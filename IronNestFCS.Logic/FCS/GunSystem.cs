@@ -37,6 +37,8 @@ public class GunSystem {
     private const float PowderCommitTimeoutSeconds = 12f;
     private const float MinimumPostShotRecoverySeconds = 13f;
     private const float RecoveryElevationVelocityTolerance = 0.05f;
+    private const float ReloadTraceIntervalSeconds = 5f;
+    private const float ControlTraceIntervalSeconds = 3f;
 
     private string _surfix = "";
 
@@ -274,13 +276,21 @@ public class GunSystem {
         MelonLogger.Msg($"[FCS] GunSystem {_surfix}: Cylinder bullets: {string.Join(", ", bullets)}");
     }
 
+    // Kept for compatibility with older callers. The automation path below uses ClickReloadControl so cylinder
+    // rotation participates in the same complete down/up and F9-release discipline as every other reload control.
     public void NextBullet() {
         if (nextBulletButton == null) {
             MelonLogger.Error($"[FCS] GunSystem {_surfix}: NextBulletButton unbound");
             return;
         }
-        MelonLogger.Msg("[GunSystem] NextBullet");
-        nextBulletButton.OnClickDown();
+        MelonLogger.Warning($"[FCS ReloadTrace] {_surfix}: legacy NextBullet() invoked; completing click synchronously");
+        try {
+            FcsSceneInteractor.BeginPhysicalClick(nextBulletButton);
+            FcsSceneInteractor.EndPhysicalClick(nextBulletButton);
+        }
+        catch (Exception ex) {
+            MelonLogger.Error($"[FCS] GunSystem {_surfix}: legacy NextBullet click failed: {ex.Message}");
+        }
     }
 
     private void FailReloadAction(string reason) {
@@ -298,7 +308,15 @@ public class GunSystem {
             yield break;
         }
 
-        var deadline = FcsRuntimeClock.Now + Mathf.Max(1f, timeoutSeconds);
+        var startedAt = FcsRuntimeClock.Now;
+        var deadline = startedAt + Mathf.Max(1f, timeoutSeconds);
+        var nextTraceAt = startedAt + ReloadTraceIntervalSeconds;
+        var expectedText = expectedStableKind.HasValue
+            ? expectedStableKind.Value.ToString()
+            : "EmptyReady/ShellLoaded";
+        MelonLogger.Msg(
+            $"[FCS ReloadTrace] {_surfix}: waiting handoff={expectedText}; start={GunPhysicalState.Read(_surfix).Summary()}");
+
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
 
@@ -310,12 +328,23 @@ public class GunSystem {
                     : physical.EmptyReady || physical.ShellLoaded;
             var breechReady = !gunController.ExternalReloadLoweringLocked;
             var motionReady = Mathf.Abs(gunController.elevationChangeVelocity) <= RecoveryElevationVelocityTolerance;
-            if (interactionReady && breechReady && motionReady) break;
+            if (interactionReady && breechReady && motionReady) {
+                MelonLogger.Msg(
+                    $"[FCS ReloadTrace] {_surfix}: handoff={expectedText} ready after " +
+                    $"{FcsRuntimeClock.Now - startedAt:F1}s; {physical.Summary()}");
+                break;
+            }
+
+            if (FcsRuntimeClock.Now >= nextTraceAt) {
+                MelonLogger.Warning(
+                    $"[FCS Stall] {_surfix}: waiting reload handoff={expectedText} for " +
+                    $"{FcsRuntimeClock.Now - startedAt:F1}s; physical={physical.Summary()}, " +
+                    $"breechLocked={gunController.ExternalReloadLoweringLocked}, " +
+                    $"elevationVelocity={gunController.elevationChangeVelocity:F3}");
+                nextTraceAt += ReloadTraceIntervalSeconds;
+            }
 
             if (FcsRuntimeClock.Now >= deadline) {
-                var expectedText = expectedStableKind.HasValue
-                    ? expectedStableKind.Value.ToString()
-                    : "EmptyReady/ShellLoaded";
                 MelonLogger.Error(
                     $"[FCS] GunSystem {_surfix}: reload mechanism did not reach expected safe handoff {expectedText}; " +
                     $"physical={physical.Summary()}, breechLocked={gunController.ExternalReloadLoweringLocked}, " +
@@ -354,12 +383,23 @@ public class GunSystem {
             yield break;
         }
 
-        var deadline = FcsRuntimeClock.Now + Mathf.Max(0.1f, timeoutSeconds);
+        var startedAt = FcsRuntimeClock.Now;
+        var deadline = startedAt + Mathf.Max(0.1f, timeoutSeconds);
+        var nextTraceAt = startedAt + ControlTraceIntervalSeconds;
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
 
             if (button.isActive && button.nextAllowedClickTime <= Time.realtimeSinceStartup)
                 break;
+
+            if (FcsRuntimeClock.Now >= nextTraceAt) {
+                MelonLogger.Warning(
+                    $"[FCS Stall] {_surfix}: reload control '{controlName}' not clickable after " +
+                    $"{FcsRuntimeClock.Now - startedAt:F1}s; active={button.isActive}, " +
+                    $"nextAllowed={button.nextAllowedClickTime:F2}, realtime={Time.realtimeSinceStartup:F2}, " +
+                    $"physical={GunPhysicalState.Read(_surfix).Summary()}");
+                nextTraceAt += ControlTraceIntervalSeconds;
+            }
 
             if (FcsRuntimeClock.Now >= deadline) {
                 FailReloadAction($"reload control timed out: {controlName}");
@@ -368,6 +408,9 @@ public class GunSystem {
             yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         }
 
+        MelonLogger.Msg(
+            $"[FCS ReloadTrace] {_surfix}: clicking '{controlName}' after {FcsRuntimeClock.Now - startedAt:F2}s; " +
+            $"physical={GunPhysicalState.Read(_surfix).Summary()}");
         yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         yield return FcsRuntimeClock.WaitUntilFocused();
         try {
@@ -390,20 +433,34 @@ public class GunSystem {
         }
 
         LastReloadActionSucceeded = true;
+        MelonLogger.Msg($"[FCS ReloadTrace] {_surfix}: completed click '{controlName}'");
     }
 
     private IEnumerator WaitForChamberedShell(BulletType type,
         float timeoutSeconds = ShellChamberTimeoutSeconds) {
         LastReloadActionSucceeded = false;
         var expected = type.ToString();
-        var deadline = FcsRuntimeClock.Now + Mathf.Max(1f, timeoutSeconds);
+        var startedAt = FcsRuntimeClock.Now;
+        var deadline = startedAt + Mathf.Max(1f, timeoutSeconds);
+        var nextTraceAt = startedAt + ControlTraceIntervalSeconds;
 
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
             var chamber = BulletInChamber();
             if (chamber == expected) {
+                MelonLogger.Msg(
+                    $"[FCS ReloadTrace] {_surfix}: chamber confirmed {expected} after " +
+                    $"{FcsRuntimeClock.Now - startedAt:F1}s; {GunPhysicalState.Read(_surfix).Summary()}");
                 LastReloadActionSucceeded = true;
                 yield break;
+            }
+
+            if (FcsRuntimeClock.Now >= nextTraceAt) {
+                MelonLogger.Warning(
+                    $"[FCS Stall] {_surfix}: waiting chamber={expected} for " +
+                    $"{FcsRuntimeClock.Now - startedAt:F1}s; chamber={chamber ?? "empty"}, " +
+                    $"physical={GunPhysicalState.Read(_surfix).Summary()}");
+                nextTraceAt += ControlTraceIntervalSeconds;
             }
 
             if (FcsRuntimeClock.Now >= deadline) {
@@ -422,6 +479,8 @@ public class GunSystem {
         LastReloadActionSucceeded = false;
         LastReloadFailureReason = "";
         yield return FcsRuntimeClock.WaitUntilFocused();
+        MelonLogger.Msg(
+            $"[FCS ReloadTrace] {_surfix}: LoadBullet({type}) start; physical={GunPhysicalState.Read(_surfix).Summary()}");
         RefreshBullets();
         if (bullets.Count == 0 || !bullets.Contains(type.ToString())) {
             FailReloadAction($"No {type} available in cylinder");
@@ -433,7 +492,13 @@ public class GunSystem {
             if (bullets.Count > 0 && bullets[0] == type.ToString()) {
                 break;
             }
-            NextBullet();
+
+            MelonLogger.Msg(
+                $"[FCS ReloadTrace] {_surfix}: rotating cylinder for {type}; step={i + 1}/{bullets.Count}, " +
+                $"front={bullets[0] ?? "empty"}");
+            yield return ClickReloadControl(nextBulletButton, "Universal Button Move Cylinder", 10f);
+            if (!LastReloadActionSucceeded) yield break;
+
             yield return FcsRuntimeClock.WaitForSeconds(1.5f);
             yield return FcsRuntimeClock.WaitUntilFocused();
             RefreshBullets();
@@ -442,6 +507,8 @@ public class GunSystem {
             FailReloadAction($"Can't find {type} after cylinder rotation, current: {string.Join(", ", bullets)}");
             yield break;
         }
+
+        MelonLogger.Msg($"[FCS ReloadTrace] {_surfix}: cylinder aligned to {type}");
 
         // Cylinder positioning belongs to the empty-gun handoff. Do not accept ShellLoaded here: that would
         // allow a concurrent/manual chamber change to fall through and attempt to ram a second shell.
@@ -468,6 +535,8 @@ public class GunSystem {
             yield break;
         }
         LastReloadActionSucceeded = true;
+        MelonLogger.Msg(
+            $"[FCS ReloadTrace] {_surfix}: LoadBullet({type}) complete; {GunPhysicalState.Read(_surfix).Summary()}");
     }
 
     private string PowderControlsSummary(int requiredCount) {
@@ -481,7 +550,9 @@ public class GunSystem {
 
     private IEnumerator WaitForPowderCommit(int expectedCount, string? shellAtStart) {
         LastReloadActionSucceeded = false;
-        var deadline = FcsRuntimeClock.Now + PowderCommitTimeoutSeconds;
+        var startedAt = FcsRuntimeClock.Now;
+        var deadline = startedAt + PowderCommitTimeoutSeconds;
+        var nextTraceAt = startedAt + ControlTraceIntervalSeconds;
 
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
@@ -503,7 +574,8 @@ public class GunSystem {
                 }
 
                 MelonLogger.Msg(
-                    $"[FCS ReloadResume] {_surfix}: powder committed as C{physical.PowderCharges}; {physical.Summary()}");
+                    $"[FCS ReloadResume] {_surfix}: powder committed as C{physical.PowderCharges} after " +
+                    $"{FcsRuntimeClock.Now - startedAt:F1}s; {physical.Summary()}");
                 LastReloadActionSucceeded = true;
                 yield break;
             }
@@ -511,6 +583,14 @@ public class GunSystem {
             if (physical.EmptyReady || physical.Kind == GunPhysicalStateKind.PostShotRecovery) {
                 FailReloadAction($"powder commit lost chambered shell; {physical.Summary()}");
                 yield break;
+            }
+
+            if (FcsRuntimeClock.Now >= nextTraceAt) {
+                MelonLogger.Warning(
+                    $"[FCS Stall] {_surfix}: waiting powder commit C{expectedCount} for " +
+                    $"{FcsRuntimeClock.Now - startedAt:F1}s; physical={physical.Summary()}, " +
+                    PowderControlsSummary(expectedCount));
+                nextTraceAt += ControlTraceIntervalSeconds;
             }
 
             if (FcsRuntimeClock.Now >= deadline) {
@@ -544,51 +624,73 @@ public class GunSystem {
             $"[FCS ReloadResume] {_surfix}: powder stage start expected=C{count}, " +
             $"physical={startState.Summary()}, {PowderControlsSummary(count)}");
 
-        for (var i = 0; i < count; i++) {
-            yield return FcsRuntimeClock.WaitUntilFocused();
-
-            var physical = GunPhysicalState.Read(_surfix);
-            if (physical.PowderCharges > 0) {
-                MelonLogger.Warning(
-                    $"[FCS ReloadResume] {_surfix}: powder became committed while selecting charges; " +
-                    $"verifying physical C{physical.PowderCharges}");
+        // If F9 resumes after the game has already staged any required powder, the exact hidden staged count is
+        // not observable while GunController still reports C0. Do not mix guessed old state with new dispenser
+        // clicks. Commit the existing tray once, then let the durable PowderCharges value prove whether it matches
+        // this task. A mismatch fails visibly instead of silently adding more charge to an unknown tray.
+        var stagedBeforeSelection = loadPowderButton?.isActive == true;
+        if (stagedBeforeSelection) {
+            var anyRequiredInactive = false;
+            for (var i = 0; i < count; i++) {
+                if (powderButtons[i].isActive) continue;
+                anyRequiredInactive = true;
                 break;
             }
-            if (!physical.ShellLoaded) {
-                FailReloadAction($"reload state left shell-loaded handoff before powder selection completed; {physical.Summary()}");
-                yield break;
-            }
+            stagedBeforeSelection = anyRequiredInactive;
+        }
 
-            var button = powderButtons[i];
-            if (!button.isActive) {
-                // The common F9 interruption is: a dispenser was already pressed before hot reload, so the
-                // selected charge is staged physically while GunController.PowderCharges is still C0. In state 5
-                // the charge rammer becoming active is durable evidence that there is staged powder to resume.
-                var resumeDeadline = FcsRuntimeClock.Now + PowderControlResumeGraceSeconds;
-                while (!button.isActive
-                       && loadPowderButton?.isActive != true
-                       && FcsRuntimeClock.Now < resumeDeadline) {
-                    yield return FcsRuntimeClock.WaitUntilFocused();
-                    yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+        if (stagedBeforeSelection) {
+            MelonLogger.Warning(
+                $"[FCS ReloadResume] {_surfix}: staged powder detected before selection; " +
+                $"skipping all dispenser replay and committing existing tray; {PowderControlsSummary(count)}");
+        }
+        else {
+            for (var i = 0; i < count; i++) {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+
+                var physical = GunPhysicalState.Read(_surfix);
+                if (physical.PowderCharges > 0) {
+                    MelonLogger.Warning(
+                        $"[FCS ReloadResume] {_surfix}: powder became committed while selecting charges; " +
+                        $"verifying physical C{physical.PowderCharges}");
+                    break;
                 }
-
-                if (!button.isActive) {
-                    if (loadPowderButton?.isActive == true) {
-                        MelonLogger.Warning(
-                            $"[FCS ReloadResume] {_surfix}: dispenser {i + 1} inactive but charge rammer active; " +
-                            "treating this required charge as already staged before F9");
-                        continue;
-                    }
-
-                    FailReloadAction(
-                        $"required powder dispenser {i + 1} is inactive with no staged-charge evidence; " +
-                        PowderControlsSummary(count));
+                if (!physical.ShellLoaded) {
+                    FailReloadAction($"reload state left shell-loaded handoff before powder selection completed; {physical.Summary()}");
                     yield break;
                 }
-            }
 
-            yield return ClickReloadControl(button, $"Button Dispencer ({i + 1})", 10f);
-            if (!LastReloadActionSucceeded) yield break;
+                var button = powderButtons[i];
+                if (!button.isActive) {
+                    // Give the release-build control a short grace window to return. If it stays inactive while
+                    // the charge rammer is active, a staged tray appeared during this selection pass. From that
+                    // point onward stop replaying dispensers entirely; the final physical count decides success.
+                    var resumeDeadline = FcsRuntimeClock.Now + PowderControlResumeGraceSeconds;
+                    while (!button.isActive
+                           && loadPowderButton?.isActive != true
+                           && FcsRuntimeClock.Now < resumeDeadline) {
+                        yield return FcsRuntimeClock.WaitUntilFocused();
+                        yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+                    }
+
+                    if (!button.isActive) {
+                        if (loadPowderButton?.isActive == true) {
+                            MelonLogger.Warning(
+                                $"[FCS ReloadResume] {_surfix}: staged powder appeared at dispenser {i + 1}; " +
+                                "stopping all further dispenser replay and committing the current tray");
+                            break;
+                        }
+
+                        FailReloadAction(
+                            $"required powder dispenser {i + 1} is inactive with no staged-charge evidence; " +
+                            PowderControlsSummary(count));
+                        yield break;
+                    }
+                }
+
+                yield return ClickReloadControl(button, $"Button Dispencer ({i + 1})", 10f);
+                if (!LastReloadActionSucceeded) yield break;
+            }
         }
 
         yield return FcsRuntimeClock.WaitUntilFocused();
@@ -599,6 +701,9 @@ public class GunSystem {
                 yield break;
             }
 
+            MelonLogger.Msg(
+                $"[FCS ReloadTrace] {_surfix}: committing powder tray for expected C{count}; " +
+                $"physical={beforeRam.Summary()}, {PowderControlsSummary(count)}");
             yield return ClickReloadControl(loadPowderButton, "Universal Button Charge Rammer (1)", 10f);
             if (!LastReloadActionSucceeded) yield break;
         }
