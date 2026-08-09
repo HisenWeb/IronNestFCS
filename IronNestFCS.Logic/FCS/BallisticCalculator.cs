@@ -144,7 +144,7 @@ public class BallisticCalculator {
         lastClickAccepted = true;
     }
 
-    private IEnumerator WaitForElevationSettled() {
+    private IEnumerator WaitForElevationSettled(float baseline) {
         lastSettleSucceeded = false;
         if (elevationDisplay == null) {
             MelonLogger.Error("[FCS BALLISTIC] Elevation display is not bound");
@@ -156,6 +156,8 @@ public class BallisticCalculator {
         var previous = elevationDisplay.currentNumber;
         var previousValid = IsFinite(previous);
         var stableSamples = 0;
+        var changedFromBaseline = !IsFinite(baseline)
+                                  || (previousValid && Mathf.Abs(previous - baseline) > ResultStableTolerance);
 
         while (FcsRuntimeClock.Now < deadline) {
             yield return FcsRuntimeClock.WaitForSeconds(ResultSampleIntervalSeconds);
@@ -168,6 +170,9 @@ public class BallisticCalculator {
                 continue;
             }
 
+            if (IsFinite(baseline) && Mathf.Abs(current - baseline) > ResultStableTolerance)
+                changedFromBaseline = true;
+
             if (previousValid && Mathf.Abs(current - previous) <= ResultStableTolerance)
                 stableSamples++;
             else
@@ -176,12 +181,32 @@ public class BallisticCalculator {
             previous = current;
             previousValid = true;
 
-            if (FcsRuntimeClock.Now - startedAt >= ResultMinimumSettleSeconds
+            // If the output visibly changed, the normal short settle window is sufficient. If it has not changed
+            // from the pre-click display, keep observing for the entire timeout: an old result can sit motionless
+            // for a while before the calculator refreshes. Do not solve that ambiguity by clicking Calculate twice;
+            // the release build can keep the button inactive after a valid calculation, which turns a legitimate
+            // unchanged result into a false failure.
+            if (changedFromBaseline
+                && FcsRuntimeClock.Now - startedAt >= ResultMinimumSettleSeconds
                 && stableSamples >= ResultStableSampleCount) {
                 lastSettledElevation = current;
                 lastSettleSucceeded = true;
                 yield break;
             }
+        }
+
+        // A numerically identical solution is valid. After a full observation window with a finite, stable output,
+        // accept it as the result of the already accepted physical Calculate click. This preserves stale-output
+        // protection without requiring a second click that the game may never make available.
+        if (previousValid && stableSamples >= ResultStableSampleCount) {
+            lastSettledElevation = previous;
+            lastSettleSucceeded = true;
+            if (IsFinite(baseline) && !changedFromBaseline) {
+                MelonLogger.Warning(
+                    $"[FCS BALLISTIC] Elevation output remained {previous:F2} for the full " +
+                    $"{ResultSettleTimeoutSeconds:F1}s observation window; accepting unchanged settled result");
+            }
+            yield break;
         }
 
         MelonLogger.Error(
@@ -193,44 +218,24 @@ public class BallisticCalculator {
         InvalidateResult();
 
         var before = elevationDisplay?.currentNumber ?? float.NaN;
-        var verificationRetry = false;
 
         yield return FcsRuntimeClock.WaitUntilFocused();
         yield return ClickCalculateOnce();
         if (!lastClickAccepted)
             yield break;
 
-        yield return WaitForElevationSettled();
+        yield return WaitForElevationSettled(before);
         if (!lastSettleSucceeded)
             yield break;
 
-        var firstResult = lastSettledElevation;
-
-        // A stale output is most dangerous immediately after rebind/F9: the display may still show the previous
-        // solution even though all four input dials have just been changed. If a full accepted Calculate click
-        // leaves the display numerically unchanged, verify it once with a second complete click. Legitimately
-        // identical solutions simply produce the same value twice; stale results get another chance to refresh.
-        if (IsFinite(before) && Mathf.Abs(firstResult - before) <= ResultStableTolerance) {
-            verificationRetry = true;
-            MelonLogger.Warning(
-                $"[FCS BALLISTIC] Calculate output remained {firstResult:F2} after input update; " +
-                "verifying with a second full click");
-
-            yield return ClickCalculateOnce();
-            if (!lastClickAccepted)
-                yield break;
-
-            yield return WaitForElevationSettled();
-            if (!lastSettleSucceeded)
-                yield break;
-        }
-
         lastCalculationSucceeded = true;
+        var unchanged = IsFinite(before)
+                        && Mathf.Abs(lastSettledElevation - before) <= ResultStableTolerance;
         MelonLogger.Msg(
             $"[FCS BALLISTIC] input: distance={requestedDistance:F3}km, direction={requestedDirection:F2}°, " +
             $"shell={requestedShell}, charge=C{requestedCharge:F0}; " +
             $"before={(IsFinite(before) ? before.ToString("F2") : "invalid")}°, " +
-            $"output={lastSettledElevation:F2}°, verifyRetry={verificationRetry}");
+            $"output={lastSettledElevation:F2}°, unchanged={unchanged}");
     }
     
     public float GetElevation() {
