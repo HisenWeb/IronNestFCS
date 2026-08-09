@@ -124,6 +124,11 @@ public class FSC
         }
         _runningCoroutines.Clear();
 
+        // A hot reload can stop a task while it owns release-version gun elevation
+        // control. Always restore the game's original controller mode before unloading.
+        LeftGun.ReleaseElevationOverride();
+        RightGun.ReleaseElevationOverride();
+
         _taskQueue.Clear();
         _recentTasks.Clear();
         LeftTask = null;
@@ -194,8 +199,14 @@ public class FSC
     }
 
     private void ReleaseSlot(LeftRight leftRight) {
-        if (leftRight == LeftRight.Left) LeftTask = null;
-        else RightTask = null;
+        if (leftRight == LeftRight.Left) {
+            LeftGun.ReleaseElevationOverride();
+            LeftTask = null;
+        }
+        else {
+            RightGun.ReleaseElevationOverride();
+            RightTask = null;
+        }
         TryDispatch();
     }
 
