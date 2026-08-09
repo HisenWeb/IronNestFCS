@@ -1448,11 +1448,25 @@ public class FSC
             // reaches it only after First has committed, so it waits behind the held lock and is ready to take over
             // immediately after a confirmed shot releases it.
             res.Released = false;
-            yield return _turretLock.Acquire();
-            res.Acquired = true;
+            res.Acquired = false;
+            yield return _turretLock.Acquire(
+                () => res.Canceled
+                      || res.Generation != _firePriorityGeneration
+                      || !IsActiveTask(task),
+                () => res.Acquired = true);
+
+            // Acquire may now complete by cancellation without taking the lock. Do not let a stale queued
+            // reservation wake after F9/task invalidation and briefly consume the shared turret lane.
+            if (!res.Acquired) {
+                res.Canceled = true;
+                yield break;
+            }
+
             yield return FcsRuntimeClock.WaitUntilFocused();
 
-            if (res.Generation != _firePriorityGeneration || !IsActiveTask(task)) {
+            if (res.Canceled
+                || res.Generation != _firePriorityGeneration
+                || !IsActiveTask(task)) {
                 res.Canceled = true;
                 ReleaseTurretOnce(res);
                 yield break;
