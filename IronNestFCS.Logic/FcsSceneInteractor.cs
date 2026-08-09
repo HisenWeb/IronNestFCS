@@ -124,6 +124,42 @@ public class FcsSceneInteractor {
         }
     }
 
+    /// <summary>
+    /// The shell selector is an auto-loading preference, not a command to overwrite a round that already
+    /// physically exists in a gun. When a target is created after the player manually preloads a gun, adopt
+    /// that gun's real shell type so the recovered/decoupled scheduler can solve the round that is actually
+    /// present. If a preloaded gun matching the UI preference exists, keep the preference; otherwise use the
+    /// first free preloaded gun (Left, then Right). Empty guns still use the UI-selected shell as before.
+    /// </summary>
+    private BulletType ResolveBulletTypeForNewTarget(BulletType selected, int targetId) {
+        var left = fcs.LeftTask == null ? GunPhysicalState.Read("Left") : null;
+        var right = fcs.RightTask == null ? GunPhysicalState.Read("Right") : null;
+
+        static bool HasPhysicalShell(GunPhysicalState? state) {
+            return state != null
+                   && (state.LoadedReady || state.ShellLoaded)
+                   && state.ShellType.HasValue;
+        }
+
+        if (HasPhysicalShell(left) && left!.ShellType == selected)
+            return selected;
+        if (HasPhysicalShell(right) && right!.ShellType == selected)
+            return selected;
+
+        GunPhysicalState? adopted = null;
+        if (HasPhysicalShell(left)) adopted = left;
+        else if (HasPhysicalShell(right)) adopted = right;
+
+        if (adopted?.ShellType is BulletType actual) {
+            MelonLogger.Msg(
+                $"[FCS] T{targetId}: adopting physical {adopted.Side} shell {actual.DisplayName()} " +
+                $"instead of UI preference {selected.DisplayName()}; {adopted.Summary()}");
+            return actual;
+        }
+
+        return selected;
+    }
+
     private IEnumerator QueueStableTarget(int targetId, BulletType bulletType, GameObject button) {
         var clickedAt = FcsRuntimeClock.Now;
         ArtilleryTask? task = null;
@@ -132,7 +168,7 @@ public class FcsSceneInteractor {
 
         if (task != null) {
             task.targetId = targetId;
-            task.bulletType = bulletType;
+            task.bulletType = ResolveBulletTypeForNewTarget(bulletType, targetId);
             fcs.EnqueueTask(task);
         }
 
