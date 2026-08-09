@@ -51,9 +51,6 @@ public class MapTable {
 
         MelonLogger.Msg($"[FCS] 找到 Player Turret Piece: {turret}, Artilleries: {artilleries.Count}");
 
-        // Fire Mission Root is only used by the optional entity-exposure/debug helper.
-        // Some release scenes no longer contain this object, so it must not block
-        // the core map-marker fire-control path (T1/T2/...).
         var fireMissionObject = GameObject.Find("Fire Mission Root");
         if (fireMissionObject != null) {
             fireMissionRoot = fireMissionObject.transform;
@@ -95,12 +92,6 @@ public class MapTable {
         return BuildMarkTarget(artillery.localPosition, target);
     }
 
-    /// <summary>
-    /// Release scenes can update tactical-map token transforms for a few frames while the map/task
-    /// is being initialized. Capturing that transient position makes an occasional first shot use
-    /// the wrong range/azimuth even though retrying the same target is correct. Sample the relative
-    /// marker vector until it is stable for several consecutive reads, then snapshot the task.
-    /// </summary>
     public IEnumerator GetStableMarkTarget(int index, Action<ArtilleryTask?> completed,
         float timeoutSeconds = MarkerStabilizeTimeoutSeconds) {
         if (turret == null) {
@@ -115,14 +106,15 @@ public class MapTable {
             yield break;
         }
 
-        var deadline = Time.realtimeSinceStartup + Mathf.Max(0.5f, timeoutSeconds);
+        // Scaled game time prevents a focus-loss pause from consuming the stabilization budget.
+        var deadline = Time.time + Mathf.Max(0.5f, timeoutSeconds);
         var previousRelative = Vector3.zero;
         var havePrevious = false;
         var stableSamples = 0;
         var sampleCount = 0;
         var lastDelta = 0f;
 
-        while (Time.realtimeSinceStartup < deadline) {
+        while (Time.time < deadline) {
             var markerLocal = artillery.localPosition;
             var turretLocal = turret.localPosition;
             var relative = markerLocal - turretLocal;
