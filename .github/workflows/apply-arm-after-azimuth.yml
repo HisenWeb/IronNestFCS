@@ -1,0 +1,123 @@
+name: Apply arm after azimuth
+
+on:
+  push:
+    branches:
+      - agent/arm-after-azimuth
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/arm-after-azimuth
+
+      - name: Keep promoted second disarmed until azimuth ready
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('IronNestFCS.Logic/FSC.cs')
+          s = p.read_text(encoding='utf-8')
+
+          old_sig = '''    private IEnumerator PrepareTriggerConsoleForTask(
+        LeftRight leftRight,
+        ArtilleryTask task,
+        bool waitForPreviousShotReset) {'''
+          new_sig = '''    private IEnumerator PrepareTriggerConsoleForTask(
+        LeftRight leftRight,
+        ArtilleryTask task,
+        bool waitForPreviousShotReset,
+        bool armWhenPrepared) {'''
+          if old_sig not in s:
+              raise SystemExit('helper signature not found')
+          s = s.replace(old_sig, new_sig, 1)
+
+          old_tail = '''            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return TriggerConsole.ReadyToFire();
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return TriggerConsole.Arm(leftRight);
+        }
+        finally {'''
+          new_tail = '''            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return TriggerConsole.ReadyToFire();
+            if (armWhenPrepared) {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                yield return TriggerConsole.Arm(leftRight);
+            }
+        }
+        finally {'''
+          if old_tail not in s:
+              raise SystemExit('helper arm tail not found')
+          s = s.replace(old_tail, new_tail, 1)
+
+          old_promoted = 'yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true);'
+          new_promoted = 'yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true, armWhenPrepared: false);'
+          if old_promoted not in s:
+              raise SystemExit('promoted helper call not found')
+          s = s.replace(old_promoted, new_promoted, 1)
+
+          old_ordinary = '''        if (!triggerPrepared)
+            yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: false);
+
+        try {'''
+          new_ordinary = '''        if (!triggerPrepared) {
+            yield return PrepareTriggerConsoleForTask(
+                leftRight,
+                task,
+                waitForPreviousShotReset: false,
+                armWhenPrepared: true);
+        }
+        else {
+            // The promoted Second may pre-confirm Review switches during the turret slew, but the gun must remain
+            // safe until the shared azimuth is physically ready. Arm only after turret.Ready has been observed.
+            yield return _deskLock.Acquire();
+            try {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                yield return TriggerConsole.Arm(leftRight);
+            }
+            finally {
+                _deskLock.Release();
+            }
+        }
+
+        try {'''
+          if old_ordinary not in s:
+              raise SystemExit('ordinary helper call block not found')
+          s = s.replace(old_ordinary, new_ordinary, 1)
+
+          s = s.replace(
+              'Review Console while the turret is still slewing. Ordinary/first shots keep the original safer order:',
+              'Review Console while the turret is still slewing, but stays disarmed. Ordinary/first shots keep the original safer order:',
+              1)
+          s = s.replace(
+              'only for the game\'s asynchronous control reset, then re-enable Review/Arm while azimuth keeps moving.',
+              'only for the game\'s asynchronous control reset, then re-enable Review while azimuth keeps moving; Arm waits for turret.Ready.',
+              1)
+          s = s.replace(
+              '// second shot may prepare in parallel with turret rotation, but only after that reset settles.',
+              '// second shot may pre-confirm Review switches in parallel with turret rotation, but only after that reset settles.',
+              1)
+
+          if 'PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true);' in s:
+              raise SystemExit('stale promoted helper call remains')
+          if 'yield return TriggerConsole.Arm(leftRight);' not in s:
+              raise SystemExit('arm call missing after patch')
+
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Commit source patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-arm-after-azimuth.yml
+          git add IronNestFCS.Logic/FSC.cs
+          git commit -m "fix: arm promoted second only after azimuth is ready"
+          git push origin HEAD:agent/arm-after-azimuth
