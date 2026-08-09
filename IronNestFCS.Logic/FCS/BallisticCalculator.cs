@@ -44,28 +44,33 @@ public class BallisticCalculator {
     }
     
     public IEnumerator SetDistance(float distance) {
+        yield return FcsRuntimeClock.WaitUntilFocused();
         distanceDial?.SetDialValue(distance);
-        yield return new WaitForSeconds(0.5f);
+        yield return FcsRuntimeClock.WaitForSeconds(0.5f);
     }
     
     public IEnumerator SetCharge(float charge) {
+        yield return FcsRuntimeClock.WaitUntilFocused();
         chargeDial?.SetDialValue(charge);
-        yield return new WaitForSeconds(0.5f);
+        yield return FcsRuntimeClock.WaitForSeconds(0.5f);
     }
 
     public IEnumerator SetDirection(float angle) {
+        yield return FcsRuntimeClock.WaitUntilFocused();
         directionDial?.SetDialValue(angle);
-        yield return new WaitForSeconds(0.5f);
+        yield return FcsRuntimeClock.WaitForSeconds(0.5f);
     }
 
     public IEnumerator SetShellType(BulletType type) {
+        yield return FcsRuntimeClock.WaitUntilFocused();
         shellDial?.SetDialValue((float)type);
-        yield return new WaitForSeconds(0.5f);
+        yield return FcsRuntimeClock.WaitForSeconds(0.5f);
     }
 
     public IEnumerator Calculate() {
+        yield return FcsRuntimeClock.WaitUntilFocused();
         calculateButton?.OnClickDown();
-        yield return new WaitForSeconds(0.5f);
+        yield return FcsRuntimeClock.WaitForSeconds(0.5f);
     }
     
     public float GetElevation() {
