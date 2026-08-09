@@ -135,11 +135,12 @@ public class BallisticCalculator {
 
         yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         yield return FcsRuntimeClock.WaitUntilFocused();
-        calculateButton.OnClickDown();
+        FcsSceneInteractor.BeginPhysicalClick(calculateButton);
 
-        // Finish an accepted physical click even if focus changes between down and up.
+        // Finish an accepted physical click even if focus changes between down and up. The global tracked-click
+        // cleanup also guarantees F9 cannot leave Calculate held if this coroutine is stopped during the hold.
         yield return new WaitForSeconds(0.1f);
-        calculateButton.OnClickUp();
+        FcsSceneInteractor.EndPhysicalClick(calculateButton);
         lastClickAccepted = true;
     }
 
