@@ -197,25 +197,85 @@ public class FSC
         TryDispatch();
     }
 
+    /// <summary>
+    /// 调度不再把 LeftTask/RightTask == null 等同于“炮是空的”。F9 会清掉任务对象，
+    /// 但真实炮膛/装药仍留在游戏里；因此每次派发都重新读取左右炮物理状态。
+    /// 优先复用已经装填且与目标兼容的炮，其次才把普通任务交给真正的空炮。
+    /// </summary>
     private void TryDispatch() {
         if (!FcsRuntimeClock.IsFocused)
             return;
 
         while (_taskQueue.Count > 0) {
-            LeftRight slot;
-            if (LeftTask == null) slot = LeftRight.Left;
-            else if (RightTask == null) slot = LeftRight.Right;
-            else break;
+            var task = _taskQueue.Peek();
+            if (TryChooseGun(task, out var slot, out var reuseLoadedRound)) {
+                _taskQueue.Dequeue();
+                if (slot == LeftRight.Left) LeftTask = task;
+                else RightTask = task;
+                StartTaskRoutine(slot, task, reuseLoadedRound);
+                continue;
+            }
 
-            var task = _taskQueue.Dequeue();
-            if (slot == LeftRight.Left) LeftTask = task;
-            else RightTask = task;
-            StartTaskRoutine(slot, task);
+            // 有炮正在执行任务时，队首暂时无法派发并不代表目标无效；等当前任务完成后再试。
+            if (LeftTask != null || RightTask != null)
+                break;
+
+            var leftState = GunPhysicalState.Read("Left");
+            var rightState = GunPhysicalState.Read("Right");
+
+            // 装填机构还在动作或状态暂时不可判定时不要抢控制权，留在队列等待下一帧。
+            if (!leftState.IsStable || !rightState.IsStable)
+                break;
+
+            // 两门炮都没有正在执行的 FCS 任务，而且物理状态稳定，但没有任何一门能接这个目标。
+            // 这种任务不能无限堵住队列；拒绝本次目标，保留炮内现有弹药不动。
+            _taskQueue.Dequeue();
+            RejectPendingTask(task,
+                $"no compatible gun for current physical loads; Left={leftState.Summary()}, Right={rightState.Summary()}");
         }
     }
 
-    private void StartTaskRoutine(LeftRight leftRight, ArtilleryTask task) {
-        var handle = MelonCoroutines.Start(RunTaskRoutine(leftRight, task));
+    private bool TryChooseGun(ArtilleryTask task, out LeftRight slot, out bool reuseLoadedRound) {
+        slot = LeftRight.Left;
+        reuseLoadedRound = false;
+
+        var leftState = LeftTask == null ? GunPhysicalState.Read("Left") : null;
+        var rightState = RightTask == null ? GunPhysicalState.Read("Right") : null;
+
+        // 已装填炮优先：避免一边已有可用炮弹，却又在另一边重新装一发相同任务。
+        if (LeftTask == null && leftState != null && leftState.CanReuseFor(task.bulletType, task.distance)) {
+            slot = LeftRight.Left;
+            reuseLoadedRound = true;
+            return true;
+        }
+        if (RightTask == null && rightState != null && rightState.CanReuseFor(task.bulletType, task.distance)) {
+            slot = LeftRight.Right;
+            reuseLoadedRound = true;
+            return true;
+        }
+
+        // 普通装填只允许进入真正的空炮。已装填但不兼容的炮绝不能再塞一发到它后面。
+        if (LeftTask == null && leftState != null && leftState.EmptyReady) {
+            slot = LeftRight.Left;
+            return true;
+        }
+        if (RightTask == null && rightState != null && rightState.EmptyReady) {
+            slot = LeftRight.Right;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void RejectPendingTask(ArtilleryTask task, string reason) {
+        task.progress = Progress.Failed;
+        task.failureReason = reason;
+        MelonLogger.Error($"[FCS] T{task.targetId} rejected before dispatch: {reason}");
+        RecordTaskResult(task);
+    }
+
+    private void StartTaskRoutine(LeftRight leftRight, ArtilleryTask task, bool reuseLoadedRound) {
+        var handle = MelonCoroutines.Start(RunTaskRoutine(leftRight, task, reuseLoadedRound));
         _runningCoroutines.Add(handle);
     }
 
@@ -253,15 +313,33 @@ public class FSC
         ReleaseSlot(leftRight);
     }
 
-    private IEnumerator RunTaskRoutine(LeftRight leftRight, ArtilleryTask task) {
+    private IEnumerator RunTaskRoutine(LeftRight leftRight, ArtilleryTask task, bool reuseLoadedRound) {
         yield return FcsRuntimeClock.WaitUntilFocused();
 
         var gunSys = leftRight == LeftRight.Left ? LeftGun : RightGun;
-
+        var sideName = leftRight == LeftRight.Left ? "Left" : "Right";
         var turret = new TurretReservation();
-        _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
-        
-        var powderCount = _sceneInteractor.maxCharge ? 6 : BallisticCalculator.MinimumCharge(task.distance);
+
+        // 普通任务继续保持原有优化：一开始就预约/旋转炮塔，与解算和装填并行。
+        // 已装填重定向任务则先用现有装药重新解算并校验，确认目标可用后才动炮塔。
+        if (!reuseLoadedRound) {
+            _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
+        }
+
+        int powderCount;
+        GunPhysicalState? loadedState = null;
+        if (reuseLoadedRound) {
+            loadedState = GunPhysicalState.Read(sideName);
+            if (!loadedState.CanReuseFor(task.bulletType, task.distance)) {
+                AbortTask(leftRight, task, turret,
+                    $"loaded round changed or cannot cover target; {loadedState.Summary()}");
+                yield break;
+            }
+            powderCount = loadedState.PowderCharges;
+        }
+        else {
+            powderCount = _sceneInteractor.maxCharge ? 6 : BallisticCalculator.MinimumCharge(task.distance);
+        }
         task.chargeCount = powderCount;
 
         float elevation = 0f;
@@ -285,30 +363,42 @@ public class FSC
             elevation = BallisticCalculator.GetElevation();
             task.elevation = elevation;
 
-            var powderPurchaseAttempts = 0;
-            while (gunSys.RemainingCharges() < powderCount && powderPurchaseAttempts < 10) {
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return _purchaseDeck.BuyPowders();
-                powderPurchaseAttempts++;
-            }
-            if (gunSys.RemainingCharges() < powderCount) {
-                viable = false;
-                failureReason = $"powder unavailable: need {powderCount}, have {gunSys.RemainingCharges()}";
-            }
-
-            task.progress = Progress.SelectingBullet;
-            if (viable && !gunSys.HaveBulletInCylinder(task.bulletType)) {
-                if (!gunSys.HaveEmptyShellInCylinder()) {
+            if (reuseLoadedRound) {
+                // 当前炮弹/装药已经无法改变，只能使用游戏计算器给出的新仰角。
+                // 若结果超出该炮物理仰角范围，则拒绝这个目标，但不动炮里的现有弹药。
+                loadedState = GunPhysicalState.Read(sideName);
+                if (!loadedState.IsElevationWithinPhysicalRange(elevation)) {
                     viable = false;
-                    failureReason = $"no {task.bulletType} shell and cylinder has no empty slot";
+                    failureReason =
+                        $"current loaded {task.bulletType.DisplayName()} C{powderCount} has no usable elevation for {task.distance:F2}km";
                 }
-                else {
+            }
+            else {
+                var powderPurchaseAttempts = 0;
+                while (gunSys.RemainingCharges() < powderCount && powderPurchaseAttempts < 10) {
                     yield return FcsRuntimeClock.WaitUntilFocused();
-                    yield return _purchaseDeck.BuyShell(task.bulletType, leftRight);
-                    yield return FcsRuntimeClock.WaitUntilFocused();
-                    if (!gunSys.HaveBulletInCylinder(task.bulletType)) {
+                    yield return _purchaseDeck.BuyPowders();
+                    powderPurchaseAttempts++;
+                }
+                if (gunSys.RemainingCharges() < powderCount) {
+                    viable = false;
+                    failureReason = $"powder unavailable: need {powderCount}, have {gunSys.RemainingCharges()}";
+                }
+
+                task.progress = Progress.SelectingBullet;
+                if (viable && !gunSys.HaveBulletInCylinder(task.bulletType)) {
+                    if (!gunSys.HaveEmptyShellInCylinder()) {
                         viable = false;
-                        failureReason = $"purchase of {task.bulletType} did not reach the cylinder";
+                        failureReason = $"no {task.bulletType} shell and cylinder has no empty slot";
+                    }
+                    else {
+                        yield return FcsRuntimeClock.WaitUntilFocused();
+                        yield return _purchaseDeck.BuyShell(task.bulletType, leftRight);
+                        yield return FcsRuntimeClock.WaitUntilFocused();
+                        if (!gunSys.HaveBulletInCylinder(task.bulletType)) {
+                            viable = false;
+                            failureReason = $"purchase of {task.bulletType} did not reach the cylinder";
+                        }
                     }
                 }
             }
@@ -322,44 +412,61 @@ public class FSC
             yield break;
         }
 
-        task.progress = Progress.LoadingBullet;
-        yield return gunSys.WaitForReloadReady(ReloadReadyTimeoutSeconds);
-        if (!gunSys.LastReloadReadySucceeded) {
-            AbortTask(leftRight, task, turret, "reload mechanism was not ready for the next cycle");
-            yield break;
-        }
-
-        yield return FcsRuntimeClock.WaitUntilFocused();
-        yield return gunSys.LoadBullet(task.bulletType);
-        if (!gunSys.LastReloadActionSucceeded) {
-            AbortTask(leftRight, task, turret,
-                string.IsNullOrEmpty(gunSys.LastReloadFailureReason)
-                    ? "shell loading control failed"
-                    : gunSys.LastReloadFailureReason);
-            yield break;
-        }
-
-        task.progress = Progress.LoadingPowder;
-        yield return FcsRuntimeClock.WaitUntilFocused();
-        yield return gunSys.LoadPowder(powderCount);
-        if (!gunSys.LastReloadActionSucceeded) {
-            AbortTask(leftRight, task, turret,
-                string.IsNullOrEmpty(gunSys.LastReloadFailureReason)
-                    ? "powder loading control failed"
-                    : gunSys.LastReloadFailureReason);
-            yield break;
-        }
-
-        task.progress = Progress.WaitLoading;
-        var loadingDeadline = FcsRuntimeClock.Now + LoadingTimeoutSeconds;
-        while (true) {
-            yield return FcsRuntimeClock.WaitUntilFocused();
-            if (gunSys.CanFire()) break;
-            if (FcsRuntimeClock.Now >= loadingDeadline) {
-                AbortTask(leftRight, task, turret, $"loading timed out after {LoadingTimeoutSeconds:F0}s");
+        if (reuseLoadedRound) {
+            // 解算期间游戏状态可能变化，因此真正接管前再核对一次炮膛和装药。
+            loadedState = GunPhysicalState.Read(sideName);
+            if (!loadedState.LoadedReady
+                || loadedState.ShellType != task.bulletType
+                || loadedState.PowderCharges != powderCount) {
+                AbortTask(leftRight, task, turret,
+                    $"loaded round changed before retargeting; {loadedState.Summary()}");
                 yield break;
             }
-            yield return new WaitForSeconds(0.5f);
+
+            MelonLogger.Msg(
+                $"[FCS] {leftRight} T{task.targetId}: reusing chambered {task.bulletType.DisplayName()} C{powderCount}");
+            _runningCoroutines.Add(MelonCoroutines.Start(ReserveTurretAndRotate(task, turret)));
+        }
+        else {
+            task.progress = Progress.LoadingBullet;
+            yield return gunSys.WaitForReloadReady(ReloadReadyTimeoutSeconds);
+            if (!gunSys.LastReloadReadySucceeded) {
+                AbortTask(leftRight, task, turret, "reload mechanism was not ready for the next cycle");
+                yield break;
+            }
+
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return gunSys.LoadBullet(task.bulletType);
+            if (!gunSys.LastReloadActionSucceeded) {
+                AbortTask(leftRight, task, turret,
+                    string.IsNullOrEmpty(gunSys.LastReloadFailureReason)
+                        ? "shell loading control failed"
+                        : gunSys.LastReloadFailureReason);
+                yield break;
+            }
+
+            task.progress = Progress.LoadingPowder;
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return gunSys.LoadPowder(powderCount);
+            if (!gunSys.LastReloadActionSucceeded) {
+                AbortTask(leftRight, task, turret,
+                    string.IsNullOrEmpty(gunSys.LastReloadFailureReason)
+                        ? "powder loading control failed"
+                        : gunSys.LastReloadFailureReason);
+                yield break;
+            }
+
+            task.progress = Progress.WaitLoading;
+            var loadingDeadline = FcsRuntimeClock.Now + LoadingTimeoutSeconds;
+            while (true) {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                if (gunSys.CanFire()) break;
+                if (FcsRuntimeClock.Now >= loadingDeadline) {
+                    AbortTask(leftRight, task, turret, $"loading timed out after {LoadingTimeoutSeconds:F0}s");
+                    yield break;
+                }
+                yield return new WaitForSeconds(0.5f);
+            }
         }
 
         task.progress = Progress.Aiming;
