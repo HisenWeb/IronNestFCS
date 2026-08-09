@@ -70,8 +70,8 @@ public class FcsWindow
             return;
         }
 
-        DrawGun("左", fcs.LeftTask, Label);
-        DrawGun("右", fcs.RightTask, Label);
+        DrawGun("左", "Left", fcs.LeftTask, Label);
+        DrawGun("右", "Right", fcs.RightTask, Label);
 
         Label($"自动开火：{OnOff(fcs.AutoFireEnabled)}    最大装药：{OnOff(fcs.MaxChargeEnabled)}");
 
@@ -98,10 +98,19 @@ public class FcsWindow
 
     private static string OnOff(bool value) => value ? "开" : "关";
 
-    private static void DrawGun(string name, ArtilleryTask? task, Action<string> label)
+    private static void DrawGun(string name, string side, ArtilleryTask? task, Action<string> label)
     {
         if (task == null) {
-            label($"{name}炮：空闲");
+            var state = GunPhysicalState.Read(side);
+            if (state.LoadedReady) {
+                label($"{name}炮：已装填 {state.ShellType!.Value.DisplayName()} / 装药{state.PowderCharges}，等待目标");
+            }
+            else if (state.EmptyReady) {
+                label($"{name}炮：空闲（空炮）");
+            }
+            else {
+                label($"{name}炮：物理状态占用  {state.Summary()}");
+            }
             return;
         }
 
