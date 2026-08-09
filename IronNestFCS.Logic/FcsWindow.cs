@@ -105,7 +105,7 @@ public class FcsWindow
             return;
         }
 
-        var elapsed = task.startedAt > 0f ? Time.realtimeSinceStartup - task.startedAt : 0f;
+        var elapsed = task.startedAt > 0f ? Time.time - task.startedAt : 0f;
         label($"{name}炮：T{task.targetId} {task.bulletType}  {ProgressText(task.progress)}  {elapsed:F0}秒");
         label($"  方位 {task.angel:F1}° / 距离 {task.distance:F2}km   装药 {task.chargeCount}   仰角 {task.elevation:F1}°");
     }
