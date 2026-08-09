@@ -47,59 +47,119 @@ public class TriggerConsole {
         _fire = GameObject.Find(".Trigger Core")?.transform.FindChild(".Generator Spinner")
             ?.GetComponentInChildren<SliderEnergyMomentumSpinner>();
 
-        return _armLeft != null && _armRight != null && _fire != null;
+        var ok = _armLeft != null && _armRight != null && _fire != null;
+        if (ok) LogLatchedStates("bind");
+        return ok;
     }
 
     public void Fire() {
         _fire?.AddEnergy(255);
     }
 
+    private static bool TryGetClickedState(LookAtTarget? control, out bool clicked) {
+        clicked = false;
+        if (control == null) return false;
+        try {
+            // LookAtTarget.GetActive()/isActive describe interaction availability and are not a reliable
+            // representation of a physical toggle's latched position. `isClicked` is the durable click target
+            // state used by the control/animator and survives Logic hot reloads.
+            clicked = control.isClicked;
+            return true;
+        }
+        catch {
+            return false;
+        }
+    }
+
+    private static IEnumerator EnsureReviewConfirmed(LookAtTarget? control, string name) {
+        if (control == null) {
+            MelonLogger.Error($"[FCS] TriggerConsole: missing {name}");
+            yield break;
+        }
+
+        if (TryGetClickedState(control, out var current) && current) {
+            MelonLogger.Msg($"[FCS] TriggerConsole: {name} already confirmed; preserving latched state");
+            yield break;
+        }
+
+        yield return FcsSceneInteractor.WaitAndClick(control);
+        yield return FcsRuntimeClock.WaitForSeconds(0.15f);
+
+        if (TryGetClickedState(control, out var after) && !after) {
+            MelonLogger.Warning($"[FCS] TriggerConsole: {name} click did not latch ON");
+        }
+    }
+
+    private static IEnumerator EnsureArmSelected(LookAtTarget? arm, string name) {
+        if (arm == null) {
+            MelonLogger.Error($"[FCS] TriggerConsole: missing {name} arming control");
+            yield break;
+        }
+
+        if (TryGetClickedState(arm, out var current) && current) {
+            MelonLogger.Msg($"[FCS] TriggerConsole: {name} already armed; preserving latched state");
+            yield break;
+        }
+
+        yield return FcsRuntimeClock.WaitUntilFocused();
+        arm.OnClickDown();
+
+        // Preserve the original proven arming interaction. Do not touch the opposite gun; selecting a side is
+        // game-owned and the game itself handles any previous side selection.
+        yield return new WaitForSeconds(0.2f);
+        arm.OnClickUp();
+        yield return FcsRuntimeClock.WaitForSeconds(0.25f);
+
+        if (TryGetClickedState(arm, out var after) && !after) {
+            MelonLogger.Warning($"[FCS] TriggerConsole: {name} arm action did not latch ON");
+        }
+    }
+
+    private void LogLatchedStates(string reason) {
+        static string S(LookAtTarget? c) => TryGetClickedState(c, out var v) ? (v ? "ON" : "OFF") : "?";
+        MelonLogger.Msg(
+            $"[FCS] TriggerConsole state ({reason}): " +
+            $"Task={S(_taskCheck)} Bullet={S(_bulletCheck)} Rotation={S(_rotationCheck)} " +
+            $"Elevation={S(_elevationCheck)} Ready={S(_readyFire)} ArmL={S(_armLeft)} ArmR={S(_armRight)}");
+    }
+
     /// <summary>
-    /// F9 invalidates the abandoned fire solution, but the five review switches are rebuilt by the normal
-    /// confirmation sequence and the arming controls must NOT be treated as generic readable toggles.
-    /// In the release build Universal Button Arm Left/Right behave as side-selection actions; GetActive()
-    /// is not a reliable indication of their latched visual/armed state. Touching both sides here caused an
-    /// unnecessary Right->Left handoff that also reset the already-confirmed review console.
+    /// F9 abandons FCS task ownership but does not reset the physical trigger console in the game scene.
+    /// Do not toggle anything here. A later task reconciles each required control idempotently from `isClicked`.
     /// </summary>
     public IEnumerator PrepareForNewFireSolution(LeftRight leftRight) {
+        LogLatchedStates("before fire solution");
         yield break;
     }
 
     public IEnumerator Arm(LeftRight leftRight) {
-        var arm = leftRight == LeftRight.Left ? _armLeft : _armRight;
-        if (arm == null) {
-            MelonLogger.Error($"[FCS] TriggerConsole: missing {leftRight} arming control");
-            yield break;
+        if (leftRight == LeftRight.Left) {
+            yield return EnsureArmSelected(_armLeft, "Left");
         }
-
-        // Preserve the original proven game interaction: issue exactly ONE arm action for the side that owns
-        // the current fire solution. The game handles the opposite side; FCS must not pre-toggle both levers.
-        yield return FcsRuntimeClock.WaitUntilFocused();
-        arm.OnClickDown();
-
-        // Once a lever action has started, always complete it even if focus changes during this short hold.
-        yield return new WaitForSeconds(0.2f);
-        arm.OnClickUp();
-        yield return FcsRuntimeClock.WaitForSeconds(1f);
+        else {
+            yield return EnsureArmSelected(_armRight, "Right");
+        }
+        yield return FcsRuntimeClock.WaitForSeconds(0.75f);
+        LogLatchedStates("after arm");
     }
 
     public IEnumerator ConfirmTask() {
-        yield return FcsSceneInteractor.WaitAndClick(_taskCheck);
+        yield return EnsureReviewConfirmed(_taskCheck, "TaskCheck");
     }
 
     public IEnumerator ConfirmBullet() {
-        yield return FcsSceneInteractor.WaitAndClick(_bulletCheck);
+        yield return EnsureReviewConfirmed(_bulletCheck, "BulletCheck");
     }
 
     public IEnumerator ConfirmRotation() {
-        yield return FcsSceneInteractor.WaitAndClick(_rotationCheck);
+        yield return EnsureReviewConfirmed(_rotationCheck, "RotationCheck");
     }
 
     public IEnumerator ConfirmElevation() {
-        yield return FcsSceneInteractor.WaitAndClick(_elevationCheck);
+        yield return EnsureReviewConfirmed(_elevationCheck, "ElevationCheck");
     }
 
     public IEnumerator ReadyToFire() {
-        yield return FcsSceneInteractor.WaitAndClick(_readyFire);
+        yield return EnsureReviewConfirmed(_readyFire, "ReadyToFire");
     }
 }
