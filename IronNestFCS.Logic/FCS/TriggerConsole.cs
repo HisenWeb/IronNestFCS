@@ -15,6 +15,11 @@ public class TriggerConsole {
     private LookAtTarget? _armRight;
     private SliderEnergyMomentumSpinner? _fire;
 
+    // TryBind runs again after F9. FSC already calls PrepareForNewFireSolution once immediately after a
+    // successful bind, so use that first call as the one-and-only hot-reload reset hook. Later task calls must
+    // never clear the shared console again; they only reconcile the controls they need to ON.
+    private bool _resetPendingAfterBind;
+
     public bool TryBind() {
         var consoleObject = GameObject.Find(".Review Console Parent");
         if (consoleObject == null) {
@@ -48,7 +53,10 @@ public class TriggerConsole {
             ?.GetComponentInChildren<SliderEnergyMomentumSpinner>();
 
         var ok = _armLeft != null && _armRight != null && _fire != null;
-        if (ok) LogLatchedStates("bind");
+        if (ok) {
+            _resetPendingAfterBind = true;
+            LogLatchedStates("bind");
+        }
         return ok;
     }
 
@@ -90,6 +98,37 @@ public class TriggerConsole {
         }
     }
 
+    private static IEnumerator EnsureReviewCleared(LookAtTarget? control, string name) {
+        if (control == null) {
+            MelonLogger.Error($"[FCS] TriggerConsole: missing {name}");
+            yield break;
+        }
+
+        if (!TryGetClickedState(control, out var current)) {
+            MelonLogger.Warning($"[FCS] TriggerConsole: can't read {name} during F9 reset; leaving it unchanged");
+            yield break;
+        }
+        if (!current)
+            yield break;
+
+        yield return FcsSceneInteractor.WaitAndClick(control);
+        yield return FcsRuntimeClock.WaitForSeconds(0.15f);
+
+        if (TryGetClickedState(control, out var after) && after) {
+            MelonLogger.Warning($"[FCS] TriggerConsole: {name} did not clear during F9 reset");
+        }
+    }
+
+    private static IEnumerator ThrowArm(LookAtTarget arm) {
+        yield return FcsRuntimeClock.WaitUntilFocused();
+        arm.OnClickDown();
+
+        // Once an arm action starts, always complete the down/up pair even if focus changes during the hold.
+        yield return new WaitForSeconds(0.2f);
+        arm.OnClickUp();
+        yield return FcsRuntimeClock.WaitForSeconds(0.25f);
+    }
+
     private static IEnumerator EnsureArmSelected(LookAtTarget? arm, string name) {
         if (arm == null) {
             MelonLogger.Error($"[FCS] TriggerConsole: missing {name} arming control");
@@ -101,17 +140,32 @@ public class TriggerConsole {
             yield break;
         }
 
-        yield return FcsRuntimeClock.WaitUntilFocused();
-        arm.OnClickDown();
-
-        // Preserve the original proven arming interaction. Do not touch the opposite gun; selecting a side is
-        // game-owned and the game itself handles any previous side selection.
-        yield return new WaitForSeconds(0.2f);
-        arm.OnClickUp();
-        yield return FcsRuntimeClock.WaitForSeconds(0.25f);
+        // Preserve the original proven arming interaction. Do not touch the opposite gun during a normal task;
+        // selecting a side is game-owned and the game itself handles any previous side selection.
+        yield return ThrowArm(arm);
 
         if (TryGetClickedState(arm, out var after) && !after) {
             MelonLogger.Warning($"[FCS] TriggerConsole: {name} arm action did not latch ON");
+        }
+    }
+
+    private static IEnumerator EnsureArmCleared(LookAtTarget? arm, string name) {
+        if (arm == null) {
+            MelonLogger.Error($"[FCS] TriggerConsole: missing {name} arming control");
+            yield break;
+        }
+
+        if (!TryGetClickedState(arm, out var current)) {
+            MelonLogger.Warning($"[FCS] TriggerConsole: can't read {name} during F9 reset; leaving it unchanged");
+            yield break;
+        }
+        if (!current)
+            yield break;
+
+        yield return ThrowArm(arm);
+
+        if (TryGetClickedState(arm, out var after) && after) {
+            MelonLogger.Warning($"[FCS] TriggerConsole: {name} did not clear during F9 reset");
         }
     }
 
@@ -123,13 +177,39 @@ public class TriggerConsole {
             $"Elevation={S(_elevationCheck)} Ready={S(_readyFire)} ArmL={S(_armLeft)} ArmR={S(_armRight)}");
     }
 
+    private IEnumerator ResetLatchedFireControlsAfterBind() {
+        LogLatchedStates("before F9 reset");
+
+        // Clear arming first. Disarming may itself invalidate some review checks; every review state is re-read
+        // afterwards, so controls already cleared by the game are left untouched.
+        yield return EnsureArmCleared(_armLeft, "Left");
+        yield return EnsureArmCleared(_armRight, "Right");
+
+        // Walk the confirmation dependency chain backwards. This avoids tearing down an upstream prerequisite
+        // while a downstream switch is still latched and potentially no longer interactable.
+        yield return EnsureReviewCleared(_readyFire, "ReadyToFire");
+        yield return EnsureReviewCleared(_elevationCheck, "ElevationCheck");
+        yield return EnsureReviewCleared(_rotationCheck, "RotationCheck");
+        yield return EnsureReviewCleared(_bulletCheck, "BulletCheck");
+        yield return EnsureReviewCleared(_taskCheck, "TaskCheck");
+
+        LogLatchedStates("after F9 reset");
+    }
+
     /// <summary>
-    /// F9 abandons FCS task ownership but does not reset the physical trigger console in the game scene.
-    /// Do not toggle anything here. A later task reconciles each required control idempotently from `isClicked`.
+    /// The first call after TryBind is the F9/startup recovery hook and clears only the shared trigger-console
+    /// latches. Shell, powder, elevation and the rest of each gun's physical state are deliberately untouched.
+    /// All later calls belong to normal tasks and must not reset shared controls.
     /// </summary>
     public IEnumerator PrepareForNewFireSolution(LeftRight leftRight) {
+        if (_resetPendingAfterBind) {
+            // Clear first so two callers can never both run the reset if scheduling overlaps.
+            _resetPendingAfterBind = false;
+            yield return ResetLatchedFireControlsAfterBind();
+            yield break;
+        }
+
         LogLatchedStates("before fire solution");
-        yield break;
     }
 
     public IEnumerator Arm(LeftRight leftRight) {
