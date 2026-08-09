@@ -121,42 +121,32 @@ public sealed class GunPhysicalState
         if (!state.IsBound)
             return GunPhysicalStateKind.Unbound;
 
-        // IsReloading/pendingReload can remain true on an otherwise idle empty gun, so neither flag is
-        // authoritative alone. Prefer semantic reload-state metadata plus live mechanism motion/locks.
-        var atReloadRest = state.ReloadCompleteState
-                           || string.Equals(state.ReloadStateKey, "BreachLocked",
-                               StringComparison.OrdinalIgnoreCase);
-
+        // Only live mechanism motion / a locked reload lowering path is authoritative evidence that the
+        // gun must not be touched yet. In the release build an idle EMPTY gun is observed as:
+        //   chamber=empty, powder=0, IsReloading=true, pendingReload=true,
+        //   state=3/BreechOpen, working=false, breechLocked=false.
+        // Therefore IsReloading/pendingReload must never by themselves turn an idle empty gun into recovery.
         if (state.ReloadWorking || state.BreechLocked)
             return GunPhysicalStateKind.Recovering;
 
+        // Empty + physically idle is safe for the normal loading path. This covers both fresh mission startup
+        // and the settled state after a previous shot. If a post-shot mechanism is still actually moving, the
+        // working/lock guard above keeps it in Recovering until it settles.
         if (state.ShellId == null && state.PowderCharges == 0)
-        {
-            // A semantic rest state is safe even if the legacy booleans are stale.
-            if (atReloadRest || (!state.IsReloading && !state.PendingReload))
-                return GunPhysicalStateKind.EmptyReady;
+            return GunPhysicalStateKind.EmptyReady;
 
-            // Empty + not-at-rest is most commonly a post-shot/reload path. Wait and re-read instead
-            // of immediately treating it as an empty gun.
-            return GunPhysicalStateKind.PostShotRecovery;
-        }
-
-        // Shell-in-chamber/no committed powder is a stable, recoverable intermediate. We intentionally
-        // do not require the overall reload cycle to be "complete": this is exactly the state we want
-        // to resume by loading powder for a newly selected same-shell target.
+        // Shell-in-chamber/no committed powder is a valid stable intermediate after F9. Resume by loading only
+        // the charge required by the next same-shell target.
         if (state.ShellType.HasValue && state.PowderCharges == 0)
             return GunPhysicalStateKind.ShellLoaded;
 
+        // A chambered known shell with committed powder is a reusable physical round. CanFire is deliberately
+        // not required because it is a flow flag rather than the durable source of shell/charge truth.
         if (state.ShellType.HasValue && state.PowderCharges > 0 && state.PowderCharges <= 6)
-        {
-            // Powder may become visible before the final rammer/breech transition settles. Only expose
-            // the round as retargetable once the controller reports a rest state or both flow flags clear.
-            if (atReloadRest || (!state.IsReloading && !state.PendingReload))
-                return GunPhysicalStateKind.LoadedReady;
+            return GunPhysicalStateKind.LoadedReady;
 
-            return GunPhysicalStateKind.Recovering;
-        }
-
+        // Powder without a known chambered shell, an unknown shell id, or an invalid powder count is unsafe.
+        // The scheduler gives Unknown a bounded recovery window and will not issue reload controls meanwhile.
         return GunPhysicalStateKind.Unknown;
     }
 
