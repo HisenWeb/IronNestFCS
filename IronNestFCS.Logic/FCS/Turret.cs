@@ -27,16 +27,22 @@ public class Turret {
             yield break;
         }
 
+        yield return FcsRuntimeClock.WaitUntilFocused();
         _turret.DesiredRotation = -angle;
-        // Scaled game time pauses with the game, so losing focus cannot consume the watchdog.
-        var deadline = Time.time + Mathf.Max(1f, timeoutSeconds);
-        yield return new WaitForSeconds(0.5f);
-        while (_turret.rotationVelocity != 0) {
-            if (Time.time >= deadline) {
+        var deadline = FcsRuntimeClock.Now + Mathf.Max(1f, timeoutSeconds);
+        yield return FcsRuntimeClock.WaitForSeconds(0.5f);
+
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
+            if (_turret.rotationVelocity == 0)
+                break;
+
+            if (FcsRuntimeClock.Now >= deadline) {
                 MelonLogger.Error($"[FCS] Turret rotation timed out at target {angle:F1}°");
                 yield break;
             }
-            yield return new WaitForSeconds(0.25f);
+            yield return FcsRuntimeClock.WaitForSeconds(0.25f);
         }
         LastRotationSucceeded = true;
     }
