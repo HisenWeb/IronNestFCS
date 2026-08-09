@@ -69,29 +69,37 @@ public class FcsSceneInteractor {
         var x = 0.8f;
         var y = -0.65f;
         
+        TextMeshPro? autoFireLabel = null;
         GameObject? autoFireButton = null;
         autoFireButton = AddButton(() => {
             AutoFire = !AutoFire;
             SetColor(autoFireButton, AutoFire ? Color.red : Color.white);
+            if (autoFireLabel != null)
+                autoFireLabel.text = AutoFire ? "自动开火：开" : "自动开火：关";
         }, AutoFire ? Color.red : Color.white);
         autoFireButton.transform.position = new Vector3(x, y, z);
         autoFireButton.transform.localScale = Vector3.one * 0.02f;
-        var autoFiretext = AddText("Auto Fire", 14f);
-        autoFiretext.transform.SetParent(autoFireButton.transform, false);
-        autoFiretext.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
-        autoFiretext.transform.localScale = Vector3.one * 1.0f;
+        var autoFireText = AddText("自动开火：关", 14f);
+        autoFireLabel = autoFireText.GetComponent<TextMeshPro>();
+        autoFireText.transform.SetParent(autoFireButton.transform, false);
+        autoFireText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
+        autoFireText.transform.localScale = Vector3.one * 1.0f;
         
         x -= 0.05f;
         y -= 0.0045f;
         
+        TextMeshPro? maxChargeLabel = null;
         GameObject maxChargeButton = null;
         maxChargeButton = AddButton(() => {
             maxCharge = !maxCharge;
             SetColor(maxChargeButton, maxCharge ? Color.red : Color.white);
+            if (maxChargeLabel != null)
+                maxChargeLabel.text = maxCharge ? "最大装药：开" : "最大装药：关";
         }, maxCharge ? Color.red : Color.white);
         maxChargeButton.transform.position = new Vector3(x, y, z);
         maxChargeButton.transform.localScale = Vector3.one * 0.02f;
-        var maxChargeText = AddText("Max Charge", 14f);
+        var maxChargeText = AddText("最大装药：关", 14f);
+        maxChargeLabel = maxChargeText.GetComponent<TextMeshPro>();
         maxChargeText.transform.SetParent(maxChargeButton.transform, false);
         maxChargeText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
         maxChargeText.transform.localScale = Vector3.one * 1.0f;
