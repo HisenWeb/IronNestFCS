@@ -47,10 +47,13 @@ public class TriggerConsole {
 
     public IEnumerator Arm(LeftRight leftRight) {
         var arm = leftRight == LeftRight.Left ? _armLeft : _armRight;
+        yield return FcsRuntimeClock.WaitUntilFocused();
         arm?.OnClickDown();
+
+        // Complete an already-started lever click even if focus changes in this short interval.
         yield return new WaitForSeconds(0.2f);
         arm?.OnClickUp();
-        yield return new WaitForSeconds(1f);
+        yield return FcsRuntimeClock.WaitForSeconds(1f);
     }
     
     public IEnumerator ConfirmTask() {
