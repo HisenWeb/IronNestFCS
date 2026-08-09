@@ -127,7 +127,7 @@ public class GunSystem {
         }
         if (reloadController != null) {
             MelonLogger.Msg(
-                $"[FCS] GunSystem {surfix}: reload state={reloadController.CurrentStateIndex} ({reloadController.CurrentState})");
+                $"[FCS] GunSystem {surfix}: reload state={reloadController.CurrentStateIndex}, working={reloadController.working}");
         }
         else {
             MelonLogger.Warning($"[FCS] GunSystem {surfix}: ArtilleryReloadController unavailable; reload recovery will use fallback checks");
@@ -281,10 +281,11 @@ public class GunSystem {
     }
 
     /// <summary>
-    /// The release build exposes a real reload state machine. After a shot, the visual barrel
-    /// can appear settled before the rammer/breech has actually returned to state 0. Starting
-    /// the next task during that interval leaves all reload buttons inactive. Wait for the
-    /// mechanism itself, not just a fixed delay.
+    /// Wait until the release-version reload mechanism is no longer executing an animation/action.
+    /// Reload state indices are data-driven and are NOT stable semantic values: an idle gun can be
+    /// in state 1, 3, or another index depending on the current reload definition. Therefore never
+    /// assume that state 0 means "ready". The controller's working flag is the authoritative signal
+    /// used by the game's own reload flow before another legitimate action can be issued.
     /// </summary>
     public IEnumerator WaitForReloadReady(float timeoutSeconds = ReloadControlTimeoutSeconds) {
         LastReloadReadySucceeded = false;
@@ -295,15 +296,15 @@ public class GunSystem {
 
         var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, timeoutSeconds);
         while (true) {
-            var stateReady = reloadController == null || reloadController.CurrentStateIndex == 0;
+            var mechanismReady = reloadController == null || !reloadController.working;
             var breechReady = !gunController.ExternalReloadLoweringLocked;
             var motionReady = gunController.elevationChangeVelocity == 0;
-            if (stateReady && breechReady && motionReady) break;
+            if (mechanismReady && breechReady && motionReady) break;
 
             if (Time.realtimeSinceStartup >= deadline) {
                 var state = reloadController == null
                     ? "unknown"
-                    : $"{reloadController.CurrentStateIndex} ({reloadController.CurrentState})";
+                    : $"{reloadController.CurrentStateIndex}, working={reloadController.working}";
                 MelonLogger.Error(
                     $"[FCS] GunSystem {_surfix}: reload mechanism did not become ready; " +
                     $"state={state}, breechLocked={gunController.ExternalReloadLoweringLocked}, " +
@@ -313,8 +314,8 @@ public class GunSystem {
             yield return new WaitForSeconds(0.25f);
         }
 
-        // Small settle gap closes the one-frame race where state 0 is reached just before
-        // the interaction buttons are re-enabled.
+        // Small settle gap closes the one-frame race where the animation finishes just before
+        // the interaction controls are re-enabled.
         yield return new WaitForSeconds(0.5f);
         LastReloadReadySucceeded = true;
     }
@@ -421,15 +422,15 @@ public class GunSystem {
 
         while (true) {
             var minimumDelayDone = Time.realtimeSinceStartup >= minimumRecoveryUntil;
-            var stateReady = reloadController == null || reloadController.CurrentStateIndex == 0;
+            var mechanismReady = reloadController == null || !reloadController.working;
             var breechReady = !gunController.ExternalReloadLoweringLocked;
             var motionReady = gunController.elevationChangeVelocity == 0;
-            if (minimumDelayDone && stateReady && breechReady && motionReady) break;
+            if (minimumDelayDone && mechanismReady && breechReady && motionReady) break;
 
             if (Time.realtimeSinceStartup >= deadline) {
                 var state = reloadController == null
                     ? "unknown"
-                    : $"{reloadController.CurrentStateIndex} ({reloadController.CurrentState})";
+                    : $"{reloadController.CurrentStateIndex}, working={reloadController.working}";
                 MelonLogger.Warning(
                     $"[FCS] GunSystem {_surfix}: post-shot recovery timed out; " +
                     $"state={state}, breechLocked={gunController.ExternalReloadLoweringLocked}, " +
