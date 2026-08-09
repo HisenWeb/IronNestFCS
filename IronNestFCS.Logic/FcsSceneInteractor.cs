@@ -14,12 +14,8 @@ public class FcsSceneInteractor {
     private List<GameObject> destroyOnShutdown = new();
     private readonly ClickRaycaster clicks = new();
 
-    // 当前选中的弹种（两管炮共享，由调度器决定任务派到哪管炮）。
     public BulletType selectedBulletType = BulletType.HE;
-
     private List<GameObject> bulletTypeBtns = new();
-
-    // 每个地图目标对应一个按钮：targetId -> 按钮。点击=用当前弹种为该目标入队一个任务。
     private readonly Dictionary<int, GameObject> targetButtons = new();
 
     public bool AutoFire = false;
@@ -40,7 +36,6 @@ public class FcsSceneInteractor {
         var y = -0.65f;
         foreach (BulletType type in Enum.GetValues(typeof(BulletType))) {
             BulletType captured = type;
-            // 先声明再赋值：lambda 要捕获 button，不能在其声明表达式内部引用它。
             GameObject button = null;
             button = AddButton(() => {
                 selectedBulletType = captured;
@@ -111,8 +106,6 @@ public class FcsSceneInteractor {
             var targetId = i;
             GameObject button = null;
             button = AddButton(() => {
-                // Snapshot the selected shell at click time. Marker stabilization is asynchronous,
-                // so a later shell-selection click must not alter the already requested mission.
                 var bulletAtClick = selectedBulletType;
                 SetColor(button, Color.gray);
                 var collider = button.GetComponent<Collider>();
@@ -132,9 +125,10 @@ public class FcsSceneInteractor {
     }
 
     private IEnumerator QueueStableTarget(int targetId, BulletType bulletType, GameObject button) {
-        var clickedAt = Time.time;
+        var clickedAt = FcsRuntimeClock.Now;
         ArtilleryTask? task = null;
         yield return fcs.MapTable.GetStableMarkTarget(targetId, result => task = result);
+        yield return FcsRuntimeClock.WaitUntilFocused();
 
         if (task != null) {
             task.targetId = targetId;
@@ -142,13 +136,12 @@ public class FcsSceneInteractor {
             fcs.EnqueueTask(task);
         }
 
-        // Preserve the old one-second anti-double-click cooldown. Stable sampling normally consumes
-        // about 0.2 s of it; only wait for the remainder. Game time pauses when the game is paused.
-        var remainingCooldown = 1f - (Time.time - clickedAt);
+        var remainingCooldown = 1f - (FcsRuntimeClock.Now - clickedAt);
         if (remainingCooldown > 0f) {
-            yield return new WaitForSeconds(remainingCooldown);
+            yield return FcsRuntimeClock.WaitForSeconds(remainingCooldown);
         }
 
+        yield return FcsRuntimeClock.WaitUntilFocused();
         if (button != null) {
             SetColor(button, Color.red);
             var collider = button.GetComponent<Collider>();
@@ -156,11 +149,12 @@ public class FcsSceneInteractor {
         }
     }
 
-    /// <summary>任务完成回调</summary>
     public void TaskFinished(ArtilleryTask task) {
     }
     
     public void Update() {
+        if (!FcsRuntimeClock.IsFocused)
+            return;
         clicks.Update();
     }
 
@@ -176,8 +170,6 @@ public class FcsSceneInteractor {
     }
 
     public GameObject AddButton(Action onClick, Color color) {
-        // 用自带 BoxCollider 的 cube 当可点击目标，靠 ClickRaycaster 自己 raycast 检测点击，
-        // 不依赖游戏的 LookAtTarget，也不注册新 IL2CPP 类型（保持可热重载）。
         var button = GameObject.CreatePrimitive(PrimitiveType.Cube);
         destroyOnShutdown.Add(button);
         var collider = button.GetComponent<Collider>();
@@ -186,11 +178,6 @@ public class FcsSceneInteractor {
         return button;
     }
 
-    /// <summary>
-    /// 给对象的 Renderer 换上当前渲染管线（URP）的材质并设颜色。
-    /// CreatePrimitive 默认用内置管线的 Standard 材质，在 URP 下 shader 无效会渲染成紫色；
-    /// 这里用 URP 的 Unlit shader 重建材质（不受光照影响，纯色所见即所得）。
-    /// </summary>
     public static void SetColor(GameObject go, Color color) {
         var renderer = go.GetComponent<Renderer>();
         if (renderer == null)
@@ -212,9 +199,6 @@ public class FcsSceneInteractor {
         renderer.material = mat;
     }
 
-    /// <summary>
-    /// 在 3D 世界里创建一段文本（World Space 的 TextMeshPro，非 UGUI）。
-    /// </summary>
     public GameObject AddText(string text, float fontSize = 4f) {
         var go = new GameObject("FcsText");
         destroyOnShutdown.Add(go);
@@ -230,8 +214,7 @@ public class FcsSceneInteractor {
     }
 
     /// <summary>
-    /// 等待游戏按钮可点击并模拟一次完整点击。以前这里可能无限等待，导致任务永远占住炮管；
-    /// 现在默认 10 秒超时，后续任务流程会通过自己的状态 watchdog 判定失败并释放槽位。
+    /// 等待游戏按钮可点击并模拟一次完整点击。失焦期间既不点击，也不消耗 FCS watchdog 时间。
     /// </summary>
     public static IEnumerator WaitAndClick(LookAtTarget? button, float timeoutSeconds = 10f) {
         if (button == null) {
@@ -239,24 +222,32 @@ public class FcsSceneInteractor {
             yield break;
         }
 
-        // Our timeout budget follows game time; the game's own nextAllowedClickTime remains on
-        // realtimeSinceStartup because that is the clock the LookAtTarget field itself uses.
-        var deadline = Time.time + Mathf.Max(0.1f, timeoutSeconds);
-        while (button.isActive == false || button.nextAllowedClickTime > Time.realtimeSinceStartup) {
-            if (Time.time >= deadline) {
+        var deadline = FcsRuntimeClock.Now + Mathf.Max(0.1f, timeoutSeconds);
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
+            if (button.isActive && button.nextAllowedClickTime <= Time.realtimeSinceStartup)
+                break;
+
+            if (FcsRuntimeClock.Now >= deadline) {
                 MelonLogger.Error($"[FCS] WaitAndClick timeout: {button.gameObject.name}");
                 yield break;
             }
-            yield return new WaitForSeconds(0.1f);
+            yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         }
-        yield return new WaitForSeconds(0.1f);
+
+        yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+        yield return FcsRuntimeClock.WaitUntilFocused();
         button.OnClickDown();
+
+        // Finish an already-started click even if focus changes between down and up.
         yield return new WaitForSeconds(0.1f);
         button.OnClickUp();
     }
     
     public static IEnumerator InvokeDelay(Action action, float delay) {
-        yield return new WaitForSeconds(delay);
+        yield return FcsRuntimeClock.WaitForSeconds(delay);
+        yield return FcsRuntimeClock.WaitUntilFocused();
         action();
     }
     
