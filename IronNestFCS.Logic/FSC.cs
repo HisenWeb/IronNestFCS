@@ -77,6 +77,7 @@ public class FSC
     private ArtilleryTask? _firePriorityWinner;
     private ArtilleryTask? _firePrioritySecond;
     private ArtilleryTask? _fireLaneCommittedTask;
+    private ArtilleryTask? _triggerResetRequiredTask;
     private bool _firePriorityWinnerProvisional;
     private int _firePriorityGeneration;
     private string _firePriorityStatusText = "首发仲裁：未触发";
@@ -190,6 +191,7 @@ public class FSC
         _firePriorityWinner = null;
         _firePrioritySecond = null;
         _fireLaneCommittedTask = null;
+        _triggerResetRequiredTask = null;
         _firePriorityWinnerProvisional = false;
         _firePriorityStatusText = "首发仲裁：未触发（已重置）";
         _firePriorityLeftDetail = "";
@@ -570,6 +572,9 @@ public class FSC
     /// while an already committed or fixed non-provisional winner on the other gun is preserved.
     /// </summary>
     private void InvalidateFirePriorityForAbnormalTask(ArtilleryTask task, string reason) {
+        if (ReferenceEquals(_triggerResetRequiredTask, task))
+            _triggerResetRequiredTask = null;
+
         var preservedWinner = _firePriorityWinner != null
                               && !ReferenceEquals(_firePriorityWinner, task)
                               && IsActiveTask(_firePriorityWinner)
@@ -951,6 +956,9 @@ public class FSC
     }
 
     private void ReleaseFirePriorityAfterSuccessfulShot(ArtilleryTask task) {
+        if (ReferenceEquals(_triggerResetRequiredTask, task))
+            _triggerResetRequiredTask = null;
+
         var sessionContainedTask = _firePrioritySession != null
                                    && (ReferenceEquals(_firePrioritySession.LeftTask, task)
                                        || ReferenceEquals(_firePrioritySession.RightTask, task));
@@ -980,6 +988,9 @@ public class FSC
                 && GetFirePriorityGunPhase(nextSide, next) == FirePriorityGunPhase.Preparation) {
                 _firePriorityWinner = next;
                 _firePriorityWinnerProvisional = false;
+                // The previous real shot is still asynchronously clearing the shared Review Console. The promoted
+                // second shot may prepare in parallel with turret rotation, but only after that reset settles.
+                _triggerResetRequiredTask = next;
                 _firePriorityStatusText = !string.IsNullOrEmpty(_firePriorityOrderText)
                     ? $"首发仲裁：第二炮优先 T{next.targetId}（{_firePriorityOrderText}）"
                     : $"首发仲裁：T{next.targetId} 优先";
@@ -1082,6 +1093,35 @@ public class FSC
         MelonLogger.Error($"[FCS] {leftRight} T{task.targetId} failed: {reason}");
         RecordTaskResult(task);
         TryDispatch();
+    }
+
+    private IEnumerator PrepareTriggerConsoleForTask(
+        LeftRight leftRight,
+        ArtilleryTask task,
+        bool waitForPreviousShotReset) {
+        yield return _deskLock.Acquire();
+        try {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return TriggerConsole.PrepareForNewFireSolution(leftRight, waitForPreviousShotReset);
+            if (waitForPreviousShotReset && ReferenceEquals(_triggerResetRequiredTask, task))
+                _triggerResetRequiredTask = null;
+
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return TriggerConsole.ConfirmTask();
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return TriggerConsole.ConfirmBullet();
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return TriggerConsole.ConfirmRotation();
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return TriggerConsole.ConfirmElevation();
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return TriggerConsole.ReadyToFire();
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            yield return TriggerConsole.Arm(leftRight);
+        }
+        finally {
+            _deskLock.Release();
+        }
     }
 
     private IEnumerator RunTaskRoutine(LeftRight leftRight, ArtilleryTask task, GunTaskMode mode) {
@@ -1314,9 +1354,38 @@ public class FSC
             ? AutoTurretWaitTimeoutSeconds
             : ManualTurretWaitTimeoutSeconds;
         var turretDeadline = FcsRuntimeClock.Now + turretWaitTimeout;
+
+        // Wait until this task owns the shared fire lane. A promoted fixed Second can then prepare the shared
+        // Review Console while the turret is still slewing. Ordinary/first shots keep the original safer order:
+        // turret arrives first, then Review/Arm is enabled.
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
-            if (turret.Ready || turret.Failed) break;
+            if (turret.Committed || turret.Ready || turret.Failed || turret.Canceled) break;
+            if (FcsRuntimeClock.Now >= turretDeadline) break;
+            yield return null;
+        }
+        if (turret.Failed) {
+            AbortTask(leftRight, task, turret, turret.FailureReason);
+            yield break;
+        }
+        if (!turret.Committed && !turret.Ready) {
+            AbortTask(leftRight, task, turret, $"turret reservation timed out after {turretWaitTimeout:F0}s");
+            yield break;
+        }
+
+        var waitForPreviousShotReset = ReferenceEquals(_triggerResetRequiredTask, task);
+        var triggerPrepared = false;
+
+        if (waitForPreviousShotReset) {
+            // The previous shot has been positively observed, so this fixed Second owns the next fire slot. Wait
+            // only for the game's asynchronous control reset, then re-enable Review/Arm while azimuth keeps moving.
+            yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: true);
+            triggerPrepared = true;
+        }
+
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            if (turret.Ready || turret.Failed || turret.Canceled) break;
             if (FcsRuntimeClock.Now >= turretDeadline) break;
             yield return null;
         }
@@ -1325,34 +1394,23 @@ public class FSC
             yield break;
         }
         if (!turret.Ready) {
-            AbortTask(leftRight, task, turret, $"turret reservation timed out after {turretWaitTimeout:F0}s");
+            AbortTask(leftRight, task, turret, $"turret rotation timed out after {turretWaitTimeout:F0}s");
             yield break;
         }
 
+        if (!triggerPrepared)
+            yield return PrepareTriggerConsoleForTask(leftRight, task, waitForPreviousShotReset: false);
+
         try {
-            yield return _deskLock.Acquire();
-            try {
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.PrepareForNewFireSolution(leftRight);
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmTask();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmBullet();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmRotation();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ConfirmElevation();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.ReadyToFire();
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                yield return TriggerConsole.Arm(leftRight);
-                if (_sceneInteractor.AutoFire) {
+            if (_sceneInteractor.AutoFire) {
+                yield return _deskLock.Acquire();
+                try {
                     yield return FcsRuntimeClock.WaitUntilFocused();
                     TriggerConsole.Fire();
                 }
-            }
-            finally {
-                _deskLock.Release();
+                finally {
+                    _deskLock.Release();
+                }
             }
 
             var fireTimeout = _sceneInteractor.AutoFire
@@ -1365,14 +1423,14 @@ public class FSC
         }
 
         if (!gunSys.LastFireObserved) {
-        AbortTask(leftRight, task, turret,
-            _sceneInteractor.AutoFire ? "automatic fire was not observed" : "manual fire wait timed out");
-        yield break;
-    }
+            AbortTask(leftRight, task, turret,
+                _sceneInteractor.AutoFire ? "automatic fire was not observed" : "manual fire wait timed out");
+            yield break;
+        }
 
-    // A fixed Second is promoted only after a real shot is observed. Timeouts and failures
-    // invalidate the broken arbitration instead of pretending the first shot completed.
-    ReleaseFirePriorityAfterSuccessfulShot(task);
+        // A fixed Second is promoted only after a real shot is observed. Timeouts and failures
+        // invalidate the broken arbitration instead of pretending the first shot completed.
+        ReleaseFirePriorityAfterSuccessfulShot(task);
 
         task.progress = Progress.BackToIdle;
         yield return gunSys.WaitBackToIdle();
@@ -1412,6 +1470,7 @@ public class FSC
         public ArtilleryTask Task { get; }
         public int Generation { get; }
         public bool Acquired;
+        public bool Committed;
         public bool Ready;
         public bool Failed;
         public bool Canceled;
@@ -1454,6 +1513,10 @@ public class FSC
                 yield return null;
                 continue;
             }
+
+            // Publish ownership before starting the physical slew so RunTaskRoutine can prepare Review/Arm
+            // concurrently. This is only a readiness signal; automatic firing still waits for res.Ready.
+            res.Committed = true;
 
             yield return Turret.SetRotation(
                 task.angel,
