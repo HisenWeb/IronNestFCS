@@ -870,13 +870,20 @@ public class FSC
         var rightAzimuthDelta = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, -right.Task.angel));
         var leftElevationDelta = Mathf.Abs(left.Task.elevation - leftElevation);
         var rightElevationDelta = Mathf.Abs(right.Task.elevation - rightElevation);
-        var leftScore = leftAzimuthDelta + leftElevationDelta;
-        var rightScore = rightAzimuthDelta + rightElevationDelta;
+
+        // Measured release-build slew rates are approximately AZ=4 deg/s and EL=2 deg/s.
+        // Use azimuth degrees as the common time-equivalent unit: 1 degree of elevation costs the
+        // same time as 2 degrees of azimuth. Since both axes move in parallel, readiness is gated
+        // by the slower remaining axis rather than by the sum of both movements.
+        var leftElevationEquivalent = leftElevationDelta * 2f;
+        var rightElevationEquivalent = rightElevationDelta * 2f;
+        var leftScore = Mathf.Max(leftAzimuthDelta, leftElevationEquivalent);
+        var rightScore = Mathf.Max(rightAzimuthDelta, rightElevationEquivalent);
 
         _firePriorityLeftDetail =
-            $"左T{left.Task.targetId}：{leftScore:F1}°（方{leftAzimuthDelta:F1} + 仰{leftElevationDelta:F1}）";
+            $"左T{left.Task.targetId}：{leftScore:F1}（方{leftAzimuthDelta:F1} / 仰{leftElevationDelta:F1}×2={leftElevationEquivalent:F1}）";
         _firePriorityRightDetail =
-            $"右T{right.Task.targetId}：{rightScore:F1}°（方{rightAzimuthDelta:F1} + 仰{rightElevationDelta:F1}）";
+            $"右T{right.Task.targetId}：{rightScore:F1}（方{rightAzimuthDelta:F1} / 仰{rightElevationDelta:F1}×2={rightElevationEquivalent:F1}）";
 
         FirePriorityCandidate winner;
         FirePriorityCandidate loser;
@@ -895,16 +902,16 @@ public class FSC
             loser = right;
             reason =
                 $"currentAz={currentAzimuth:F1}°, Left T{left.Task.targetId}={leftScore:F1}° " +
-                $"(az {leftAzimuthDelta:F1}+el {leftElevationDelta:F1}) < Right T{right.Task.targetId}={rightScore:F1}° " +
-                $"(az {rightAzimuthDelta:F1}+el {rightElevationDelta:F1})";
+                $"(az {leftAzimuthDelta:F1}, el {leftElevationDelta:F1}x2={leftElevationEquivalent:F1}) < Right T{right.Task.targetId}={rightScore:F1} " +
+                $"(az {rightAzimuthDelta:F1}, el {rightElevationDelta:F1}x2={rightElevationEquivalent:F1})";
         }
         else {
             winner = right;
             loser = left;
             reason =
                 $"currentAz={currentAzimuth:F1}°, Right T{right.Task.targetId}={rightScore:F1}° " +
-                $"(az {rightAzimuthDelta:F1}+el {rightElevationDelta:F1}) < Left T{left.Task.targetId}={leftScore:F1}° " +
-                $"(az {leftAzimuthDelta:F1}+el {leftElevationDelta:F1})";
+                $"(az {rightAzimuthDelta:F1}, el {rightElevationDelta:F1}x2={rightElevationEquivalent:F1}) < Left T{left.Task.targetId}={leftScore:F1} " +
+                $"(az {leftAzimuthDelta:F1}, el {leftElevationDelta:F1}x2={leftElevationEquivalent:F1})";
         }
 
         SetPairFirePriority(winner, loser, reason);
