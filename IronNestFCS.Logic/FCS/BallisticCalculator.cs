@@ -13,6 +13,7 @@ public class BallisticCalculator {
     private const float ResultSettleTimeoutSeconds = 3f;
     private const float ResultStableTolerance = 0.01f;
     private const int ResultStableSampleCount = 3;
+    private const float BallisticTraceIntervalSeconds = 2f;
 
     private DialInteractable? distanceDial;
     private DialInteractable? chargeDial;
@@ -114,13 +115,24 @@ public class BallisticCalculator {
             yield break;
         }
 
-        var deadline = FcsRuntimeClock.Now + CalculateClickTimeoutSeconds;
+        var startedAt = FcsRuntimeClock.Now;
+        var deadline = startedAt + CalculateClickTimeoutSeconds;
+        var nextTraceAt = startedAt + BallisticTraceIntervalSeconds;
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
 
             if (calculateButton.isActive
                 && calculateButton.nextAllowedClickTime <= Time.realtimeSinceStartup) {
                 break;
+            }
+
+            if (FcsRuntimeClock.Now >= nextTraceAt) {
+                MelonLogger.Warning(
+                    $"[FCS Stall] BALLISTIC: Calculate unavailable for {FcsRuntimeClock.Now - startedAt:F1}s; " +
+                    $"active={calculateButton.isActive}, nextAllowed={calculateButton.nextAllowedClickTime:F2}, " +
+                    $"realtime={Time.realtimeSinceStartup:F2}, input={requestedDistance:F3}km/" +
+                    $"{requestedDirection:F2}°/{requestedShell}/C{requestedCharge:F0}");
+                nextTraceAt += BallisticTraceIntervalSeconds;
             }
 
             if (FcsRuntimeClock.Now >= deadline) {
@@ -133,6 +145,9 @@ public class BallisticCalculator {
             yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         }
 
+        MelonLogger.Msg(
+            $"[FCS BALLISTIC TRACE] Calculate clickable after {FcsRuntimeClock.Now - startedAt:F2}s; " +
+            $"input={requestedDistance:F3}km/{requestedDirection:F2}°/{requestedShell}/C{requestedCharge:F0}");
         yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         yield return FcsRuntimeClock.WaitUntilFocused();
         FcsSceneInteractor.BeginPhysicalClick(calculateButton);
@@ -142,6 +157,7 @@ public class BallisticCalculator {
         yield return new WaitForSeconds(0.1f);
         FcsSceneInteractor.EndPhysicalClick(calculateButton);
         lastClickAccepted = true;
+        MelonLogger.Msg("[FCS BALLISTIC TRACE] Calculate click completed");
     }
 
     private IEnumerator WaitForElevationSettled(float baseline) {
@@ -158,6 +174,10 @@ public class BallisticCalculator {
         var stableSamples = 0;
         var changedFromBaseline = !IsFinite(baseline)
                                   || (previousValid && Mathf.Abs(previous - baseline) > ResultStableTolerance);
+        MelonLogger.Msg(
+            $"[FCS BALLISTIC TRACE] settle start: baseline=" +
+            $"{(IsFinite(baseline) ? baseline.ToString("F2") : "invalid")}°, " +
+            $"display={(previousValid ? previous.ToString("F2") : "invalid")}°");
 
         while (FcsRuntimeClock.Now < deadline) {
             yield return FcsRuntimeClock.WaitForSeconds(ResultSampleIntervalSeconds);
@@ -191,6 +211,9 @@ public class BallisticCalculator {
                 && stableSamples >= ResultStableSampleCount) {
                 lastSettledElevation = current;
                 lastSettleSucceeded = true;
+                MelonLogger.Msg(
+                    $"[FCS BALLISTIC TRACE] settle complete after {FcsRuntimeClock.Now - startedAt:F2}s; " +
+                    $"output={current:F2}°, changed=True, stableSamples={stableSamples}");
                 yield break;
             }
         }
@@ -206,6 +229,9 @@ public class BallisticCalculator {
                     $"[FCS BALLISTIC] Elevation output remained {previous:F2} for the full " +
                     $"{ResultSettleTimeoutSeconds:F1}s observation window; accepting unchanged settled result");
             }
+            MelonLogger.Msg(
+                $"[FCS BALLISTIC TRACE] settle complete after {FcsRuntimeClock.Now - startedAt:F2}s; " +
+                $"output={previous:F2}°, changed={changedFromBaseline}, stableSamples={stableSamples}");
             yield break;
         }
 
@@ -218,6 +244,10 @@ public class BallisticCalculator {
         InvalidateResult();
 
         var before = elevationDisplay?.currentNumber ?? float.NaN;
+        MelonLogger.Msg(
+            $"[FCS BALLISTIC TRACE] calculate start: distance={requestedDistance:F3}km, " +
+            $"direction={requestedDirection:F2}°, shell={requestedShell}, charge=C{requestedCharge:F0}, " +
+            $"before={(IsFinite(before) ? before.ToString("F2") : "invalid")}°");
 
         yield return FcsRuntimeClock.WaitUntilFocused();
         yield return ClickCalculateOnce();
