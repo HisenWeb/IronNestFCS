@@ -1,0 +1,26 @@
+name: Apply provisional second preemption
+
+on:
+  push:
+    branches:
+      - agent/provisional-second-preemption
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/provisional-second-preemption
+          fetch-depth: 0
+      - run: python .github/scripts/apply_provisional_second_preemption.py
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-provisional-second-preemption.yml .github/scripts/apply_provisional_second_preemption.py
+          git add IronNestFCS.Logic/FSC.cs
+          git commit -m "fix: keep promoted second preemptible until fire commit"
+          git push origin HEAD:agent/provisional-second-preemption
