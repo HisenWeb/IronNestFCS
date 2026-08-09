@@ -23,6 +23,7 @@ public class FSC
     private const int PowderReplenishThreshold = 6;
 
     // Watchdogs. A failed game interaction must never occupy a gun/turret forever.
+    private const float ReloadReadyTimeoutSeconds = 60f;
     private const float LoadingTimeoutSeconds = 60f;
     private const float ElevationTimeoutSeconds = 35f;
     private const float TurretRotationTimeoutSeconds = 45f;
@@ -286,11 +287,34 @@ public class FSC
             yield break;
         }
 
+        // A previous shot can leave the release-version rammer/breech state machine busy
+        // long after the visible barrel motion has stopped. Never touch the next reload
+        // controls until the mechanism itself reports its empty/rest state.
         task.progress = Progress.LoadingBullet;
+        yield return gunSys.WaitForReloadReady(ReloadReadyTimeoutSeconds);
+        if (!gunSys.LastReloadReadySucceeded) {
+            AbortTask(leftRight, task, turret, "reload mechanism was not ready for the next cycle");
+            yield break;
+        }
+
         yield return gunSys.LoadBullet(task.bulletType);
+        if (!gunSys.LastReloadActionSucceeded) {
+            AbortTask(leftRight, task, turret,
+                string.IsNullOrEmpty(gunSys.LastReloadFailureReason)
+                    ? "shell loading control failed"
+                    : gunSys.LastReloadFailureReason);
+            yield break;
+        }
 
         task.progress = Progress.LoadingPowder;
         yield return gunSys.LoadPowder(powderCount);
+        if (!gunSys.LastReloadActionSucceeded) {
+            AbortTask(leftRight, task, turret,
+                string.IsNullOrEmpty(gunSys.LastReloadFailureReason)
+                    ? "powder loading control failed"
+                    : gunSys.LastReloadFailureReason);
+            yield break;
+        }
 
         task.progress = Progress.WaitLoading;
         var loadingDeadline = Time.realtimeSinceStartup + LoadingTimeoutSeconds;
