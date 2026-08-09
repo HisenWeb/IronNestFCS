@@ -432,21 +432,22 @@ public class GunSystem {
         if (gunController == null)
             yield break;
 
-        var startedAt = FcsRuntimeClock.Now;
-        var minimumRecoveryUntil = startedAt + MinimumPostShotRecoverySeconds;
-        var deadline = startedAt + Mathf.Max(MinimumPostShotRecoverySeconds, timeoutSeconds);
+        // The game itself keeps running in the background, so already-started recoil/reload recovery
+        // is allowed to count toward the minimum recovery delay. The watchdog still uses FCS active
+        // time so an unfocused window can never cause a timeout by itself.
+        var minimumRecoveryUntilGameTime = Time.time + MinimumPostShotRecoverySeconds;
+        var deadline = FcsRuntimeClock.Now + Mathf.Max(MinimumPostShotRecoverySeconds, timeoutSeconds);
 
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
 
-            var now = FcsRuntimeClock.Now;
-            var minimumDelayDone = now >= minimumRecoveryUntil;
+            var minimumDelayDone = Time.time >= minimumRecoveryUntilGameTime;
             var mechanismReady = reloadController == null || !reloadController.working;
             var breechReady = !gunController.ExternalReloadLoweringLocked;
             var motionReady = gunController.elevationChangeVelocity == 0;
             if (minimumDelayDone && mechanismReady && breechReady && motionReady) break;
 
-            if (now >= deadline) {
+            if (FcsRuntimeClock.Now >= deadline) {
                 var state = reloadController == null
                     ? "unknown"
                     : $"{reloadController.CurrentStateIndex}, working={reloadController.working}";
@@ -468,17 +469,46 @@ public class GunSystem {
             yield break;
         }
 
+        // pendingReload is a useful signal, but it may be transient. If a shot and part of the
+        // recovery sequence happen while the application is unfocused, that flag can be missed.
+        // Snapshot the loaded chamber as a second durable signal: a shell that was chambered before
+        // the wait and is gone after focus returns also proves that the shot/reload transition ran.
+        var chamberAtStart = BulletInChamber();
         var deadline = FcsRuntimeClock.Now + Mathf.Max(1f, timeoutSeconds);
+        var resumeGeneration = FcsRuntimeClock.ResumeGeneration;
+
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
+
+            if (resumeGeneration != FcsRuntimeClock.ResumeGeneration) {
+                resumeGeneration = FcsRuntimeClock.ResumeGeneration;
+                MelonLogger.Msg(
+                    $"[FCS] GunSystem {_surfix}: reconciled after focus restore; " +
+                    $"pendingReload={gunController.pendingReload}, CanFire={gunController.CanFire}, " +
+                    $"chamber={BulletInChamber() ?? "empty"}, reloadState=" +
+                    (reloadController == null
+                        ? "unknown"
+                        : $"{reloadController.CurrentStateIndex}, working={reloadController.working}"));
+            }
 
             if (gunController.pendingReload) {
                 LastFireObserved = true;
                 yield break;
             }
 
+            var chamberNow = BulletInChamber();
+            if (chamberAtStart != null && chamberNow == null) {
+                MelonLogger.Msg(
+                    $"[FCS] GunSystem {_surfix}: fire inferred from chamber transition after state reconciliation");
+                LastFireObserved = true;
+                yield break;
+            }
+
             if (FcsRuntimeClock.Now >= deadline) {
-                MelonLogger.Error($"[FCS] GunSystem {_surfix}: fire was not observed before timeout");
+                MelonLogger.Error(
+                    $"[FCS] GunSystem {_surfix}: fire was not observed before timeout; " +
+                    $"pendingReload={gunController.pendingReload}, CanFire={gunController.CanFire}, " +
+                    $"chamber={chamberNow ?? "empty"}");
                 yield break;
             }
             yield return FcsRuntimeClock.WaitForSeconds(0.1f);
