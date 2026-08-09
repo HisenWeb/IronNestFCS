@@ -17,11 +17,14 @@ public class FcsModule : IFcsModule
     {
         window = new FcsWindow(fcs);
         PhysicalStateProbe.Reset();
+        TriggerConsoleProbe.Reset();
         bool bound = fcs.TryBind();
         if (bound)
         {
             // Read-only baseline for the full reload/fire state timeline.
             PhysicalStateProbe.LogCurrentState();
+            // Read-only physical-state probe for the five review switches + two arming levers.
+            TriggerConsoleProbe.BindAndLog();
         }
         // 返回绑定结果仅用于 Host 日志；窗口实例已建好，未绑定时会显示提示，
         // 进入场景后按 F9 重载即可绑定。
@@ -32,10 +35,13 @@ public class FcsModule : IFcsModule
     {
         fcs.Update();
 
-        // Probe is intentionally outside FSC's focus gate. The game can keep its reload mechanism running
-        // while unfocused, and that background transition is exactly what this diagnostic needs to capture.
+        // Probes are intentionally outside FSC's focus gate. The game can keep mechanisms/animations running
+        // while unfocused, and those physical transitions are exactly what the diagnostics need to capture.
         if (fcs.IsBound)
+        {
             PhysicalStateProbe.Tick();
+            TriggerConsoleProbe.Tick();
+        }
     }
 
     public void OnGui()
@@ -47,6 +53,7 @@ public class FcsModule : IFcsModule
     {
         fcs.Dispose();
         PhysicalStateProbe.Reset();
+        TriggerConsoleProbe.Reset();
         window = null;
     }
 }
