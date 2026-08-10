@@ -6,7 +6,7 @@
 
 你只需要在 Tactical Map 上放好目标标记，IronNestFCS Smart 就可以接管大部分火控流程：弹道解算、左右炮分配、自动购买和装填炮弹/药包、调整仰角、旋转炮塔、准备 Review / Arm，并可选择自动完成最终击发。
 
-[下载最新版](https://github.com/HisenWeb/IronNestFCS/releases/latest) · [原作者 Demo Video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST Steam 页面](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
+[下载最新版](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest) · [原作者 Demo Video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST Steam 页面](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
 
 > 原作者 Demo Video 可以用来了解基本操作方式。Smart 版本的任务安排、状态处理和部分玩家界面已经发生变化。
 
@@ -125,7 +125,7 @@ Mod 直接读取游戏里的真实对象、炮膛和控制器状态，不使用 
 
 ## 下载与安装
 
-打开 [GitHub 最新 Release](https://github.com/HisenWeb/IronNestFCS/releases/latest)，按语言下载 **其中一个安装包**：
+打开 [GitHub 最新 Release](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest)，按语言下载 **其中一个安装包**：
 
 ```text
 IronNestFCS-Smart_v*_zh-CN.zip   简体中文 UI
