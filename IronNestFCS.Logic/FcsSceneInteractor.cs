@@ -75,6 +75,7 @@ public class FcsSceneInteractor
         const float z = -18.5881f;
         var x = 0.8f;
         var y = -0.65f;
+        var toggleFontSize = FcsLocalization.IsChinese ? 14f : 11f;
 
         TextMeshPro? autoFireLabel = null;
         GameObject? autoFireButton = null;
@@ -92,7 +93,7 @@ public class FcsSceneInteractor
 
         autoFireButton.transform.position = new Vector3(x, y, z);
         autoFireButton.transform.localScale = Vector3.one * 0.02f;
-        var autoFireText = AddText(AutoFireText(false), 14f);
+        var autoFireText = AddText(AutoFireText(false), toggleFontSize);
         autoFireLabel = autoFireText.GetComponent<TextMeshPro>();
         autoFireText.transform.SetParent(autoFireButton.transform, false);
         autoFireText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
@@ -114,7 +115,7 @@ public class FcsSceneInteractor
 
         maxChargeButton.transform.position = new Vector3(x, y, z);
         maxChargeButton.transform.localScale = Vector3.one * 0.02f;
-        var maxChargeText = AddText(MaxChargeText(false), 14f);
+        var maxChargeText = AddText(MaxChargeText(false), toggleFontSize);
         maxChargeLabel = maxChargeText.GetComponent<TextMeshPro>();
         maxChargeText.transform.SetParent(maxChargeButton.transform, false);
         maxChargeText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
