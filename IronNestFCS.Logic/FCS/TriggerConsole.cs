@@ -102,7 +102,13 @@ public class TriggerConsole {
     }
 
     public void Fire() {
-        _fire?.AddEnergy(255);
+        if (_fire == null) {
+            MelonLogger.Error("[FCS] TriggerConsole.Fire: generator spinner is unbound");
+            return;
+        }
+
+        MelonLogger.Msg("[FCS] TriggerConsole.Fire: AddEnergy(255)");
+        _fire.AddEnergy(255);
     }
 
     private static float NormalizeAngle(float angle) {
