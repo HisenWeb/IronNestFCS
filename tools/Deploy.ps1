@@ -43,6 +43,6 @@ Copy-Item -Force $AbstractionsDll (Join-Path $UserLibsDir "IronNestFCS.Abstracti
 Write-Host "Logic output: $LogicDll"
 Write-Host ""
 Write-Host "Full IronNestFCS stack deployed. Restart the game once."
-Write-Host "Expected startup banner: IronNestFCS v1.1.1"
+Write-Host "Expected startup banner: IronNestFCS v1.1.2"
 Write-Host "Expected host message: Press F9 to hot reload TaskSystem."
 Write-Host "After a full Host/Abstractions deployment, normal Logic-only edits can use F9 again."
