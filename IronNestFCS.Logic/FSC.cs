@@ -25,6 +25,7 @@ public class FSC
     private HarmonyInstance? _harmony;
     private readonly List<object> _runningCoroutines = new();
     private readonly SceneExposureService _sceneExposure;
+    private readonly AzimuthControlDiagnosticProbe _azimuthControlProbe = new();
 
     internal ILoadingSystem Loading { get; }
     internal FcsSceneInteractor SceneInteractor { get; private set; }
@@ -95,6 +96,7 @@ public class FSC
         FcsRuntimeClock.Reset();
         FirePriority.Reset();
         PlanExecutor.DisposeState();
+        _azimuthControlProbe.Reset();
 
         IsBound = Loading.IsBound
                   && TryBindSafe(nameof(MapTable), MapTable.TryBind)
@@ -112,6 +114,7 @@ public class FSC
         if (IsBound)
         {
             SceneInteractor.Initialize();
+            _azimuthControlProbe.TryBind();
             TrackCoroutine(SharedResources.ResetFireControlsAfterBind());
             TrackCoroutine(SharedResources.ReplenishPowderLoop());
         }
@@ -125,6 +128,7 @@ public class FSC
         if (!FcsRuntimeClock.IsFocused)
             return;
 
+        _azimuthControlProbe.Update();
         SceneInteractor.Update();
         Dispatcher.TryDispatch();
         PlanExecutor.Tick();
@@ -139,6 +143,7 @@ public class FSC
         }
         _runningCoroutines.Clear();
 
+        _azimuthControlProbe.Reset();
         LeftGun.ReleaseElevationOverride();
         RightGun.ReleaseElevationOverride();
 
