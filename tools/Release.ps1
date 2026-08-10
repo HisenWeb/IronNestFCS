@@ -1,7 +1,7 @@
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
-    [ValidatePattern('^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$')]
-    [string]$Version,
+    [Parameter(Position = 0)]
+    [ValidatePattern('^$|^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$')]
+    [string]$Version = "",
     [string]$GameDir = "D:\Steam\steamapps\common\Iron Nest Heavy Turret Simulator",
     [string]$NotesFile = "",
     [switch]$RepairExisting
@@ -12,13 +12,28 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildPackagesScript = Join-Path $PSScriptRoot "Build-ReleasePackages.ps1"
 $HostSourceRelative = "IronNestFCS/FcsHostMod.cs"
-$OutputDir = Join-Path $RepoRoot "artifacts\release-v$Version"
-$Tag = "v$Version"
 $oldVersion = ""
 $versionChanged = $false
 $versionCommitted = $false
 
 . (Join-Path $PSScriptRoot "Version.ps1")
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $currentVersion = Get-IronNestFcsVersion -RepoRoot $RepoRoot
+    $match = [regex]::Match($currentVersion, '^(\d+)\.(\d+)\.(\d+)$')
+    if (-not $match.Success) {
+        throw "Automatic version increment requires a stable current version in x.y.z form. Current version: $currentVersion"
+    }
+
+    $major = [int]$match.Groups[1].Value
+    $minor = [int]$match.Groups[2].Value
+    $patch = [int]$match.Groups[3].Value + 1
+    $Version = "$major.$minor.$patch"
+    Write-Host "Auto-selected release version: $Version (current: $currentVersion)"
+}
+
+$OutputDir = Join-Path $RepoRoot "artifacts\release-v$Version"
+$Tag = "v$Version"
 
 foreach ($tool in @("git", "gh", "dotnet")) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
