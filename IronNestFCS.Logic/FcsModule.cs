@@ -5,55 +5,45 @@ using IronNestFCS.Logic.Infrastructure;
 namespace IronNestFCS.Logic;
 
 /// <summary>
-/// Logic 程序集的入口，由 Host 反射实例化（类型全名见 Host 的 LogicTypeName）。
-/// 负责组装领域逻辑 <see cref="FSC"/>、点击检测 <see cref="ClickRaycaster"/> 与 UI <see cref="FcsWindow"/>，
-/// 并把 Host 的生命周期回调转发下去。本身不含具体火控逻辑或绘制代码。
+/// Reloadable TaskSystem entrypoint. Persistent loading is injected by Host and is never owned/disposed here.
 /// </summary>
 public class FcsModule : IFcsModule
 {
-    private readonly FSC fcs = new();
-    private FcsWindow? window;
+    private FSC? _fcs;
+    private FcsWindow? _window;
 
-    public bool Initialize()
+    public bool Initialize(IFcsHostServices hostServices)
     {
-        // Start file diagnostics before binding so bind failures and all existing MelonLogger probes are captured.
-        // The run directory is derived from the game process start time, therefore F9 hot reloads append to the
-        // same files while receiving a fresh logic-session marker.
         FcsDiagnosticLog.Start(BuildDiagnosticContext);
 
-        window = new FcsWindow(fcs);
+        _fcs = new FSC(hostServices);
+        _window = new FcsWindow(_fcs);
+
         PhysicalStateProbe.Reset();
         TriggerConsoleProbe.Reset();
-        bool bound = fcs.TryBind();
+
+        var bound = _fcs.TryBind();
 
         var leftPhysical = bound ? SafePhysicalSummary("Left") : "unbound";
         var rightPhysical = bound ? SafePhysicalSummary("Right") : "unbound";
-        FcsDiagnosticLog.MarkBindResult(
-            bound,
-            fcs.FirePriority.Generation,
-            leftPhysical,
-            rightPhysical);
+        FcsDiagnosticLog.MarkBindResult(bound, _fcs.FirePriority.Generation, leftPhysical, rightPhysical);
 
         if (bound)
         {
-            // Read-only baseline for the full reload/fire state timeline.
             PhysicalStateProbe.LogCurrentState();
-            // Compact physical-state probe for the five review switches + two arming levers.
             TriggerConsoleProbe.BindAndLog();
-            // AimingSpeedProbe is intentionally not run continuously anymore. The release-build slew rates have
-            // already been measured and the probe produced high-volume exploratory output with no scheduling effect.
         }
-        // 返回绑定结果仅用于 Host 日志；窗口实例已建好，未绑定时会显示提示，
-        // 进入场景后按 F9 重载即可绑定。
+
         return bound;
     }
 
     public void Update()
     {
-        fcs.Update();
+        var fcs = _fcs;
+        if (fcs == null)
+            return;
 
-        // Probes are intentionally outside FSC's focus gate. The game can keep mechanisms/animations running
-        // while unfocused, and those physical transitions are exactly what the diagnostics need to capture.
+        fcs.Update();
         if (fcs.IsBound)
         {
             PhysicalStateProbe.Tick();
@@ -61,36 +51,32 @@ public class FcsModule : IFcsModule
         }
     }
 
-    public void OnGui()
-    {
-        window?.OnGui();
-    }
+    public void OnGui() => _window?.OnGui();
 
     public void Shutdown()
     {
-        try {
-            // Keep the diagnostic callback attached through Dispose so cancellation/release/F9 cleanup is present
-            // in the same session log as the operations that led to it.
-            fcs.Dispose();
+        try
+        {
+            _fcs?.Dispose();
             PhysicalStateProbe.Reset();
             TriggerConsoleProbe.Reset();
-            window = null;
+            _window = null;
+            _fcs = null;
         }
-        finally {
+        finally
+        {
             FcsDiagnosticLog.Stop("logic shutdown/reload");
         }
     }
 
     private string BuildDiagnosticContext()
     {
-        static string TaskContext(ArtilleryTask? task)
-        {
-            return task == null ? "-" : $"T{task.targetId}:{task.progress}";
-        }
+        var fcs = _fcs;
+        if (fcs == null)
+            return "gen=- | L=- | R=-";
 
-        return
-            $"gen={fcs.FirePriority.Generation} | " +
-            $"L={TaskContext(fcs.LeftTask)} | R={TaskContext(fcs.RightTask)}";
+        static string TaskContext(ArtilleryTask? task) => task == null ? "-" : $"T{task.targetId}:{task.progress}";
+        return $"gen={fcs.FirePriority.Generation} | L={TaskContext(fcs.LeftTask)} | R={TaskContext(fcs.RightTask)}";
     }
 
     private static string SafePhysicalSummary(string side)

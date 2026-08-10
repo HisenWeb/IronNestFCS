@@ -7,95 +7,97 @@ using MelonLoader;
 namespace IronNestFCS;
 
 /// <summary>
-/// 负责把 Logic 程序集加载进一个可回收的 AssemblyLoadContext，
-/// 并在需要时卸载 + 重新加载，实现热重载。
+/// Loads the reloadable TaskSystem assembly. Persistent physical services are owned by Host and passed
+/// through IronNestFCS.Abstractions, so unloading this ALC never owns or stops a loading transaction.
 /// </summary>
 internal sealed class LogicReloader
 {
-    private readonly string logicDllPath;
-    private readonly string logicTypeName;
+    private readonly string _logicDllPath;
+    private readonly string _logicTypeName;
+    private readonly IFcsHostServices _hostServices;
 
-    private AssemblyLoadContext? alc;
-    private IFcsModule? current;
-    private WeakReference? alcWeakRef;
+    private AssemblyLoadContext? _alc;
+    private IFcsModule? _current;
+    private WeakReference? _alcWeakRef;
+    private DateTime _lastWriteTime;
 
-    public IFcsModule? Current => current;
+    public IFcsModule? Current => _current;
 
-    private DateTime lastWriteTime;
-
-    public LogicReloader(string logicDllPath, string logicTypeName)
+    public LogicReloader(
+        string logicDllPath,
+        string logicTypeName,
+        IFcsHostServices hostServices)
     {
-        this.logicDllPath = logicDllPath;
-        this.logicTypeName = logicTypeName;
+        _logicDllPath = logicDllPath;
+        _logicTypeName = logicTypeName;
+        _hostServices = hostServices;
     }
 
-
-    /// <summary>检测Logic文件是否有更新</summary>
     public bool CheckDllUpdated()
     {
-        return current != null && lastWriteTime != File.GetLastWriteTime(logicDllPath);
+        return _current != null
+               && _lastWriteTime != File.GetLastWriteTime(_logicDllPath);
     }
 
-    /// <summary>卸载当前 Logic（若有），从磁盘重新加载并初始化。</summary>
     public bool Reload()
     {
         Unload();
 
-        if (!File.Exists(logicDllPath))
+        if (!File.Exists(_logicDllPath))
         {
-            MelonLogger.Error($"[Reload] Logic dll doesn't exist.: {logicDllPath}");
+            MelonLogger.Error($"[Reload] Logic dll doesn't exist: {_logicDllPath}");
             return false;
         }
 
         try
         {
-            alc = new AssemblyLoadContext("IronNestFCS.Logic", isCollectible: true);
-            alcWeakRef = new WeakReference(alc, trackResurrection: true);
+            _alc = new AssemblyLoadContext("IronNestFCS.Logic", isCollectible: true);
+            _alcWeakRef = new WeakReference(_alc, trackResurrection: true);
 
-            // 从内存字节加载，避免锁住磁盘上的 dll（Rider 重编译时需要能覆盖它）。
-            byte[] bytes = File.ReadAllBytes(logicDllPath);
-            string pdbPath = Path.ChangeExtension(logicDllPath, ".pdb");
+            var bytes = File.ReadAllBytes(_logicDllPath);
+            var pdbPath = Path.ChangeExtension(_logicDllPath, ".pdb");
             Assembly asm;
             using (var dllStream = new MemoryStream(bytes))
             {
                 if (File.Exists(pdbPath))
                 {
                     using var pdbStream = new MemoryStream(File.ReadAllBytes(pdbPath));
-                    asm = alc.LoadFromStream(dllStream, pdbStream);
+                    asm = _alc.LoadFromStream(dllStream, pdbStream);
                 }
                 else
                 {
-                    asm = alc.LoadFromStream(dllStream);
+                    asm = _alc.LoadFromStream(dllStream);
                 }
             }
 
-            Type? type = asm.GetType(logicTypeName);
+            var type = asm.GetType(_logicTypeName);
             if (type == null)
             {
-                MelonLogger.Error($"[Reload] Can't find type {logicTypeName} in Logic assembly.");
+                MelonLogger.Error($"[Reload] Can't find type {_logicTypeName} in Logic assembly.");
                 Unload();
                 return false;
             }
 
             if (Activator.CreateInstance(type) is not IFcsModule module)
             {
-                MelonLogger.Error($"[Reload] {logicTypeName} doesn't implement IFcsModule");
+                MelonLogger.Error($"[Reload] {_logicTypeName} doesn't implement IFcsModule");
                 Unload();
                 return false;
             }
 
-            current = module;
-            lastWriteTime = File.GetLastWriteTime(logicDllPath);
-            var ok = current.Initialize();
+            _current = module;
+            _lastWriteTime = File.GetLastWriteTime(_logicDllPath);
+            var ok = _current.Initialize(_hostServices);
             if (!ok)
             {
-                MelonLogger.Warning("[Reload] Logic.Initialize() returns false。");
+                MelonLogger.Warning("[Reload] Logic.Initialize() returned false.");
             }
             else
             {
-                lastWriteTime = File.GetLastWriteTime(logicDllPath);
+                _lastWriteTime = File.GetLastWriteTime(_logicDllPath);
                 MelonLogger.Msg("[Reload] Logic loaded and initialized successfully.");
             }
+
             return ok;
         }
         catch (Exception ex)
@@ -106,32 +108,29 @@ internal sealed class LogicReloader
         }
     }
 
-    /// <summary>关闭当前 Logic 并卸载其 AssemblyLoadContext。</summary>
     public void Unload()
     {
-        if (current != null)
+        if (_current != null)
         {
-            try { current.Shutdown(); }
+            try { _current.Shutdown(); }
             catch (Exception ex) { MelonLogger.Error($"[Reload] Logic.Shutdown() exception: {ex}"); }
-            current = null;
+            _current = null;
         }
 
-        if (alc != null)
+        if (_alc != null)
         {
-            try { alc.Unload(); }
+            try { _alc.Unload(); }
             catch (Exception ex) { MelonLogger.Error($"[Reload] ALC.Unload() exception: {ex}"); }
-            alc = null;
+            _alc = null;
         }
 
-        // 提示 GC 回收旧上下文。卸载是异步的——不强求立即完成，
-        // 仅在诊断时观察 alcWeakRef.IsAlive。
         CollectOldContext();
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void CollectOldContext()
     {
-        for (int i = 0; i < 2 && alcWeakRef is { IsAlive: true }; i++)
+        for (var i = 0; i < 2 && _alcWeakRef is { IsAlive: true }; i++)
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();

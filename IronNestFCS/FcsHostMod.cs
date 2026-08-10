@@ -1,94 +1,104 @@
 using System.Collections;
-using IronNestFCS;
+using IronNestFCS.Abstractions;
 using MelonLoader;
 using MelonLoader.Utils;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
-[assembly: MelonInfo(typeof(FcsHostMod), "IronNestFCS", "1.0.6", "svr2kos2")]
-// Keep the loader compatibility universal. Release builds have used different
-// Application.companyName/productName metadata, and MelonGame does exact string
-// matching. The FCS still guards itself by binding Iron Nest-specific scene objects.
+[assembly: MelonInfo(typeof(IronNestFCS.FcsHostMod), "IronNestFCS", "1.1.0", "svr2kos2")]
 [assembly: MelonGame()]
 
 namespace IronNestFCS;
 
 /// <summary>
-/// 稳定的宿主 Mod。启动时加载一次，永不重载。
-/// 职责：首次加载 Logic、监听 F9 触发热重载、把生命周期回调转发给 Logic。
-/// 所有高频改动的火控代码都在 Logic 程序集里。
+/// Stable Host. F9 reloads TaskSystem only; PersistentLoadingSystem remains alive and continues any
+/// already-accepted physical loading transaction.
 /// </summary>
 public class FcsHostMod : MelonMod
 {
-    // 游戏启用了新 Input System，旧的 UnityEngine.Input 会直接抛异常，
-    // 因此通过 Keyboard.current 读取 F9。
     private const string ReloadKeyName = "F9";
-
-    // Logic 程序集放在 UserData 下、而非 Mods/，避免被 MelonLoader 当作 mod 自动加载。
-    // 类型全名必须与 Logic 项目里的实现类一致。
     private const string LogicTypeName = "IronNestFCS.Logic.FcsModule";
 
-    private LogicReloader? reloader;
+    private readonly FcsHostServices _hostServices = new();
+    private LogicReloader? _reloader;
 
     public override void OnInitializeMelon()
     {
-        string logicDir = Path.Combine(MelonEnvironment.UserDataDirectory, "IronNestFCS");
+        var logicDir = Path.Combine(
+            MelonEnvironment.UserDataDirectory,
+            "IronNestFCS");
         Directory.CreateDirectory(logicDir);
-        string logicDll = Path.Combine(logicDir, "IronNestFCS.Logic.dll");
+        var logicDll = Path.Combine(logicDir, "IronNestFCS.Logic.dll");
 
-        MelonLogger.Msg($"IronNestFCS Host Started。Logic path: {logicDll}");
-        MelonLogger.Msg($"Press {ReloadKeyName} to hot reload Logic.");
+        MelonLogger.Msg($"IronNestFCS Host Started. Logic path: {logicDll}");
+        MelonLogger.Msg($"Press {ReloadKeyName} to hot reload TaskSystem.");
 
-        reloader = new LogicReloader(logicDll, LogicTypeName);
-        reloader.Reload();
+        _hostServices.LoadingRuntime.TryBindScene();
+        _reloader = new LogicReloader(
+            logicDll,
+            LogicTypeName,
+            _hostServices);
+        _reloader.Reload();
     }
 
-    /// <summary>用新 Input System 读 F9，避免触碰会抛异常的 UnityEngine.Input。</summary>
     private static bool ReloadKeyPressed()
     {
-        Keyboard? kb = Keyboard.current;
+        var kb = Keyboard.current;
         return kb != null && kb.f9Key.wasPressedThisFrame;
     }
 
     public override void OnSceneWasLoaded(int buildIndex, string sceneName)
     {
-        MelonCoroutines.Start(ReloadCoroutine());
+        // Scene transitions really do invalidate physical handles. F9 does not.
+        _hostServices.LoadingRuntime.OnSceneChanged();
+        MelonCoroutines.Start(RebindSceneCoroutine());
     }
-    
-    private IEnumerator ReloadCoroutine()
+
+    private IEnumerator RebindSceneCoroutine()
     {
         yield return new WaitForSeconds(3f);
-        reloader?.Reload();
+        _hostServices.LoadingRuntime.TryBindScene();
+        _reloader?.Reload();
     }
 
     public override void OnUpdate()
     {
-        if (reloader == null)
+        // Run persistent physical ownership before deciding whether this frame reloads Logic.
+        _hostServices.LoadingRuntime.Update();
+
+        if (_reloader == null)
             return;
 
-        if (ReloadKeyPressed() || reloader.CheckDllUpdated())
+        if (ReloadKeyPressed() || _reloader.CheckDllUpdated())
         {
-            MelonLogger.Msg($"[{ReloadKeyName}] Hot reloading...");
-            reloader.Reload();
-            return; // 本帧不再 Update，避免对刚换上的实例做半截调用
+            MelonLogger.Msg($"[{ReloadKeyName}] Hot reloading TaskSystem; loading transactions stay alive.");
+            _reloader.Reload();
+            return;
         }
 
-        try { reloader.Current?.Update(); }
+        try { _reloader.Current?.Update(); }
         catch (Exception ex) { MelonLogger.Error($"Logic.Update() exception: {ex}"); }
     }
 
     public override void OnGUI()
     {
-        if (reloader?.Current == null)
+        if (_reloader?.Current == null)
             return;
 
-        try { reloader.Current.OnGui(); }
+        try { _reloader.Current.OnGui(); }
         catch (Exception ex) { MelonLogger.Error($"Logic.OnGui() exception: {ex}"); }
     }
 
     public override void OnDeinitializeMelon()
     {
-        reloader?.Unload();
-        reloader = null;
+        _reloader?.Unload();
+        _reloader = null;
+        _hostServices.LoadingRuntime.Dispose();
+    }
+
+    private sealed class FcsHostServices : IFcsHostServices
+    {
+        internal PersistentLoadingSystem LoadingRuntime { get; } = new();
+        public ILoadingSystem Loading => LoadingRuntime;
     }
 }
