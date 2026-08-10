@@ -1,14 +1,14 @@
-# IronNestFCS Enhanced
+# IronNestFCS Smart
 
 **English** | [简体中文](README.zh-CN.md)
 
-An enhanced automated fire-control-system mod for **Iron Nest: Heavy Turret Simulator**.
+A smart automated fire-control-system mod for **Iron Nest: Heavy Turret Simulator**.
 
-After you place a target marker on the Tactical Map, IronNestFCS Enhanced can handle most of the firing workflow for you: ballistic calculation, gun assignment, ammunition loading, elevation, turret azimuth, trigger preparation, and optional automatic firing.
+After you place a target marker on the Tactical Map, IronNestFCS Smart can handle most of the firing workflow for you: ballistic calculation, gun assignment, ammunition loading, elevation, turret azimuth, trigger preparation, and optional automatic firing.
 
 [Download the latest release](https://github.com/HisenWeb/IronNestFCS/releases/latest) · [Original author's demo video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST on Steam](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
 
-> The original demo video is useful for understanding the basic interaction flow. The Enhanced fork has a different internal scheduler and additional UI/features.
+> The original demo video is useful for understanding the basic interaction flow. The Smart fork has a different scheduler, state handling, and additional player-facing UI features.
 
 ---
 
@@ -84,9 +84,9 @@ This project continues directly from the source of [svr2kos2/IronNestFCS](https:
 
 First, the important part: **the original already automates most of the fire-control workflow.** T1–T4 queueing, assigning tasks to a free gun, both guns preparing at the same time, automatic shell/powder purchasing, Auto Fire, Max Charge, and F9 hot reload are already present in v1.0.6.
 
-**Enhanced is mainly about making that existing automation behave better when several things are happening at once: repeated missions, both guns being busy, F9 resets, or a gun being halfway through loading.**
+**Smart is mainly about making that existing automation behave better when several things are happening at once: repeated missions, both guns being busy, F9 resets, or a gun being halfway through loading.**
 
-| What happens in game | Original IronNestFCS | IronNestFCS Enhanced |
+| What happens in game | Original IronNestFCS | IronNestFCS Smart |
 | --- | --- | --- |
 | **Both guns can take a new mission** | Gives the mission to the first free gun slot; when both are free, Left is chosen first | Looks at what each gun currently contains, its elevation, and where the turret is pointing, then chooses the gun that better fits the shot |
 | **Both guns are preparing their next shots** | Each task waits for access to the shared turret; whichever task gets it first continues first | Estimates which shot can become ready sooner and tries to fire that one first; once the order is chosen, later tasks do not casually reshuffle it |
@@ -97,7 +97,7 @@ First, the important part: **the original already automates most of the fire-con
 | **You press F9 while the turret is still turning toward an old target** | The old task coroutine stops, but the original wrapper does not explicitly clear the old game-side rotation target | Cancels the stale target, holds the turret at its current real direction, and lets newly submitted tasks plan from there |
 | **You want a Chinese UI** | No separate English/Chinese localization layer | Player-facing UI can switch between Simplified Chinese and English |
 
-In short: **the original already knows how to “auto-fire the turret.” Enhanced focuses on keeping that automation sensible when missions overlap, F9 is used to start over, or the guns are already in the middle of doing something.**
+In short: **the original already knows how to “auto-fire the turret.” Smart focuses on keeping that automation sensible when missions overlap, F9 is used to start over, or the guns are already in the middle of doing something.**
 
 ---
 
@@ -107,7 +107,7 @@ You need:
 
 1. **Iron Nest: Heavy Turret Simulator**
 2. **MelonLoader for IL2CPP**
-3. One IronNestFCS Enhanced release package
+3. One IronNestFCS Smart release package
 
 Install and run the game with MelonLoader at least once before installing the mod.
 
@@ -115,12 +115,12 @@ Install and run the game with MelonLoader at least once before installing the mo
 
 ## Download and installation
 
-Open the [latest GitHub Release](https://github.com/HisenWeb/IronNestFCS/releases/latest) and download **one** language package:
+Open the [latest GitHub Release](https://github.com/HisenWeb/IronNestFCS/releases/latest) and download **one** ZIP package:
 
-```text
-IronNestFCS-Enhanced_v*_en-US.zip   English UI
-IronNestFCS-Enhanced_v*_zh-CN.zip   简体中文 UI
-```
+- a filename ending in `_en-US.zip` for English UI
+- a filename ending in `_zh-CN.zip` for Simplified Chinese UI
+
+> The v1.1.1 files were published before the project was renamed to **IronNestFCS Smart**, so those two ZIP filenames still contain the previous `Enhanced` name. New packages generated by the repository use `IronNestFCS-Smart_v*`.
 
 Both packages contain the same mod binaries. Only the default UI language is different.
 
@@ -278,7 +278,7 @@ The repository also includes:
 
 ## Credits
 
-IronNestFCS Enhanced is based on the original [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS). Credit for the original implementation belongs to its original author and contributors.
+IronNestFCS Smart is based on the original [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS). Credit for the original implementation belongs to its original author and contributors.
 
 ## License
 
