@@ -39,6 +39,7 @@ internal static class FcsDiagnosticLog {
     private static Func<string>? _contextProvider;
 
     public static string RunDirectory => _runDirectory;
+    public static bool DetailedDiagnosticsEnabled => _detailedDiagnostics;
 
     public static void Start(Func<string>? contextProvider = null) {
         lock (Sync) {
