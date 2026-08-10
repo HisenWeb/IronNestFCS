@@ -1,5 +1,6 @@
 using IronNestFCS.Logic.FCS;
 using MelonLoader;
+using MelonLoader.Utils;
 
 namespace IronNestFCS.Logic.Localization;
 
