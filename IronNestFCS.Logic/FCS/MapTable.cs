@@ -72,7 +72,8 @@ public class MapTable {
 
     private ArtilleryTask BuildMarkTarget(Vector3 artilleryLocalPosition, Vector3 target) {
         var dist = target.magnitude * 3.8164f;
-        var angle = GetAzimuth(target);
+        var angle = Vector3.SignedAngle(target, Vector3.up, Vector3.forward);
+        if (angle < 0) angle += 360;
         return new ArtilleryTask {
             angel = angle,
             distance = dist,
@@ -80,14 +81,10 @@ public class MapTable {
         };
     }
 
-    private static float GetAzimuth(Vector3 target) {
+    private static float GetDiagnosticAzimuth(Vector3 target) {
         var angle = Vector3.SignedAngle(target, Vector3.up, Vector3.forward);
         if (angle < 0) angle += 360;
         return angle;
-    }
-
-    private static float GetSignedAzimuthDelta(float current, float legacy) {
-        return Mathf.DeltaAngle(legacy, current);
     }
 
     private void LogCoordinateBindDiagnostics() {
@@ -114,11 +111,11 @@ public class MapTable {
         var legacyTurretLocal = turret.localPosition;
         var legacyTarget = markerLocal - legacyTurretLocal;
 
-        var currentAzimuth = GetAzimuth(currentTarget);
-        var legacyAzimuth = GetAzimuth(legacyTarget);
+        var currentAzimuth = GetDiagnosticAzimuth(currentTarget);
+        var legacyAzimuth = GetDiagnosticAzimuth(legacyTarget);
         var currentDistance = currentTarget.magnitude * 3.8164f;
         var legacyDistance = legacyTarget.magnitude * 3.8164f;
-        var azimuthDelta = GetSignedAzimuthDelta(currentAzimuth, legacyAzimuth);
+        var azimuthDelta = Mathf.DeltaAngle(legacyAzimuth, currentAzimuth);
         var distanceDelta = currentDistance - legacyDistance;
 
         MelonLogger.Msg(
