@@ -92,11 +92,11 @@ The mod reads the game's real objects and physical state directly. It does **not
 
 This project continues directly from the source of [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS).
 
-First, the important part: **the original already provides the complete core automated fire-control workflow.** T1–T4 queueing, dual-gun operation, automatic shell/powder purchasing and loading, Auto Fire, Max Charge, and F9-triggered Logic reload all come from the original project.
+The comparison below is based on **original IronNestFCS v1.0.7**. The original already provides the complete core automated fire-control workflow: T1–T4 queueing, dual-gun operation, automatic shell/powder purchasing and loading, Auto Fire, Max Charge, and F9-triggered Logic reload.
 
 **Smart is not mainly about adding more automation. It changes the boundary between mission planning, physical state, and execution scheduling.** The table below intentionally avoids a feature-by-feature list and only summarizes the core runtime-model differences.
 
-| Area | Original IronNestFCS | IronNestFCS Smart |
+| Area | Original IronNestFCS v1.0.7 | IronNestFCS Smart |
 | --- | --- | --- |
 | **Tasks vs. physical state** | The task flow drives actions such as loading; when F9 reloads Logic, the current task execution ends with it | Replannable tasks are separated from persistent physical loading; tasks can be rebuilt while a physical load that has already been accepted continues to exist |
 | **Dual-gun scheduling** | Primarily advances by free gun slots and each task's own flow, with running tasks competing for the shared turret | Schedules later execution from both guns' current loading state, elevation, turret state, and estimated readiness |
