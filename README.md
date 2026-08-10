@@ -6,7 +6,7 @@ A smart automated fire-control-system mod for **Iron Nest: Heavy Turret Simulato
 
 After you place a target marker on the Tactical Map, IronNestFCS Smart can handle most of the firing workflow for you: ballistic calculation, gun assignment, ammunition loading, elevation, turret azimuth, trigger preparation, and optional automatic firing.
 
-[Download the latest release](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest) · [Original author's demo video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST on Steam](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
+[Nexus Mods](https://www.nexusmods.com/ironnest/mods/32) · [GitHub Release](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest) · [Original author's demo video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST on Steam](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
 
 > The original demo video is useful for understanding the basic interaction flow. The Smart fork has a different scheduler, state handling, and additional player-facing UI features.
 
