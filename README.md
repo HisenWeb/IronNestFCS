@@ -42,38 +42,38 @@ The mod reads the game's real objects and physical state directly. It does **not
 
 ## Highlights
 
-- **Automatic ballistic calculation** using the game's own ballistic calculator.
-- **Dual-gun scheduling** — the left and right guns can load and prepare independently.
-- **Rolling gun reuse** — a recovered gun can take the next task without waiting for the other gun to finish.
-- **Physical-state-aware control** — the real chamber, powder charge, reload state, elevation, and turret position are treated as the source of truth.
-- **Persistent loading across F9** — an accepted loading operation continues even when the TaskSystem is hot-reloaded.
-- **Reliable ballistic result handling** — waits for a stable result instead of blindly reading an old calculator value.
-- **Duplicate-solve avoidance** — identical candidates inside one task reuse the same ballistic result.
-- **Automatic shell and powder purchasing** when needed.
-- **Max Charge mode**.
-- **Manual fire or Auto Fire**.
-- **English and Simplified Chinese UI**.
-- **Diagnostic logs** for troubleshooting.
+- **Place a target and let the FCS do the repetitive work** — calculate the shot, choose a gun, load ammunition, aim, and prepare the trigger for you.
+- **Both guns can stay busy at the same time** — one gun can be loading or aiming while the other is doing its own preparation.
+- **Better for several targets in a row** — when one gun finishes and becomes usable again, it can immediately start the next queued target instead of waiting for both guns to finish together.
+- **It uses where the turret really is now** — after a shot, the turret does not have to return to zero before the next target is planned.
+- **Pressing F9 does not throw away a load already in progress** — the task logic can reload while an accepted shell/powder loading sequence keeps going.
+- **Ballistic calculation is less likely to use an old result** — the mod waits for the calculator output to settle before trusting it.
+- **One target will not needlessly press Calculate twice for the same solution** — identical left/right possibilities reuse the result already obtained.
+- **Can buy missing shells and powder automatically** when the selected task needs them.
+- **Auto Fire** can complete the final firing action for you, or you can leave it off and fire manually.
+- **Max Charge** can prefer the highest usable powder charge.
+- **English and Simplified Chinese UI** are both included.
 
 ---
 
-## Compared with the original IronNestFCS
+## What is different from the original IronNestFCS?
 
-This project is based on [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS). The Enhanced fork keeps the same basic goal — automating the heavy turret fire-control workflow — while substantially reworking the runtime behavior for the current game release.
+This project is based on [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) and keeps the same basic idea: make the heavy-turret fire-control workflow much less manual.
 
-The main additions/reworks are:
+The Enhanced fork mainly changes what happens when you start sending several real missions through the system. The differences a normal player is most likely to notice are:
 
-| Area | IronNestFCS Enhanced |
+| In normal play | IronNestFCS Enhanced |
 | --- | --- |
-| Game compatibility | Updated for the current full-release game behavior |
-| Dual-gun control | FirePlan-based scheduling with independent left/right preparation |
-| Task flow | Rolling gun-slot reuse instead of waiting for both guns as one batch |
-| Reload handling | Persistent loading transactions survive F9 TaskSystem reloads |
-| State handling | Plans from the actual physical chamber/reload/elevation/turret state |
-| Ballistics | Stable-result checking and per-task duplicate-solve cache |
-| Hot reload | F9 reloads TaskSystem logic without discarding accepted loading work |
-| UI | English / Simplified Chinese |
-| Distribution | Ready-to-install release ZIPs |
+| Using both guns | Tries to keep the left and right guns working independently instead of treating them as one batch |
+| Several targets in a row | A gun that has recovered can immediately take the next target while the other gun is still busy |
+| After the turret has already rotated | Plans the next shot from the turret's actual current direction; it does not assume the turret returned to `0°` |
+| Reloading the FCS with F9 | An ammunition load that was already accepted keeps running instead of being discarded with the task logic |
+| Ballistic calculator timing | Waits for a stable calculator result instead of relying only on a fixed delay |
+| Repeated calculation | Reuses the same ballistic answer when one target produces identical left/right solutions |
+| Installing the mod | Provides ready-to-install English and Chinese ZIP packages instead of requiring users to build the project themselves |
+| UI | Includes both English and Simplified Chinese player-facing text |
+
+In short: **the original project provides the automation idea and foundation; Enhanced focuses on making that automation behave more smoothly during continuous dual-gun use on the current game release.**
 
 ---
 
