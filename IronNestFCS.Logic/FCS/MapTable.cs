@@ -12,12 +12,14 @@ public class MapTable {
     private const int MarkerStableSampleCount = 3;
 
     private Transform? turret;
+    private Transform? diagnosticMapSurface;
     private Dictionary<int, Transform> artilleries = new();
     private Transform? fireMissionRoot;
     private FireMission? fireMission;
     
     public bool TryBind() {
         artilleries = new Dictionary<int, Transform>();
+        diagnosticMapSurface = null;
         fireMissionRoot = null;
         fireMission = null;
 
@@ -34,6 +36,7 @@ public class MapTable {
         }
 
         turret = turretObject.transform;
+        diagnosticMapSurface = mapObject.transform;
         var map = mapObject.transform;
         for (var i = 0; i < map.childCount; ++i) {
             var t = map.GetChild(i);
@@ -50,6 +53,7 @@ public class MapTable {
         }
 
         MelonLogger.Msg($"[FCS] 找到 Player Turret Piece: {turret}, Artilleries: {artilleries.Count}");
+        LogLegacyBindDiagnostics();
 
         var fireMissionObject = GameObject.Find("Fire Mission Root");
         if (fireMissionObject != null) {
@@ -77,6 +81,51 @@ public class MapTable {
         };
     }
 
+    private static float GetDiagnosticAzimuth(Vector3 target) {
+        var angle = Vector3.SignedAngle(target, Vector3.up, Vector3.forward);
+        if (angle < 0) angle += 360;
+        return angle;
+    }
+
+    private void LogLegacyBindDiagnostics() {
+        if (turret == null || diagnosticMapSurface == null) return;
+
+        var legacy = turret.localPosition;
+        var converted = diagnosticMapSurface.InverseTransformPoint(turret.position);
+        var parent = turret.parent;
+        var parentName = parent != null ? parent.name : "<none>";
+        var parentId = parent != null ? parent.GetInstanceID() : 0;
+        var mapId = diagnosticMapSurface.GetInstanceID();
+        var sameParent = parent == diagnosticMapSurface;
+
+        MelonLogger.Msg(
+            $"[FCS DIAG LEGACY] bind turretWorld={turret.position:F4}, turretLocal(legacy-active)={legacy:F4}, " +
+            $"turretOnMap(compare-only)={converted:F4}, delta(compare-legacy)={(converted - legacy):F4}");
+        MelonLogger.Msg(
+            $"[FCS DIAG LEGACY] hierarchy turretParent={parentName}#{parentId}, " +
+            $"mapSurface={diagnosticMapSurface.name}#{mapId}, sameParent={sameParent}");
+    }
+
+    private void LogLegacyAimDiagnostics(int index, Vector3 markerLocal, Vector3 legacyTarget) {
+        if (turret == null || diagnosticMapSurface == null) return;
+
+        var legacyTurretLocal = turret.localPosition;
+        var convertedTurretOnMap = diagnosticMapSurface.InverseTransformPoint(turret.position);
+        var compareTarget = markerLocal - convertedTurretOnMap;
+        var legacyAzimuth = GetDiagnosticAzimuth(legacyTarget);
+        var compareAzimuth = GetDiagnosticAzimuth(compareTarget);
+        var legacyDistance = legacyTarget.magnitude * 3.8164f;
+        var compareDistance = compareTarget.magnitude * 3.8164f;
+
+        MelonLogger.Msg(
+            $"[FCS DIAG LEGACY] T{index} marker={markerLocal:F4}, turretLocal(legacy-active)={legacyTurretLocal:F4}, " +
+            $"turretOnMap(compare-only)={convertedTurretOnMap:F4}, delta(compare-legacy)={(convertedTurretOnMap - legacyTurretLocal):F4}");
+        MelonLogger.Msg(
+            $"[FCS DIAG LEGACY] T{index} ACTIVE legacy az={legacyAzimuth:F3}° dist={legacyDistance:F4}km target={legacyTarget:F4} | " +
+            $"compare-only converted az={compareAzimuth:F3}° dist={compareDistance:F4}km target={compareTarget:F4} | " +
+            $"delta compare-legacy: az={Mathf.DeltaAngle(legacyAzimuth, compareAzimuth):+0.000;-0.000;0.000}° dist={(compareDistance - legacyDistance):+0.0000;-0.0000;0.0000}km");
+    }
+
     public ArtilleryTask? GetMarkTarget(int index) {
         if (turret == null) {
             MelonLogger.Error("[FCS] GetMarkTarget: turret unbound");
@@ -88,7 +137,9 @@ public class MapTable {
             return null;
         }
 
+        // v1.1.1 production algorithm intentionally preserved.
         var target = artillery.localPosition - turret.localPosition;
+        LogLegacyAimDiagnostics(index, artillery.localPosition, target);
         return BuildMarkTarget(artillery.localPosition, target);
     }
 
@@ -141,6 +192,7 @@ public class MapTable {
                 MelonLogger.Msg(
                     $"[FCS] T{index} marker stabilized: samples={sampleCount}, drift={lastDelta:F5}, " +
                     $"azimuth={task.angel:F2}°, distance={task.distance:F3}km");
+                LogLegacyAimDiagnostics(index, markerLocal, relative);
                 completed(task);
                 yield break;
             }
