@@ -94,8 +94,8 @@ Mod 直接读取游戏里的真实对象、炮膛和控制器状态，不使用 
 打开 [GitHub 最新 Release](https://github.com/HisenWeb/IronNestFCS/releases/latest)，按语言下载 **其中一个**：
 
 ```text
-IronNestFCS-Enhanced_v1.1.1_zh-CN.zip   简体中文 UI
-IronNestFCS-Enhanced_v1.1.1_en-US.zip   English UI
+IronNestFCS-Enhanced_v*_zh-CN.zip   简体中文 UI
+IronNestFCS-Enhanced_v*_en-US.zip   English UI
 ```
 
 两个安装包使用完全相同的 Mod DLL，只是默认 UI 语言不同。
