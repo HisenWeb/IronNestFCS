@@ -5,32 +5,22 @@ using UnityEngine;
 namespace IronNestFCS.Logic.FCS;
 
 /// <summary>
-/// Temporary diagnostic probe for identifying the physical fast/slow azimuth controls.
-/// It never writes to game state. Candidates are sampled at low frequency and only
-/// changed transforms are logged.
+/// Temporary targeted diagnostic for the fast azimuth lever.
+/// It never writes to game state. On bind it dumps the native IL2CPP component/API
+/// surface under Aiming Console/Locking Lever Rotation/Lever, then logs lever motion
+/// and turret response only when the lever actually moves.
 /// </summary>
 internal sealed class AzimuthControlDiagnosticProbe
 {
-    private const float SampleIntervalSeconds = 0.20f;
-    private const float TurretLogIntervalSeconds = 0.50f;
-    private const float PositionChangeTolerance = 0.0005f;
-    private const float RotationChangeToleranceDegrees = 0.05f;
-    private const float TurretAngleChangeToleranceDegrees = 0.25f;
+    private const float SampleIntervalSeconds = 0.10f;
+    private const float LeverChangeToleranceDegrees = 0.20f;
+    private const int ApiChildDepth = 3;
 
-    private static readonly string[] NameHints =
-    {
-        "azimuth", "traverse", "rotation", "rotate", "bearing", "turret",
-        "handwheel", "hand wheel", "wheel", "valve", "handle", "lever", "ball"
-    };
-
-    private readonly Dictionary<int, CandidateSnapshot> _snapshots = new();
-    private readonly Dictionary<int, Transform> _candidates = new();
-
+    private Transform? _fastLever;
     private TurretController? _turretController;
     private float _nextSampleTime;
-    private float _nextTurretLogTime;
-    private float _lastTurretAngle;
-    private bool _haveTurretAngle;
+    private float _lastLeverY;
+    private bool _haveLeverY;
     private bool _bound;
 
     public void TryBind()
@@ -38,35 +28,33 @@ internal sealed class AzimuthControlDiagnosticProbe
         Reset();
 
         _turretController = GameObject.Find("TurretSystem")?.GetComponent<TurretController>();
+        _fastLever = FindFastLever();
 
-        foreach (var transform in UnityEngine.Object.FindObjectsOfType<Transform>(true))
+        if (_fastLever == null)
         {
-            if (transform == null || !IsCandidate(transform))
-                continue;
-
-            var id = transform.GetInstanceID();
-            _candidates[id] = transform;
-            _snapshots[id] = Capture(transform);
+            MelonLogger.Warning("[FCS DIAG AZ API] fast lever not found: Aiming Console/Locking Lever Rotation/Lever");
+            return;
         }
 
-        if (_turretController != null)
-        {
-            _lastTurretAngle = _turretController.CurrentAngle;
-            _haveTurretAngle = true;
-        }
-
+        _lastLeverY = NormalizeSignedAngle(_fastLever.localEulerAngles.y);
+        _haveLeverY = true;
         _nextSampleTime = Time.realtimeSinceStartup + SampleIntervalSeconds;
-        _nextTurretLogTime = Time.realtimeSinceStartup + TurretLogIntervalSeconds;
         _bound = true;
 
         MelonLogger.Msg(
-            $"[FCS DIAG AZ] probe armed: candidates={_candidates.Count}. " +
-            "Operate fast azimuth once, then slow azimuth once; only changed controls are logged.");
+            $"[FCS DIAG AZ API] fast lever found obj={_fastLever.name}#{_fastLever.GetInstanceID()} " +
+            $"path={BuildPath(_fastLever)} initialY={_lastLeverY:F2}° {GetTurretState()}");
+
+        DumpApiTree(_fastLever, ApiChildDepth);
+
+        MelonLogger.Msg(
+            "[FCS DIAG AZ API] TEST: move FAST azimuth lever left and hold ~1s, return center ~1s, " +
+            "move right and hold ~1s, then return center. No automatic control is applied by this probe.");
     }
 
     public void Update()
     {
-        if (!_bound)
+        if (!_bound || _fastLever == null)
             return;
 
         var now = Time.realtimeSinceStartup;
@@ -74,54 +62,110 @@ internal sealed class AzimuthControlDiagnosticProbe
             return;
         _nextSampleTime = now + SampleIntervalSeconds;
 
-        foreach (var pair in _candidates)
+        var leverY = NormalizeSignedAngle(_fastLever.localEulerAngles.y);
+        if (!_haveLeverY || Mathf.Abs(Mathf.DeltaAngle(_lastLeverY, leverY)) >= LeverChangeToleranceDegrees)
         {
-            var transform = pair.Value;
-            if (transform == null)
-                continue;
-
-            var current = Capture(transform);
-            if (!_snapshots.TryGetValue(pair.Key, out var previous))
-            {
-                _snapshots[pair.Key] = current;
-                continue;
-            }
-
-            var moved = (current.LocalPosition - previous.LocalPosition).magnitude > PositionChangeTolerance;
-            var rotated = Quaternion.Angle(current.LocalRotation, previous.LocalRotation) > RotationChangeToleranceDegrees;
-            if (!moved && !rotated)
-                continue;
-
-            _snapshots[pair.Key] = current;
             MelonLogger.Msg(
-                $"[FCS DIAG AZ] CONTROL CHANGE obj={transform.name}#{pair.Key} path={BuildPath(transform)} " +
-                $"localPos {previous.LocalPosition:F4}->{current.LocalPosition:F4} " +
-                $"localEuler {previous.LocalEuler:F2}->{current.LocalEuler:F2} " +
-                $"components=[{GetComponentNames(transform)}] {GetTurretState()}");
-        }
-
-        if (_turretController != null && now >= _nextTurretLogTime)
-        {
-            _nextTurretLogTime = now + TurretLogIntervalSeconds;
-            var angle = _turretController.CurrentAngle;
-            if (!_haveTurretAngle || Mathf.Abs(Mathf.DeltaAngle(_lastTurretAngle, angle)) >= TurretAngleChangeToleranceDegrees)
-            {
-                MelonLogger.Msg($"[FCS DIAG AZ] TURRET MOTION {GetTurretState()}");
-                _lastTurretAngle = angle;
-                _haveTurretAngle = true;
-            }
+                $"[FCS DIAG AZ API] LEVER y={leverY:F2}° delta={Mathf.DeltaAngle(_lastLeverY, leverY):F2}° " +
+                $"{GetTurretState()}");
+            _lastLeverY = leverY;
+            _haveLeverY = true;
         }
     }
 
     public void Reset()
     {
-        _snapshots.Clear();
-        _candidates.Clear();
+        _fastLever = null;
         _turretController = null;
         _bound = false;
-        _haveTurretAngle = false;
+        _haveLeverY = false;
         _nextSampleTime = 0f;
-        _nextTurretLogTime = 0f;
+        _lastLeverY = 0f;
+    }
+
+    private static Transform? FindFastLever()
+    {
+        foreach (var transform in UnityEngine.Object.FindObjectsOfType<Transform>(true))
+        {
+            if (transform == null || !string.Equals(transform.name, "Lever", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var path = BuildPath(transform);
+            if (path.IndexOf("Aiming Console", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                path.IndexOf("Locking Lever Rotation", StringComparison.OrdinalIgnoreCase) >= 0)
+                return transform;
+        }
+
+        return null;
+    }
+
+    private static void DumpApiTree(Transform root, int maxDepth)
+    {
+        DumpTransformApi(root);
+        DumpChildrenApi(root, 1, maxDepth);
+    }
+
+    private static void DumpChildrenApi(Transform parent, int depth, int maxDepth)
+    {
+        if (depth > maxDepth)
+            return;
+
+        for (var i = 0; i < parent.childCount; i++)
+        {
+            var child = parent.GetChild(i);
+            if (child == null)
+                continue;
+
+            DumpTransformApi(child);
+            DumpChildrenApi(child, depth + 1, maxDepth);
+        }
+    }
+
+    private static void DumpTransformApi(Transform transform)
+    {
+        try
+        {
+            foreach (var component in transform.gameObject.GetComponents<Component>())
+            {
+                if (component == null)
+                    continue;
+
+                var type = component.GetIl2CppType();
+                var fullName = type.FullName ?? type.Name;
+                if (fullName.StartsWith("UnityEngine.", StringComparison.Ordinal) ||
+                    fullName.StartsWith("Il2CppSystem.", StringComparison.Ordinal))
+                    continue;
+
+                MelonLogger.Msg(
+                    $"[FCS DIAG AZ API] COMPONENT path={BuildPath(transform)} type={fullName}");
+
+                foreach (var field in type.GetFields())
+                {
+                    if (field?.DeclaringType == null || field.DeclaringType.Name != type.Name)
+                        continue;
+                    MelonLogger.Msg($"[FCS DIAG AZ API]   FIELD {field}");
+                }
+
+                foreach (var property in type.GetProperties())
+                {
+                    if (property?.DeclaringType == null || property.DeclaringType.Name != type.Name)
+                        continue;
+                    MelonLogger.Msg($"[FCS DIAG AZ API]   PROPERTY {property}");
+                }
+
+                foreach (var method in type.GetMethods())
+                {
+                    if (method?.DeclaringType == null || method.DeclaringType.Name != type.Name)
+                        continue;
+                    MelonLogger.Msg($"[FCS DIAG AZ API]   METHOD {method}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            MelonLogger.Warning(
+                $"[FCS DIAG AZ API] component/API dump failed path={BuildPath(transform)}: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private string GetTurretState()
@@ -133,61 +177,21 @@ internal sealed class AzimuthControlDiagnosticProbe
                $"desired={_turretController.DesiredRotation:F2}° velocity={_turretController.rotationVelocity:F3}";
     }
 
-    private static bool IsCandidate(Transform transform)
+    private static float NormalizeSignedAngle(float angle)
     {
-        var current = transform;
-        for (var depth = 0; current != null && depth < 4; depth++, current = current.parent)
-        {
-            var name = current.name ?? string.Empty;
-            foreach (var hint in NameHints)
-            {
-                if (name.IndexOf(hint, StringComparison.OrdinalIgnoreCase) >= 0)
-                    return true;
-            }
-        }
-        return false;
-    }
-
-    private static CandidateSnapshot Capture(Transform transform)
-    {
-        return new CandidateSnapshot
-        {
-            LocalPosition = transform.localPosition,
-            LocalRotation = transform.localRotation,
-            LocalEuler = transform.localEulerAngles
-        };
-    }
-
-    private static string GetComponentNames(Transform transform)
-    {
-        try
-        {
-            var components = transform.gameObject.GetComponents<Component>();
-            return string.Join(",", components.Where(c => c != null).Select(c => c.GetType().Name));
-        }
-        catch (Exception ex)
-        {
-            return "component-scan-failed:" + ex.GetType().Name;
-        }
+        return angle > 180f ? angle - 360f : angle;
     }
 
     private static string BuildPath(Transform transform)
     {
         var names = new List<string>();
         var current = transform;
-        while (current != null && names.Count < 8)
+        while (current != null && names.Count < 10)
         {
             names.Add(current.name + "#" + current.GetInstanceID());
             current = current.parent;
         }
         names.Reverse();
         return string.Join("/", names);
-    }
-
-    private sealed class CandidateSnapshot
-    {
-        public Vector3 LocalPosition;
-        public Quaternion LocalRotation;
-        public Vector3 LocalEuler;
     }
 }
