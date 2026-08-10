@@ -23,6 +23,7 @@ public class FcsHostMod : MelonMod
 
     private readonly FcsHostServices _hostServices = new();
     private LogicReloader? _reloader;
+    private MapCoordinateDiagnosticProbe? _mapCoordinateDiag;
     private bool _sceneBindPending;
     private float _nextBindAttemptAt;
 
@@ -36,6 +37,11 @@ public class FcsHostMod : MelonMod
 
         MelonLogger.Msg($"IronNestFCS Smart Host Started. Logic path: {logicDll}");
         MelonLogger.Msg($"Press {ReloadKeyName} to hot reload TaskSystem.");
+
+        // Diagnostic branch only: this probe lives in Host specifically so coordinate changes that happen
+        // while Logic is unloaded/reloaded are still captured. It never mutates any Transform.
+        _mapCoordinateDiag = new MapCoordinateDiagnosticProbe();
+        MelonLogger.Msg($"[FCS DIAG HOST] map coordinate trace: {_mapCoordinateDiag.Path}");
 
         _reloader = new LogicReloader(
             logicDll,
@@ -56,6 +62,8 @@ public class FcsHostMod : MelonMod
 
     public override void OnSceneWasLoaded(int buildIndex, string sceneName)
     {
+        _mapCoordinateDiag?.SceneChanged(buildIndex, sceneName);
+
         // A real scene transition invalidates both TaskSystem handles and persistent physical handles.
         // Stop TaskSystem immediately and perform one serialized delayed rebind instead of stacking coroutines.
         _reloader?.Unload();
@@ -80,7 +88,10 @@ public class FcsHostMod : MelonMod
             return;
         }
 
-        if (_reloader.Reload())
+        _mapCoordinateDiag?.Mark("scene-logic-activate-begin");
+        var reloadOk = _reloader.Reload();
+        _mapCoordinateDiag?.Mark($"scene-logic-activate-end ok={reloadOk}");
+        if (reloadOk)
         {
             _sceneBindPending = false;
             return;
@@ -93,6 +104,9 @@ public class FcsHostMod : MelonMod
 
     public override void OnUpdate()
     {
+        // Sample before every Host-owned state update. This runs even when reloadable Logic is absent.
+        _mapCoordinateDiag?.Tick();
+
         // Run persistent physical ownership before deciding whether this frame reloads Logic.
         _hostServices.LoadingRuntime.Update();
 
@@ -105,15 +119,23 @@ public class FcsHostMod : MelonMod
             return;
         }
 
-        if (ReloadKeyPressed() || _reloader.CheckDllUpdated())
+        var keyReload = ReloadKeyPressed();
+        var dllReload = !keyReload && _reloader.CheckDllUpdated();
+        if (keyReload || dllReload)
         {
+            var cause = keyReload ? ReloadKeyName : "dll-updated";
             MelonLogger.Msg($"[{ReloadKeyName}] Hot reloading TaskSystem; loading transactions stay alive.");
-            _reloader.Reload();
+            _mapCoordinateDiag?.Mark($"logic-reload-begin cause={cause}");
+            var ok = _reloader.Reload();
+            _mapCoordinateDiag?.Mark($"logic-reload-end cause={cause} ok={ok}");
             return;
         }
 
         try { _reloader.Current?.Update(); }
         catch (Exception ex) { MelonLogger.Error($"Logic.Update() exception: {ex}"); }
+
+        // A second sample catches synchronous Transform changes caused by this frame's Logic update.
+        _mapCoordinateDiag?.Tick();
     }
 
     public override void OnGUI()
@@ -128,9 +150,13 @@ public class FcsHostMod : MelonMod
     public override void OnDeinitializeMelon()
     {
         _sceneBindPending = false;
+        _mapCoordinateDiag?.Mark("host-deinitialize-begin");
         _reloader?.Unload();
         _reloader = null;
         _hostServices.LoadingRuntime.Dispose();
+        _mapCoordinateDiag?.Mark("host-deinitialize-end");
+        _mapCoordinateDiag?.Dispose();
+        _mapCoordinateDiag = null;
     }
 
     private sealed class FcsHostServices : IFcsHostServices
