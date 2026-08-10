@@ -29,11 +29,11 @@ The basic idea is simple: **you decide where to shoot and which ammunition to us
 A typical fire mission becomes:
 
 ```text
-Place T1–T4 target marker
+Move red map marker 1–4 to the target position
         ↓
 Select ammunition
         ↓
-Submit target
+Click the matching T1–T4 button on the right to submit
         ↓
 Ballistic calculation
         ↓
@@ -61,7 +61,7 @@ clear current tasks / waiting queue / firing order
   ↓
 any physical loading sequence already in progress keeps going
   ↓
-place the targets again and resubmit T1 / T2 / T3 / T4
+move red markers 1–4 again and resubmit the matching T1 / T2 / T3 / T4
   ↓
 the FCS replans from the gun and turret state that really exists now
 ```
@@ -163,17 +163,17 @@ Enter a scene that contains the heavy artillery turret and Tactical Map. The FCS
 
 ### 2. Place a target marker
 
-On the Tactical Map, move one of the numbered markers:
+On the **left side** of the Tactical Map, use one of the red numbered markers:
 
 ```text
-T1 / T2 / T3 / T4
+1 / 2 / 3 / 4
 ```
 
-to the target you want to fire at.
+Drag it to the map position you want to attack. Red marker `1` corresponds to task `T1`, `2` to `T2`, and so on.
 
 ### 3. Select ammunition
 
-Use the FCS ammunition selector to choose the shell type for the task.
+Use the FCS controls on the right side of the map to choose the shell type for this task.
 
 Optional controls:
 
@@ -182,7 +182,16 @@ Optional controls:
 
 ### 4. Submit the fire mission
 
-Click the matching `T1`, `T2`, `T3`, or `T4` button in the FCS controls.
+Click the task button on the right that matches the marker you placed:
+
+```text
+red 1 → T1
+red 2 → T2
+red 3 → T3
+red 4 → T4
+```
+
+The mission is submitted immediately. You can move another red marker and click its matching T1–T4 button; missions submitted in succession enter the task queue.
 
 The FCS will then automatically:
 
@@ -202,11 +211,11 @@ read target
 - With **Auto Fire ON**, the FCS completes the final firing action when the gun and turret are physically ready.
 - With **Auto Fire OFF**, wait until the FCS has prepared the shot, then perform the final fire action manually.
 
-You can submit multiple targets in succession. The two guns are scheduled independently and a recovered gun can immediately accept another task.
+The two guns are scheduled independently and a recovered gun can immediately accept another task.
 
 ### 6. Replan with F9
 
-Press **F9** to clear the current tasks, waiting queue, and firing order. Then place targets again and submit a new T1–T4 plan.
+Press **F9** to clear the current tasks, waiting queue, and firing order. Then reposition red markers 1–4 and submit a new T1–T4 plan.
 
 A physical shell/powder load that has already started is not forcibly cancelled by F9. New missions read the real chamber, elevation, and turret position and plan from that state.
 
@@ -223,7 +232,7 @@ This is useful when:
 - you want to change the waiting queue or firing order;
 - you want the FCS to plan again from the current real gun and turret state.
 
-After F9, submit the T1–T4 missions you want again.
+After F9, reposition the red markers you need and submit the matching T1–T4 missions again.
 
 Important: **F9 resets the plan, not physical reality.** If a gun is already loading shell/powder, that sequence continues; the new plan uses the resulting real physical state.
 
