@@ -93,13 +93,17 @@ public class MapTable {
         var legacy = turret.localPosition;
         var converted = diagnosticMapSurface.InverseTransformPoint(turret.position);
         var parent = turret.parent;
+        var turretId = turret.GetInstanceID();
+        var siblingIndex = turret.GetSiblingIndex();
         var parentName = parent != null ? parent.name : "<none>";
         var parentId = parent != null ? parent.GetInstanceID() : 0;
+        var parentChildCount = parent != null ? parent.childCount : 0;
         var mapId = diagnosticMapSurface.GetInstanceID();
         var sameParent = parent == diagnosticMapSurface;
 
         MelonLogger.Msg(
-            $"[FCS DIAG LEGACY] bind turretWorld={turret.position:F4}, turretLocal(legacy-active)={legacy:F4}, " +
+            $"[FCS DIAG LEGACY] bind turret={turret.name}#{turretId}, sibling={siblingIndex}/{parentChildCount}, " +
+            $"turretWorld={turret.position:F4}, turretLocal(legacy-active)={legacy:F4}, " +
             $"turretOnMap(compare-only)={converted:F4}, delta(compare-legacy)={(converted - legacy):F4}");
         MelonLogger.Msg(
             $"[FCS DIAG LEGACY] hierarchy turretParent={parentName}#{parentId}, " +
@@ -116,9 +120,15 @@ public class MapTable {
         var compareAzimuth = GetDiagnosticAzimuth(compareTarget);
         var legacyDistance = legacyTarget.magnitude * 3.8164f;
         var compareDistance = compareTarget.magnitude * 3.8164f;
+        var parent = turret.parent;
+        var turretId = turret.GetInstanceID();
+        var siblingIndex = turret.GetSiblingIndex();
+        var parentId = parent != null ? parent.GetInstanceID() : 0;
+        var parentChildCount = parent != null ? parent.childCount : 0;
 
         MelonLogger.Msg(
-            $"[FCS DIAG LEGACY] T{index} marker={markerLocal:F4}, turretLocal(legacy-active)={legacyTurretLocal:F4}, " +
+            $"[FCS DIAG LEGACY] T{index} turret={turret.name}#{turretId}, parent#{parentId}, sibling={siblingIndex}/{parentChildCount}, " +
+            $"marker={markerLocal:F4}, turretLocal(legacy-active)={legacyTurretLocal:F4}, " +
             $"turretOnMap(compare-only)={convertedTurretOnMap:F4}, delta(compare-legacy)={(convertedTurretOnMap - legacyTurretLocal):F4}");
         MelonLogger.Msg(
             $"[FCS DIAG LEGACY] T{index} ACTIVE legacy az={legacyAzimuth:F3}° dist={legacyDistance:F4}km target={legacyTarget:F4} | " +
