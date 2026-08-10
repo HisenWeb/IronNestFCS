@@ -171,6 +171,8 @@ IronNestFCS-Smart_v*_en-US.zip   English UI
 
 拖动其中一个到你想炮击的地图位置。红色 `1` 对应任务 `T1`，`2` 对应 `T2`，以此类推。
 
+![Tactical Map 左侧红色 1～4 目标标记器](docs/images/ironnest_usage-target-markers.jpg)
+
 ### 3. 选择弹药
 
 在地图右侧的 FCS 控制区选择这个任务要使用的弹种。
@@ -183,6 +185,8 @@ IronNestFCS-Smart_v*_en-US.zip   English UI
 ### 4. 提交任务
 
 点击地图右侧与标记器对应的任务按钮：
+
+![地图右侧 T1～T4 任务提交按钮](docs/images/ironnest_usage-submit-buttons.jpg)
 
 ```text
 红色 1 → T1
