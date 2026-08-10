@@ -2,13 +2,23 @@ param(
     [string]$GameDir = "D:\Steam\steamapps\common\Iron Nest Heavy Turret Simulator",
     [ValidateSet("Release")]
     [string]$Configuration = "Release",
-    [string]$Version = "1.1.2",
+    [string]$Version = "",
     [string]$OutputDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "Version.ps1")
+$DeclaredVersion = Get-IronNestFcsVersion -RepoRoot $RepoRoot
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $Version = $DeclaredVersion
+}
+elif ($Version -ne $DeclaredVersion) {
+    throw "Package version v$Version does not match Host version v$DeclaredVersion. Update the Host version first or use tools\Release.ps1."
+}
+
 $Solution = Join-Path $RepoRoot "IronNestFCS.sln"
 $HostDll = Join-Path $RepoRoot "IronNestFCS\bin\$Configuration\IronNestFCS.dll"
 $AbstractionsDll = Join-Path $RepoRoot "IronNestFCS.Abstractions\bin\$Configuration\IronNestFCS.Abstractions.dll"
