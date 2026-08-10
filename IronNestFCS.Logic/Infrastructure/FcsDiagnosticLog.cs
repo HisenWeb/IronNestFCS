@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using MelonLoader;
+using MelonLoader.Logging;
 using MelonLoader.Utils;
 
 namespace IronNestFCS.Logic.Infrastructure;
