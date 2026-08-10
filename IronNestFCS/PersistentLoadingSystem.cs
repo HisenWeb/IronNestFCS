@@ -386,7 +386,10 @@ internal sealed class PersistentGunLoader
         MelonLogger.Error($"[FCS Loading] {_sideName}: {tx.FailureReason}");
     }
 
-    private static string NormalizeShellId(string? id) => id == "PCLM" ? "PLCM" : id ?? "";
+    // Game builds have exposed both PLCM and PCLM over time. Canonicalize both to the current PCLM spelling
+    // at the boundary so the rest of the FCS never needs the legacy identifier.
+    private static string NormalizeShellId(string? id) =>
+        id is "PLCM" or "PCLM" ? "PCLM" : id ?? "";
 
     private string BulletInChamber() =>
         NormalizeShellId(_gunController?.ChamberedShellBlueprint?.shellDefinition?.ShellId);
@@ -828,7 +831,7 @@ internal sealed class PersistentGunPhysicalState
     {
         if (string.IsNullOrEmpty(id))
             return "";
-        return id == "PCLM" ? "PLCM" : id;
+        return id is "PLCM" or "PCLM" ? "PCLM" : id;
     }
 
     private static bool AtState(PersistentGunPhysicalState state, int index, params string[] keys)
@@ -899,7 +902,7 @@ internal sealed class PersistentGunPhysicalState
     private enum LoadingShellName
     {
         AP = 1, APHE = 2, ATMC = 3, CLMN = 4, CYAN = 5, DRIL = 6, EQKE = 7, FLCH = 8,
-        HCHE = 9, HE = 10, INCN = 11, LE = 12, PLCM = 13, PHGN = 14, PRPG = 15, SMK = 16,
+        HCHE = 9, HE = 10, INCN = 11, LE = 12, PCLM = 13, PHGN = 14, PRPG = 15, SMK = 16,
         STAR = 17, TEAR = 18, THRM = 19, WP = 20,
     }
 }
