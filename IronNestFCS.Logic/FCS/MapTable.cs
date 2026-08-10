@@ -16,12 +16,14 @@ public class MapTable {
     private Dictionary<int, Transform> artilleries = new();
     private Transform? fireMissionRoot;
     private FireMission? fireMission;
+    private bool turretLocationFallbackWarned;
     
     public bool TryBind() {
         artilleries = new Dictionary<int, Transform>();
         diagnosticMapSurface = null;
         fireMissionRoot = null;
         fireMission = null;
+        turretLocationFallbackWarned = false;
 
         var turretObject = GameObject.Find("Player Turret Piece");
         if (turretObject == null) {
@@ -87,6 +89,23 @@ public class MapTable {
         return angle;
     }
 
+    // High-cla algorithm: use the game's TurretLocation anchor as the authoritative firing origin.
+    // Player Turret Piece remains only as a fallback when TurretLocation is unavailable.
+    private Vector3 GetActiveTurretLocal() {
+        if (diagnosticMapSurface != null) {
+            var turretLocationObject = GameObject.Find("TurretLocation");
+            if (turretLocationObject != null) {
+                return diagnosticMapSurface.InverseTransformPoint(turretLocationObject.transform.position);
+            }
+        }
+
+        if (!turretLocationFallbackWarned) {
+            turretLocationFallbackWarned = true;
+            MelonLogger.Warning("[FCS] TurretLocation unavailable; falling back to Player Turret Piece.localPosition");
+        }
+        return turret?.localPosition ?? Vector3.zero;
+    }
+
     private void LogLegacyBindDiagnostics() {
         if (turret == null || diagnosticMapSurface == null) return;
 
@@ -103,8 +122,8 @@ public class MapTable {
 
         MelonLogger.Msg(
             $"[FCS DIAG LEGACY] bind turret={turret.name}#{turretId}, sibling={siblingIndex}/{parentChildCount}, " +
-            $"turretWorld={turret.position:F4}, turretLocal(legacy-active)={legacy:F4}, " +
-            $"turretOnMap(compare-only)={converted:F4}, delta(compare-legacy)={(converted - legacy):F4}");
+            $"turretWorld={turret.position:F4}, turretLocal(legacy-compare)={legacy:F4}, " +
+            $"turretOnMap(converted-compare)={converted:F4}, delta(compare-legacy)={(converted - legacy):F4}");
         MelonLogger.Msg(
             $"[FCS DIAG LEGACY] hierarchy turretParent={parentName}#{parentId}, " +
             $"mapSurface={diagnosticMapSurface.name}#{mapId}, sameParent={sameParent}");
@@ -128,12 +147,21 @@ public class MapTable {
 
         MelonLogger.Msg(
             $"[FCS DIAG LEGACY] T{index} turret={turret.name}#{turretId}, parent#{parentId}, sibling={siblingIndex}/{parentChildCount}, " +
-            $"marker={markerLocal:F4}, turretLocal(legacy-active)={legacyTurretLocal:F4}, " +
-            $"turretOnMap(compare-only)={convertedTurretOnMap:F4}, delta(compare-legacy)={(convertedTurretOnMap - legacyTurretLocal):F4}");
+            $"marker={markerLocal:F4}, turretLocal(legacy-compare)={legacyTurretLocal:F4}, " +
+            $"turretOnMap(converted-compare)={convertedTurretOnMap:F4}, delta(compare-legacy)={(convertedTurretOnMap - legacyTurretLocal):F4}");
         MelonLogger.Msg(
-            $"[FCS DIAG LEGACY] T{index} ACTIVE legacy az={legacyAzimuth:F3}° dist={legacyDistance:F4}km target={legacyTarget:F4} | " +
-            $"compare-only converted az={compareAzimuth:F3}° dist={compareDistance:F4}km target={compareTarget:F4} | " +
+            $"[FCS DIAG LEGACY] T{index} compare legacy az={legacyAzimuth:F3}° dist={legacyDistance:F4}km target={legacyTarget:F4} | " +
+            $"converted az={compareAzimuth:F3}° dist={compareDistance:F4}km target={compareTarget:F4} | " +
             $"delta compare-legacy: az={Mathf.DeltaAngle(legacyAzimuth, compareAzimuth):+0.000;-0.000;0.000}° dist={(compareDistance - legacyDistance):+0.0000;-0.0000;0.0000}km");
+    }
+
+    private void LogHighClaAimDiagnostics(int index, Vector3 markerLocal, Vector3 activeTarget) {
+        var activeOrigin = markerLocal - activeTarget;
+        var activeAzimuth = GetDiagnosticAzimuth(activeTarget);
+        var activeDistance = activeTarget.magnitude * 3.8164f;
+        MelonLogger.Msg(
+            $"[FCS DIAG HIGHCLA] T{index} ACTIVE TurretLocation origin={activeOrigin:F4}, marker={markerLocal:F4}, " +
+            $"az={activeAzimuth:F3}° dist={activeDistance:F4}km target={activeTarget:F4}");
     }
 
     public ArtilleryTask? GetMarkTarget(int index) {
@@ -147,10 +175,12 @@ public class MapTable {
             return null;
         }
 
-        // v1.1.1 production algorithm intentionally preserved.
-        var target = artillery.localPosition - turret.localPosition;
-        LogLegacyAimDiagnostics(index, artillery.localPosition, target);
-        return BuildMarkTarget(artillery.localPosition, target);
+        var markerLocal = artillery.localPosition;
+        var activeTarget = markerLocal - GetActiveTurretLocal();
+        var legacyTarget = markerLocal - turret.localPosition;
+        LogLegacyAimDiagnostics(index, markerLocal, legacyTarget);
+        LogHighClaAimDiagnostics(index, markerLocal, activeTarget);
+        return BuildMarkTarget(markerLocal, activeTarget);
     }
 
     public IEnumerator GetStableMarkTarget(int index, Action<ArtilleryTask?> completed,
@@ -180,8 +210,7 @@ public class MapTable {
                 break;
 
             var markerLocal = artillery.localPosition;
-            var turretLocal = turret.localPosition;
-            var relative = markerLocal - turretLocal;
+            var relative = markerLocal - GetActiveTurretLocal();
             sampleCount++;
 
             if (!havePrevious) {
@@ -202,7 +231,8 @@ public class MapTable {
                 MelonLogger.Msg(
                     $"[FCS] T{index} marker stabilized: samples={sampleCount}, drift={lastDelta:F5}, " +
                     $"azimuth={task.angel:F2}°, distance={task.distance:F3}km");
-                LogLegacyAimDiagnostics(index, markerLocal, relative);
+                LogLegacyAimDiagnostics(index, markerLocal, markerLocal - turret.localPosition);
+                LogHighClaAimDiagnostics(index, markerLocal, relative);
                 completed(task);
                 yield break;
             }
