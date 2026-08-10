@@ -7,12 +7,14 @@ using MelonLoader.Utils;
 namespace IronNestFCS.Logic.Infrastructure;
 
 /// <summary>
-/// Mirrors FCS-owned MelonLogger output into compact, categorized files that survive Logic F9 reloads.
-/// One game process owns one run directory; every hot-reloaded Logic assembly appends a new session marker.
+/// Mirrors FCS-owned MelonLogger output into compact diagnostic files that survive Logic F9 reloads.
+/// By default only problems.log is written. Set UserData/IronNestFCS/diagnostics.txt to "on"
+/// to restore the full categorized diagnostic set for troubleshooting.
 /// Logging is diagnostic-only: every filesystem/callback failure is swallowed so it can never block fire control.
 /// </summary>
 internal static class FcsDiagnosticLog {
     private const int MaxRunDirectories = 20;
+    private const string DiagnosticsFileName = "diagnostics.txt";
 
     private static readonly object Sync = new();
     private static readonly string[] FileNames = {
@@ -31,6 +33,7 @@ internal static class FcsDiagnosticLog {
         new(StringComparer.OrdinalIgnoreCase);
 
     private static bool _started;
+    private static bool _detailedDiagnostics;
     private static string _runDirectory = "";
     private static string _sessionId = "";
     private static Func<string>? _contextProvider;
@@ -48,18 +51,27 @@ internal static class FcsDiagnosticLog {
                 _contextProvider = contextProvider;
                 var process = Process.GetCurrentProcess();
                 var processStarted = process.StartTime;
-                var logsRoot = Path.Combine(
+                var configRoot = Path.Combine(
                     MelonEnvironment.UserDataDirectory,
-                    "IronNestFCS",
-                    "Logs");
+                    "IronNestFCS");
+                Directory.CreateDirectory(configRoot);
+
+                _detailedDiagnostics = ReadDetailedDiagnosticsSetting(configRoot);
+
+                var logsRoot = Path.Combine(configRoot, "Logs");
                 var dayDirectory = Path.Combine(logsRoot, processStarted.ToString("yyyy-MM-dd"));
                 _runDirectory = Path.Combine(
                     dayDirectory,
                     $"run-{processStarted:HHmmss}-pid{process.Id}");
                 Directory.CreateDirectory(_runDirectory);
 
-                foreach (var name in FileNames)
-                    Writers[name] = OpenWriter(Path.Combine(_runDirectory, name + ".log"));
+                if (_detailedDiagnostics) {
+                    foreach (var name in FileNames)
+                        Writers[name] = OpenWriter(Path.Combine(_runDirectory, name + ".log"));
+                }
+                else {
+                    Writers["problems"] = OpenWriter(Path.Combine(_runDirectory, "problems.log"));
+                }
 
                 _sessionId = DateTime.Now.ToString("HHmmss.fff");
                 _started = true;
@@ -69,13 +81,15 @@ internal static class FcsDiagnosticLog {
                 MelonLogger.ErrorCallbackHandler += OnError;
 
                 WriteMarkerToAll(
-                    $"LOGIC SESSION START | session={_sessionId} | processStart={processStarted:yyyy-MM-dd HH:mm:ss} | pid={process.Id}");
+                    $"LOGIC SESSION START | session={_sessionId} | detailedDiagnostics={(_detailedDiagnostics ? "on" : "off")} | " +
+                    $"processStart={processStarted:yyyy-MM-dd HH:mm:ss} | pid={process.Id}");
                 CleanupOldRuns(logsRoot, _runDirectory);
             }
             catch {
                 DetachCallbacksNoThrow();
                 DisposeWritersNoThrow();
                 _started = false;
+                _detailedDiagnostics = false;
                 _contextProvider = null;
             }
         }
@@ -84,6 +98,9 @@ internal static class FcsDiagnosticLog {
     public static void MarkBindResult(bool bound, int generation, string leftPhysical, string rightPhysical) {
         lock (Sync) {
             if (!_started)
+                return;
+
+            if (!_detailedDiagnostics && bound)
                 return;
 
             try {
@@ -112,7 +129,28 @@ internal static class FcsDiagnosticLog {
                 DisposeWritersNoThrow();
                 _contextProvider = null;
                 _started = false;
+                _detailedDiagnostics = false;
             }
+        }
+    }
+
+    private static bool ReadDetailedDiagnosticsSetting(string configRoot) {
+        try {
+            var path = Path.Combine(configRoot, DiagnosticsFileName);
+            if (!File.Exists(path)) {
+                File.WriteAllText(path, "off\n", new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                return false;
+            }
+
+            var value = File.ReadAllText(path).Trim();
+            return value.Equals("on", StringComparison.OrdinalIgnoreCase)
+                   || value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                   || value.Equals("1", StringComparison.OrdinalIgnoreCase)
+                   || value.Equals("yes", StringComparison.OrdinalIgnoreCase)
+                   || value.Equals("full", StringComparison.OrdinalIgnoreCase);
+        }
+        catch {
+            return false;
         }
     }
 
@@ -141,12 +179,19 @@ internal static class FcsDiagnosticLog {
                 return;
 
             try {
+                var problem = IsProblemSignal(level, text);
+                if (!_detailedDiagnostics && !problem)
+                    return;
+
                 var category = Classify(text);
                 var line = FormatLine(level, category, section, text);
-                Write("all", line);
-                Write(category, line);
 
-                if (IsProblemSignal(level, text))
+                if (_detailedDiagnostics) {
+                    Write("all", line);
+                    Write(category, line);
+                }
+
+                if (problem)
                     Write("problems", line);
             }
             catch {
