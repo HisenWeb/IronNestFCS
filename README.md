@@ -6,9 +6,9 @@ A smart automated fire-control-system mod for **Iron Nest: Heavy Turret Simulato
 
 After you place a target marker on the Tactical Map, IronNestFCS Smart can handle most of the firing workflow for you: ballistic calculation, gun assignment, ammunition loading, elevation, turret azimuth, trigger preparation, and optional automatic firing.
 
-[Nexus Mods](https://www.nexusmods.com/ironnest/mods/32) · [GitHub Release](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest) · [Original author's demo video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST on Steam](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
+[Nexus Mods](https://www.nexusmods.com/ironnest/mods/32) · [GitHub Release](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest) · [IronNestFCS demo video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST on Steam](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
 
-> The original demo video is useful for understanding the basic interaction flow. The Smart fork has a different scheduler, state handling, and additional player-facing UI features.
+> The IronNestFCS demo video is useful for understanding the basic interaction flow. The Smart fork has a different scheduler, state handling, and additional player-facing UI features.
 
 ---
 
@@ -88,21 +88,21 @@ The mod reads the game's real objects and physical state directly. It does **not
 
 ---
 
-## What is different from the original IronNestFCS?
+## What is different from upstream IronNestFCS?
 
 This project continues directly from the source of [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS).
 
-The comparison below is based on **original IronNestFCS v1.0.7**. The original already provides the complete core automated fire-control workflow: T1–T4 queueing, dual-gun operation, automatic shell/powder purchasing and loading, Auto Fire, Max Charge, and F9-triggered Logic reload.
+The comparison below is based on **upstream IronNestFCS v1.0.7**. That upstream version already provides the complete core automated fire-control workflow: T1–T4 queueing, dual-gun operation, automatic shell/powder purchasing and loading, Auto Fire, Max Charge, and F9-triggered Logic reload.
 
 **Smart is not mainly about adding more automation. It changes the boundary between mission planning, physical state, and execution scheduling.** The table below intentionally avoids a feature-by-feature list and only summarizes the core runtime-model differences.
 
-| Area | Original IronNestFCS v1.0.7 | IronNestFCS Smart |
+| Area | Upstream IronNestFCS v1.0.7 | IronNestFCS Smart |
 | --- | --- | --- |
 | **Tasks vs. physical state** | The task flow drives actions such as loading; when F9 reloads Logic, the current task execution ends with it | Replannable tasks are separated from persistent physical loading; tasks can be rebuilt while a physical load that has already been accepted continues to exist |
 | **Dual-gun scheduling** | Primarily advances by free gun slots and each task's own flow, with running tasks competing for the shared turret | Schedules later execution from both guns' current loading state, elevation, turret state, and estimated readiness |
 | **State decisions** | More often continues from the state expected by the task flow | Tries to read the real chamber, loading mechanism, turret, and controller state before deciding what to do next |
 
-In short: **the original focuses on running the automated fire-control workflow; Smart focuses on how the system continues from real battlefield state when the plan and reality no longer line up perfectly.**
+In short: **upstream IronNestFCS focuses on running the automated fire-control workflow; Smart focuses on how the system continues from real battlefield state when the plan and reality no longer line up perfectly.**
 
 ---
 
@@ -327,7 +327,7 @@ The repository also includes:
 
 ## Credits
 
-IronNestFCS Smart is based on the original [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS). Credit for the original implementation belongs to its original author and contributors.
+IronNestFCS Smart is based on [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS). Credit for the upstream code belongs to that repository's authors and contributors.
 
 ## License
 
