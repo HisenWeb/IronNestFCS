@@ -23,7 +23,7 @@ if (-not (Test-Path $GameDir)) {
     throw "Game directory does not exist: $GameDir"
 }
 
-Write-Host "Building IronNestFCS Enhanced v$Version..."
+Write-Host "Building IronNestFCS Smart v$Version..."
 & dotnet build $Solution -c $Configuration "-p:GameDir=$GameDir"
 if ($LASTEXITCODE -ne 0) {
     throw "dotnet build failed with exit code $LASTEXITCODE"
@@ -42,9 +42,9 @@ $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $Packages = @(
     @{
         Locale = "zh-CN"
-        FileName = "IronNestFCS-Enhanced_v${Version}_zh-CN.zip"
+        FileName = "IronNestFCS-Smart_v${Version}_zh-CN.zip"
         InstallText = @"
-IronNestFCS Enhanced v$Version - 简体中文
+IronNestFCS Smart v$Version - 简体中文
 
 安装：
 1. 安装适用于 IL2CPP 的 MelonLoader。
@@ -57,9 +57,9 @@ UI 语言文件：UserData\IronNestFCS\language.txt
     },
     @{
         Locale = "en-US"
-        FileName = "IronNestFCS-Enhanced_v${Version}_en-US.zip"
+        FileName = "IronNestFCS-Smart_v${Version}_en-US.zip"
         InstallText = @"
-IronNestFCS Enhanced v$Version - English
+IronNestFCS Smart v$Version - English
 
 Installation:
 1. Install MelonLoader for IL2CPP.
