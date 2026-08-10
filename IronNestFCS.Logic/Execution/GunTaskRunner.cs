@@ -21,6 +21,8 @@ internal sealed class GunTaskRunner {
     private const float ManualFireTimeoutSeconds = 300f;
 
     private readonly FSC _fcs;
+    private ArtilleryTask? _armedWaitingTask;
+    private int _armedWaitingGeneration = -1;
 
     public GunTaskRunner(FSC fcs) {
         _fcs = fcs;
@@ -28,6 +30,33 @@ internal sealed class GunTaskRunner {
 
     public void Start(LeftRight side, ArtilleryTask task, GunTaskMode mode) {
         _fcs.TrackCoroutine(Run(side, task, mode));
+    }
+
+    /// <summary>
+    /// AutoFire is a live operator mode. If it is switched on after a task has already completed Review/Arm
+    /// and entered the manual fire wait, fire that still-current armed solution immediately instead of requiring
+    /// the task to have sampled AutoFire=true several seconds earlier.
+    /// </summary>
+    public void OnAutoFireEnabled() {
+        var task = _armedWaitingTask;
+        if (task == null)
+            return;
+
+        if (_armedWaitingGeneration != _fcs.FirePriority.Generation
+            || !_fcs.Dispatcher.IsActiveTask(task)
+            || task.progress != Progress.WaitingForFire) {
+            _armedWaitingTask = null;
+            _armedWaitingGeneration = -1;
+            return;
+        }
+
+        // This marker is set only after the task has hard-committed and completed the full Review -> Arm chain.
+        // No second task can enter the shared fire lane before this shot is observed/released.
+        _armedWaitingTask = null;
+        _armedWaitingGeneration = -1;
+        MelonLogger.Msg(
+            $"[FCS] AutoFire enabled while T{task.targetId} is already armed; firing current committed solution");
+        _fcs.TriggerConsole.Fire();
     }
 
     private IEnumerator Run(LeftRight side, ArtilleryTask task, GunTaskMode mode) {
@@ -362,6 +391,7 @@ internal sealed class GunTaskRunner {
             yield return null;
         }
 
+        var autoFireIssued = false;
         try {
             yield return _fcs.SharedResources.Trigger.Acquire();
             try {
@@ -381,29 +411,49 @@ internal sealed class GunTaskRunner {
                 yield return _fcs.TriggerConsole.Arm(side);
                 if (_fcs.SceneInteractor.AutoFire) {
                     yield return FcsRuntimeClock.WaitUntilFocused();
+                    MelonLogger.Msg($"[FCS] AutoFire firing T{task.targetId} immediately after arm");
                     _fcs.TriggerConsole.Fire();
+                    autoFireIssued = true;
                 }
             }
             finally {
                 _fcs.SharedResources.Trigger.Release();
             }
 
-            var fireTimeout = _fcs.SceneInteractor.AutoFire
+            if (!autoFireIssued) {
+                // The task is now physically armed and no longer touching Review controls. Expose exactly this
+                // safe window to the AutoFire UI toggle so switching the mode on can fire the current solution.
+                _armedWaitingTask = task;
+                _armedWaitingGeneration = taskGeneration;
+            }
+
+            var fireTimeout = autoFireIssued || _fcs.SceneInteractor.AutoFire
                 ? AutoFireTimeoutSeconds
                 : ManualFireTimeoutSeconds;
             yield return gunSys.WaitFire(fireTimeout);
+
+            if (ReferenceEquals(_armedWaitingTask, task)) {
+                _armedWaitingTask = null;
+                _armedWaitingGeneration = -1;
+            }
 
             // Promote Second before releasing the turret lock, preserving the no-gap handoff.
             if (gunSys.LastFireObserved)
                 _fcs.FirePriority.ReleaseAfterSuccessfulShot(task);
         }
         finally {
+            if (ReferenceEquals(_armedWaitingTask, task)) {
+                _armedWaitingTask = null;
+                _armedWaitingGeneration = -1;
+            }
             _fcs.TurretScheduler.ReleaseOnce(turret);
         }
 
         if (!gunSys.LastFireObserved) {
             _fcs.Dispatcher.AbortTask(side, task, turret,
-                _fcs.SceneInteractor.AutoFire ? "automatic fire was not observed" : "manual fire wait timed out");
+                autoFireIssued || _fcs.SceneInteractor.AutoFire
+                    ? "automatic fire was not observed"
+                    : "manual fire wait timed out");
             yield break;
         }
 
