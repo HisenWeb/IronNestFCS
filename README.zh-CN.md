@@ -6,9 +6,9 @@
 
 你只需要在 Tactical Map 上放好目标标记，IronNestFCS Smart 就可以接管大部分火控流程：弹道解算、左右炮分配、自动购买和装填炮弹/药包、调整仰角、旋转炮塔、准备 Review / Arm，并可选择自动完成最终击发。
 
-[Nexus Mods](https://www.nexusmods.com/ironnest/mods/32) · [GitHub Release](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest) · [原作者 Demo Video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST Steam 页面](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
+[Nexus Mods](https://www.nexusmods.com/ironnest/mods/32) · [GitHub Release](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest) · [IronNestFCS 演示视频](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST Steam 页面](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
 
-> 原作者 Demo Video 可以用来了解基本操作方式。Smart 版本的任务安排、状态处理和部分玩家界面已经发生变化。
+> IronNestFCS 演示视频可以用来了解基本操作方式。Smart 版本的任务安排、状态处理和部分玩家界面已经发生变化。
 
 ---
 
@@ -88,21 +88,21 @@ Mod 直接读取游戏里的真实对象、炮膛和控制器状态，不使用 
 
 ---
 
-## 和原版 IronNestFCS 有什么区别
+## 和上游 IronNestFCS 有什么区别
 
 这个项目是在 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 的源码上继续开发的。
 
-以下对比基于 **原版 IronNestFCS v1.0.7**。原版已经具备完整的核心自动火控能力：T1～T4 任务队列、双炮并行、自动购买和装填炮弹 / 药包、Auto Fire、Max Charge，以及 F9 触发的 Logic 重载。
+以下对比基于 **上游 IronNestFCS v1.0.7**。该上游版本已经具备完整的核心自动火控能力：T1～T4 任务队列、双炮并行、自动购买和装填炮弹 / 药包、Auto Fire、Max Charge，以及 F9 触发的 Logic 重载。
 
 **Smart 并不是以增加自动化功能为主要目标，而是重新划分任务计划、物理状态和执行调度之间的边界。** 下表不逐项列功能差异，只概括 Smart fork 最核心的运行模型差异。
 
-| 方面 | 原版 IronNestFCS v1.0.7 | IronNestFCS Smart |
+| 方面 | 上游 IronNestFCS v1.0.7 | IronNestFCS Smart |
 | --- | --- | --- |
 | **任务与物理状态** | 任务流程负责推进装填等动作；F9 重载 Logic 时当前任务执行也随之结束 | 将可重新规划的任务与持续存在的物理装填分开；任务可以重建，已经被接受的实际装填继续存在 |
 | **双炮任务安排** | 主要按空闲炮位和各任务自身流程推进，共享炮塔由正在执行的任务竞争使用 | 根据两门炮当前装填、仰角、炮塔状态和预计准备时间安排后续执行顺序 |
 | **状态判断** | 更多按任务流程预期的状态继续推进 | 尽量直接读取炮膛、装填机构、炮塔和控制器的实际状态，再决定下一步 |
 
-简单说：**原版重点解决“把自动火控流程跑起来”，Smart 更关注“当计划和现实状态不再完全一致时，系统如何根据现场真实状态继续工作”。**
+简单说：**上游 IronNestFCS 重点解决“把自动火控流程跑起来”，Smart 更关注“当计划和现实状态不再完全一致时，系统如何根据现场真实状态继续工作”。**
 
 ---
 
@@ -327,7 +327,7 @@ on
 
 ## Credits
 
-IronNestFCS Smart 基于原项目 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 继续开发。原始实现及其贡献归原作者和原项目贡献者所有。
+IronNestFCS Smart 基于 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 继续开发。其中的上游代码及相关贡献归相应作者和贡献者所有。
 
 ## License
 
