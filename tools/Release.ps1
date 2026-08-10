@@ -12,6 +12,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildPackagesScript = Join-Path $PSScriptRoot "Build-ReleasePackages.ps1"
 $HostSourceRelative = "IronNestFCS/FcsHostMod.cs"
+$ExpectedRepository = "HisenWeb/IronNestFCS"
+$ExpectedGitHubLogin = "HisenWeb"
 $oldVersion = ""
 $versionChanged = $false
 $versionCommitted = $false
@@ -90,6 +92,18 @@ try {
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($Repository)) {
         throw "Could not determine GitHub repository from the current checkout."
     }
+    if (-not [string]::Equals($Repository, $ExpectedRepository, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Release is locked to repository '$ExpectedRepository'. Current repository: '$Repository'."
+    }
+
+    $GitHubLogin = (& gh api user --jq '.login').Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($GitHubLogin)) {
+        throw "Could not determine the currently authenticated GitHub account."
+    }
+    if (-not [string]::Equals($GitHubLogin, $ExpectedGitHubLogin, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Release is locked to GitHub account '$ExpectedGitHubLogin'. Current account: '$GitHubLogin'."
+    }
+    Write-Host "Release identity verified: $GitHubLogin -> $Repository"
 
     $remoteTagText = @(& git ls-remote --tags origin "refs/tags/$Tag") -join "`n"
     if ($LASTEXITCODE -ne 0) {
