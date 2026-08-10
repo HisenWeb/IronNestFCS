@@ -74,8 +74,11 @@ internal sealed class FirePlanner
         }
 
         var plannedAt = FcsRuntimeClock.Now;
+        // Candidate ETA is already an absolute timestamp anchored to the single planning snapshot.
+        // Do not add ballistic/planning time a second time: later rolling C/D comparisons must compare
+        // the true estimated completion timestamps of both plans.
         var estimatedReadyAt = chosen.EtaKnown
-            ? plannedAt + Math.Max(0f, chosen.EstimatedReadyAt - snapshotAt)
+            ? chosen.EstimatedReadyAt
             : float.NaN;
 
         task.bulletType = chosen.Shell;
