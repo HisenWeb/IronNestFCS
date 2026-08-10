@@ -14,6 +14,8 @@ After you place a target marker on the Tactical Map, IronNestFCS Enhanced can ha
 
 ## What this mod does
 
+The basic idea is simple: **you decide where to shoot and which ammunition to use; the FCS handles most of the repetitive heavy-turret work.**
+
 A typical fire mission becomes:
 
 ```text
@@ -27,6 +29,8 @@ Ballistic calculation
         ↓
 Choose left/right gun
         ↓
+Buy missing ammunition if needed
+        ↓
 Load shell + powder
         ↓
 Set elevation + turret azimuth
@@ -35,6 +39,24 @@ Review / Arm
         ↓
 Manual fire or Auto Fire
 ```
+
+You can also submit several T1–T4 missions in succession. The FCS distributes work between the two guns, and a gun that recovers can continue with later targets.
+
+**F9 can also be used as a practical “reset current fire missions” key.** If you placed the wrong target, submitted the wrong mission, or simply want the current tasks to be planned again:
+
+```text
+Press F9
+  ↓
+clear and recreate current tasks / waiting queue / firing order
+  ↓
+any physical loading sequence already in progress keeps going
+  ↓
+place the targets again and resubmit T1 / T2 / T3 / T4
+  ↓
+the FCS replans from the gun and turret state that really exists now
+```
+
+So F9 is not only a development hot-reload key. In normal play, you can use it to **abandon the current task arrangement and issue the missions again**. A shell/powder load already accepted by the loading system is not forcibly undone; the new missions plan around the real chamber and turret state after the reset.
 
 The mod reads the game's real objects and physical state directly. It does **not** use OCR or screen recognition.
 
@@ -46,7 +68,7 @@ The mod reads the game's real objects and physical state directly. It does **not
 - **Both guns can stay busy at the same time** — one gun can be loading or aiming while the other is doing its own preparation.
 - **Better for several targets in a row** — when one gun finishes and becomes usable again, it can immediately start the next queued target instead of waiting for both guns to finish together.
 - **It uses where the turret really is now** — after a shot, the turret does not have to return to zero before the next target is planned.
-- **Pressing F9 does not throw away a load already in progress** — the task logic can reload while an accepted shell/powder loading sequence keeps going.
+- **F9 can reset the current missions and let you submit them again** — useful if a target or task was wrong; a physical ammunition load already in progress is not forcibly interrupted.
 - **Ballistic calculation is less likely to use an old result** — the mod waits for the calculator output to settle before trusting it.
 - **One target will not needlessly press Calculate twice for the same solution** — identical left/right possibilities reuse the result already obtained.
 - **Can buy missing shells and powder automatically** when the selected task needs them.
@@ -67,7 +89,7 @@ The Enhanced fork mainly changes what happens when you start sending several rea
 | Using both guns | Tries to keep the left and right guns working independently instead of treating them as one batch |
 | Several targets in a row | A gun that has recovered can immediately take the next target while the other gun is still busy |
 | After the turret has already rotated | Plans the next shot from the turret's actual current direction; it does not assume the turret returned to `0°` |
-| Reloading the FCS with F9 | An ammunition load that was already accepted keeps running instead of being discarded with the task logic |
+| Wrong task / want to plan again | Press F9 to reset the current task arrangement, then resubmit T1–T4; physical loading already in progress continues |
 | Ballistic calculator timing | Waits for a stable calculator result instead of relying only on a fixed delay |
 | Repeated calculation | Reuses the same ballistic answer when one target produces identical left/right solutions |
 | Installing the mod | Provides ready-to-install English and Chinese ZIP packages instead of requiring users to build the project themselves |
@@ -170,15 +192,28 @@ read target
 
 You can submit multiple targets in succession. The two guns are scheduled independently and a recovered gun can immediately accept another task.
 
+### 6. Reset and issue the missions again
+
+Press **F9** to reset the current task system. The waiting queue, current planning state, and firing order are recreated; after the reload, you can place targets again and click `T1`, `T2`, `T3`, or `T4` again.
+
+A physical shell/powder load that has already started is not forcibly cancelled by F9. New missions read the real chamber, elevation, and turret position after the reset and plan from that state.
+
 ---
 
-## F9 hot reload
+## F9: reset missions / hot reload
 
-Press **F9** to reload the TaskSystem logic.
+Press **F9** to reload the current task system and reset the current mission arrangement.
 
-This clears/recreates the current task-planning state, but an already accepted physical loading operation is owned separately and continues running.
+This is useful when:
 
-This is useful if you want to reload the FCS logic without restarting the whole game.
+- you placed the wrong target marker;
+- you submitted the wrong T1–T4 mission;
+- you want to abandon the current waiting order;
+- you want the FCS to plan again from the current real gun and turret state.
+
+After F9 finishes, you can immediately submit new T1–T4 missions again.
+
+Important: **F9 resets task intent, but it does not forcibly cancel a physical loading operation that the loading system has already accepted.** If a gun is already loading shell/powder, that sequence continues; newly submitted missions plan around the resulting real physical state.
 
 ---
 
