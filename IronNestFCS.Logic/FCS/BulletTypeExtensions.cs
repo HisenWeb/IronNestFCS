@@ -1,12 +1,15 @@
+using IronNestFCS.Abstractions;
+
 namespace IronNestFCS.Logic.FCS;
 
 public static class BulletTypeExtensions
 {
     /// <summary>
-    /// 玩家可见名称与游戏采购卡片保持一致；内部枚举/ShellId 仍使用 PLCM。
+    /// The game-facing BulletType may still expose the legacy PLCM identifier. The FCS domain and UI
+    /// use the canonical PCLM spelling while preserving numeric shell identity (13) at the boundary.
     /// </summary>
     public static string DisplayName(this BulletType type)
     {
-        return type == BulletType.PLCM ? "PCLM" : type.ToString();
+        return (int)type == (int)ShellTypeCode.PCLM ? "PCLM" : type.ToString();
     }
 }
