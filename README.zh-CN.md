@@ -115,12 +115,12 @@ Mod 直接读取游戏里的真实对象、炮膛和控制器状态，不使用 
 
 ## 下载与安装
 
-打开 [GitHub 最新 Release](https://github.com/HisenWeb/IronNestFCS/releases/latest)，按语言下载 **其中一个 ZIP**：
+打开 [GitHub 最新 Release](https://github.com/HisenWeb/IronNestFCS/releases/latest)，按语言下载 **其中一个安装包**：
 
-- 文件名以 `_zh-CN.zip` 结尾：简体中文 UI
-- 文件名以 `_en-US.zip` 结尾：English UI
-
-> v1.1.1 的安装包在项目更名为 **IronNestFCS Smart** 之前已经发布，因此这两个 ZIP 文件名仍保留旧的 `Enhanced` 名称。仓库之后生成的新安装包使用 `IronNestFCS-Smart_v*`。
+```text
+IronNestFCS-Smart_v*_zh-CN.zip   简体中文 UI
+IronNestFCS-Smart_v*_en-US.zip   English UI
+```
 
 两个安装包使用完全相同的 Mod DLL，只是默认 UI 语言不同。
 
