@@ -1,5 +1,6 @@
 using IronNestFCS.Abstractions;
 using IronNestFCS.Logic.FCS;
+using IronNestFCS.Logic.Infrastructure;
 
 namespace IronNestFCS.Logic;
 
@@ -15,11 +16,25 @@ public class FcsModule : IFcsModule
 
     public bool Initialize()
     {
+        // Start file diagnostics before binding so bind failures and all existing MelonLogger probes are captured.
+        // The run directory is derived from the game process start time, therefore F9 hot reloads append to the
+        // same files while receiving a fresh logic-session marker.
+        FcsDiagnosticLog.Start(BuildDiagnosticContext);
+
         window = new FcsWindow(fcs);
         PhysicalStateProbe.Reset();
         TriggerConsoleProbe.Reset();
         AimingSpeedProbe.Reset();
         bool bound = fcs.TryBind();
+
+        var leftPhysical = bound ? SafePhysicalSummary("Left") : "unbound";
+        var rightPhysical = bound ? SafePhysicalSummary("Right") : "unbound";
+        FcsDiagnosticLog.MarkBindResult(
+            bound,
+            fcs.FirePriority.Generation,
+            leftPhysical,
+            rightPhysical);
+
         if (bound)
         {
             // Read-only baseline for the full reload/fire state timeline.
@@ -55,10 +70,35 @@ public class FcsModule : IFcsModule
 
     public void Shutdown()
     {
-        fcs.Dispose();
-        PhysicalStateProbe.Reset();
-        TriggerConsoleProbe.Reset();
-        AimingSpeedProbe.Reset();
-        window = null;
+        try {
+            // Keep the diagnostic callback attached through Dispose so cancellation/release/F9 cleanup is present
+            // in the same session log as the operations that led to it.
+            fcs.Dispose();
+            PhysicalStateProbe.Reset();
+            TriggerConsoleProbe.Reset();
+            AimingSpeedProbe.Reset();
+            window = null;
+        }
+        finally {
+            FcsDiagnosticLog.Stop("logic shutdown/reload");
+        }
+    }
+
+    private string BuildDiagnosticContext()
+    {
+        static string TaskContext(ArtilleryTask? task)
+        {
+            return task == null ? "-" : $"T{task.targetId}:{task.progress}";
+        }
+
+        return
+            $"gen={fcs.FirePriority.Generation} | " +
+            $"L={TaskContext(fcs.LeftTask)} | R={TaskContext(fcs.RightTask)}";
+    }
+
+    private static string SafePhysicalSummary(string side)
+    {
+        try { return GunPhysicalState.Read(side).Summary(); }
+        catch (Exception ex) { return $"read-failed:{ex.GetType().Name}"; }
     }
 }
