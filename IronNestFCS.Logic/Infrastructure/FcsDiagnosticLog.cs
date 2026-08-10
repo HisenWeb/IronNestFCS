@@ -63,9 +63,6 @@ internal static class FcsDiagnosticLog {
                 _sessionId = DateTime.Now.ToString("HHmmss.fff");
                 _started = true;
 
-                // MelonLoader 0.7.x exposes callbacks after every normal/warning/error logger emission.
-                // Subscribing here means existing GunSystem/BallisticCalculator probes are captured without
-                // rewriting their tested runtime paths. Stop() always unsubscribes before the ALC unloads.
                 MelonLogger.MsgDrawingCallbackHandler += OnMessage;
                 MelonLogger.WarningCallbackHandler += OnWarning;
                 MelonLogger.ErrorCallbackHandler += OnError;
@@ -94,7 +91,6 @@ internal static class FcsDiagnosticLog {
                     $"Left={Normalize(leftPhysical)} | Right={Normalize(rightPhysical)}");
             }
             catch {
-                // Diagnostics must never affect runtime behavior.
             }
         }
     }
@@ -109,7 +105,6 @@ internal static class FcsDiagnosticLog {
                     $"LOGIC SESSION END | session={_sessionId} | reason={Normalize(reason)} | context={SafeContext()}");
             }
             catch {
-                // Keep shutdown progressing even if the drive becomes unavailable.
             }
             finally {
                 DetachCallbacksNoThrow();
@@ -196,13 +191,15 @@ internal static class FcsDiagnosticLog {
             return "ballistic";
 
         if (ContainsAny(value,
-                "Fire arbitration", "Fire priority", "arbitration", "candidate",
-                "首发仲裁", "hard-committed", "fire lane"))
+                "Fire arbitration", "Fire priority", "arbitration",
+                "ballistic solution registered", "queued behind current fire priority",
+                "首发仲裁", "hard-committed", "fire lane", "provisionally"))
             return "arbitration";
 
         if (ContainsAny(value,
                 "Trigger", "trigger console", "Review", "Arm", "ReadyToFire",
-                "ConfirmTask", "ConfirmBullet", "ConfirmRotation", "ConfirmElevation"))
+                "ConfirmTask", "ConfirmBullet", "ConfirmRotation", "ConfirmElevation",
+                "AutoFire", "automatic fire", "manual fire"))
             return "trigger";
 
         if (ContainsAny(value,
@@ -219,14 +216,15 @@ internal static class FcsDiagnosticLog {
     }
 
     private static bool IsProblemSignal(string level, string text) {
+        // Every warning/error is actionable enough to belong in the compact problem rollup.
         if (!string.Equals(level, "INFO", StringComparison.OrdinalIgnoreCase))
             return true;
 
+        // INFO-level physical recovery transitions are normal and intentionally excluded. Only exceptional
+        // state-machine events are promoted here so problems.log remains a fast first-look file.
         return ContainsAny(text,
-            "[FCS Stall]", "STALL", "timeout", "timed out", "failed", "failure",
-            "invalidated", "discarded stale", "did not", "mismatch", "reclass",
-            "rejected", "unavailable", "no usable elevation", "F9", "recovery",
-            "recovering", "resuming", "staged powder");
+            "[FCS Stall]", "STALL", "invalidated", "discarded stale", "reclass",
+            "rejected", "F9", "automatic fire was not observed", "manual fire wait timed out");
     }
 
     private static bool ContainsAny(string value, params string[] needles) {
@@ -269,10 +267,9 @@ internal static class FcsDiagnosticLog {
                 .OrderByDescending(Directory.GetCreationTimeUtc)
                 .ToArray();
 
-            // Current run + newest 19 historical runs = 20 total retained runs.
             foreach (var oldRun in runs.Skip(Math.Max(0, MaxRunDirectories - 1))) {
                 try { Directory.Delete(oldRun, recursive: true); }
-                catch { /* Retention failure is non-fatal. */ }
+                catch { }
             }
 
             foreach (var dayDirectory in Directory.GetDirectories(logsRoot)) {
@@ -280,11 +277,10 @@ internal static class FcsDiagnosticLog {
                     if (!Directory.EnumerateFileSystemEntries(dayDirectory).Any())
                         Directory.Delete(dayDirectory);
                 }
-                catch { /* Ignore cleanup races/locked files. */ }
+                catch { }
             }
         }
         catch {
-            // Retention is best-effort only.
         }
     }
 
