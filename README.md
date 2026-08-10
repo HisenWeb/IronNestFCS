@@ -1,249 +1,334 @@
-# IronNestFCS
+# IronNestFCS Enhanced
 
-> **Iron Nest: Heavy Turret Simulator 自动化火控系统增强版**  
-> 基于 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 继续开发，面向游戏正式版强化了双炮调度、物理状态恢复、弹道可靠性与 F9 热重载。
+**English** | [简体中文](README.zh-CN.md)
 
-[原版 Demo Video](https://www.bilibili.com/video/BV1xc7F6WEET/)
+> An enhanced automated fire-control-system mod for **Iron Nest: Heavy Turret Simulator**.
+>
+> Built on top of [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS), with full-release compatibility, dual-gun FirePlan scheduling, physical-state recovery, persistent loading, and F9 hot reload.
 
-这是 [Iron Nest: Heavy Turret Simulator](https://store.steampowered.com/app/4300500/) 的 [MelonLoader](https://melonwiki.xyz/) Mod。
+[Original Demo Video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST on Steam](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
 
-在地图上放置 T1~T4 炮击标记并提交任务后，FCS 直接读取游戏对象与控制器状态，自动完成：
+IronNestFCS Enhanced reads the game's actual map, turret, gun, loading mechanism, ballistic calculator, and trigger-console state directly. It does **not** use OCR or screen recognition.
 
-**目标定位 → 弹道解算 → FirePlan 规划 → 双炮装填/仰角准备 → 共享炮塔方位 → Review Console → Arm → 自动或手动击发 → 击发后恢复。**
+A typical fire mission looks like this:
 
-不使用 OCR，也不依赖屏幕识别。
+```text
+Target marker
+    ↓
+Ballistic solution
+    ↓
+FirePlan scheduling
+    ↓
+Independent left/right loading + elevation
+    ↓
+Shared turret azimuth
+    ↓
+Review Console → Arm
+    ↓
+Manual fire or Auto Fire
+    ↓
+Physical shot confirmation and recovery
+```
+
+<!-- Hero screenshot will be added here later. -->
 
 ---
 
-## 当前架构
+## Highlights
 
-当前 FCS 只有两个顶层业务系统：
+- **Dual-gun FirePlan scheduling** — both guns can prepare in parallel while sharing one turret azimuth.
+- **Persistent loading across F9** — accepted loading transactions survive TaskSystem hot reloads.
+- **Physical-state-aware planning** — chamber contents, powder charge, reload state, elevation, and current turret azimuth are treated as the source of truth.
+- **One-time firing-order comparison** — two unpaired FirePlans are compared once; an already-compared second plan is not displaced by later arrivals.
+- **Rolling gun-slot reuse** — one gun can accept the next task as soon as it physically recovers, without waiting for the other gun.
+- **Reliable ballistic calculation** — waits for a stable result instead of blindly reading the calculator after a fixed delay.
+- **Per-task ballistic cache** — if left and right candidates use the same shell and charge, the calculator is operated only once, avoiding duplicate calculation stickers.
+- **Manual or automatic firing** — supports both player-triggered fire and `Auto Fire`.
+- **Max Charge mode** and automatic shell / powder purchasing.
+- **F9 TaskSystem hot reload** for faster development and recovery.
+- **Categorized diagnostic logs** for planning, ballistics, loading, firing order, turret control, trigger control, and failures.
+
+---
+
+## Quick Start
+
+### Requirements
+
+- Iron Nest: Heavy Turret Simulator
+- MelonLoader for IL2CPP
+- .NET SDK matching [global.json](global.json) when building from source
+
+### Current installation method
+
+A prebuilt public release package is not included yet. For now, install from source with the deployment script.
+
+Clone or download this repository, close the game, then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\Deploy.ps1 -Configuration Release
+```
+
+The default game directory is:
+
+```text
+D:\Steam\steamapps\common\Iron Nest Heavy Turret Simulator
+```
+
+To use a different location:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\Deploy.ps1 `
+  -GameDir "D:\Your\Iron Nest Heavy Turret Simulator" `
+  -Configuration Release
+```
+
+The script builds and deploys:
+
+| File | Destination |
+| --- | --- |
+| `IronNestFCS.dll` | `<GameDir>\Mods\` |
+| `IronNestFCS.Abstractions.dll` | `<GameDir>\UserLibs\` |
+| `IronNestFCS.Logic.dll` | `<GameDir>\UserData\IronNestFCS\` |
+
+Restart the game once after a full Host / Abstractions deployment.
+
+The current Host banner should include:
+
+```text
+IronNestFCS v1.1.1
+Press F9 to hot reload TaskSystem.
+```
+
+---
+
+## How to Use
+
+1. Enter a scene containing the heavy artillery turret and Tactical Map.
+2. Move one of the numbered map markers **T1–T4** onto a target.
+3. Choose the desired shell type in the FCS panel.
+4. Optionally enable `Auto Fire` and/or `Max Charge`.
+5. Click `T1`, `T2`, `T3`, or `T4` to submit the corresponding fire mission.
+6. The FCS reads the physical state, solves the trajectory, assigns a gun, loads ammunition, sets elevation, rotates the turret, and prepares the trigger console.
+7. In manual mode, fire when the system has completed Review + Arm. In `Auto Fire`, the FCS performs the final trigger action automatically.
+
+Multiple tasks can be submitted in succession. The left and right guns are scheduled independently and reuse freed gun slots as soon as the physical gun state allows it.
+
+---
+
+## Core Architecture
+
+The current FCS has two top-level runtime systems.
 
 ### TaskSystem
 
-位于可热重载的 `IronNestFCS.Logic.dll` 中，负责：
+`IronNestFCS.Logic.dll` is hot-reloadable and owns the current firing intent:
 
-- T1~T4 任务队列
-- 当前规划轮状态快照
-- 弹道解算
-- FirePlan 生成
-- 双炮槽位与一次性首发顺序
-- 炮管仰角
-- 共享炮塔方位
-- Trigger Console / Arm / Fire
-- UI 与任务历史
+- T1–T4 task queue
+- one planning snapshot per planning round
+- ballistic solving
+- FirePlan creation
+- left/right gun-slot assignment
+- one-time First / Second ordering
+- gun elevation
+- shared turret azimuth
+- Review Console / Arm / Fire
+- UI and task history
 
-按 **F9** 时，TaskSystem 会被卸载并重新创建。
+Pressing **F9** destroys and recreates the TaskSystem.
 
 ### Persistent LoadingSystem
 
-位于稳定 Host `IronNestFCS.dll` 中，负责：
+The stable Host `IronNestFCS.dll` owns accepted loading transactions:
 
-- 左右炮独立的实际装弹 / 装药流程
-- 已接受的 `Gun + Shell + Charge` 装填事务
-- 装填阶段的物理状态跟踪
-- F9 期间继续推进尚未完成的装填
+- independent left/right shell loading
+- independent left/right powder loading
+- accepted `Gun + Shell + Charge` transactions
+- physical loading-stage tracking
+- continued loading while TaskSystem is being reloaded
 
-它的生命周期独立于 TaskSystem，因此 **F9 不会取消已经接受的装填事务**。
+Its lifecycle is independent from the TaskSystem.
 
-核心原则：
+The design rule is simple:
 
-> **游戏中的真实物理状态是最高真相；TaskSystem 表达射击意图，Persistent LoadingSystem 持有已接受的装填事务。**
+> **The physical game state is the highest source of truth. TaskSystem represents firing intent; Persistent LoadingSystem owns accepted loading transactions.**
 
 ---
 
 ## FirePlan
 
-`FirePlan` 是当前调度和执行的核心单元。
+A `FirePlan` is the fixed scheduling and execution unit for one task on one gun.
 
-一个 FirePlan 固定绑定：
+It contains:
 
 - Task
-- Gun（Left / Right）
+- Gun (`Left` / `Right`)
 - Shell
 - Charge
 - Elevation
 - Target Azimuth
 - ETA / planning metadata
 
-**FirePlan 一旦生成，任务与炮的绑定不会动态改写。** 如果必须换炮，则放弃当前 Plan，之后重新读取真实状态并重新规划。
+Once a FirePlan is created, its **Task + Gun** binding is not dynamically rewritten. If the assignment must change, the current plan is discarded and the task is planned again from a fresh physical snapshot.
 
-### 规划快照
+### Planning snapshot
 
-任务进入当前规划轮时，FCS 会读取一次：
+When a task enters the active planning round, the FCS reads the current state once:
 
-- 左炮物理状态
-- 右炮物理状态
-- Persistent LoadingSystem 当前事务
-- 左右炮实际仰角
-- 炮塔当前真实方位角
+- left gun physical state
+- right gun physical state
+- persistent loading transactions
+- actual left/right elevation
+- actual current turret azimuth
 
-然后基于这个快照生成左右候选。
+The target azimuth stored in the FirePlan remains fixed. The current turret azimuth is **not** continuously re-read to dynamically reshuffle plans.
 
-FirePlan 不会持续动态追踪炮塔当前方位并反复重排；下一次重新规划时再读取新的真实方位。
-
-这很重要，因为游戏中：
-
-- **炮塔方位开炮后不会自动归零**
-- **炮管仰角在击发恢复过程中会回零**
-
-因此后续任务的方位 ETA 会从炮塔当时真实停留位置计算，而不是假定从 0° 开始。
+This matters because the turret does not automatically return to zero after firing. A later task therefore plans from the turret's real current position instead of assuming `0°`.
 
 ---
 
-## 双炮调度
+## Dual-Gun Scheduling
 
-两门炮各有一个执行槽位，可独立进行本地准备；炮塔方位是两门炮共享的资源。
+Each gun has one execution slot. Loading and elevation are local to each gun; turret azimuth is shared.
 
-### 一次性首发比较
+### One-time firing-order comparison
 
-两个尚未比较过的 FirePlan 同时存在时，只比较一次预计完成时间：
+When two FirePlans that have never been compared are present together:
 
 ```text
-[A 未比较, B 未比较]
+[A unpaired, B unpaired]
         ↓
-比较一次
+compare once
         ↓
-First / Second 固定
+First / Second fixed
 ```
 
-之后不会持续动态抢占。
+The system does not continuously re-arbitrate them.
 
-例如：
+Example:
 
 ```text
-A / B 已比较
-A 击发
-C 进入空出来的炮槽
+A / B were already compared
+A fires
+C enters the newly free gun slot
 ```
 
-此时：
+The state becomes:
 
 ```text
-B 已比较
-C 未比较
-→ 不重新比较
-→ B 仍然是下一发
+B = already compared
+C = not yet compared
+→ no B/C re-comparison
+→ B remains next
 ```
 
-等 B 完成，D 进入后：
+After B finishes, another new plan can pair with C and be compared once.
 
-```text
-C 未比较
-D 未比较
-→ C / D 比较一次
-```
+If only one FirePlan exists and there is no queued or currently-planning task, that plan commits directly instead of waiting indefinitely for a future task.
 
-如果当前只有一个 FirePlan，且队列中没有等待或正在规划的任务，则该 Plan 直接取得执行顺序，不等待未来可能出现的新任务。
+### Rolling gun-slot reuse
 
-### 滚动双炮槽
+The system does not require both guns to finish an entire pair before accepting more work.
 
-无需等待两门炮整轮一起清空。
-
-一门炮完成并恢复到可重新使用状态后，它的槽位可以立即接收下一任务；另一门炮可以继续完成自己的旧 Plan。
+As soon as one gun physically returns to a reusable state, its slot can accept the next task while the other gun continues its existing plan.
 
 ---
 
-## 并行准备与共享方位
+## Parallel Preparation and Shared Azimuth
 
-每个 FirePlan 的本地准备流程相互独立：
+Local preparation is independent:
 
 ```text
-Left : Loading → 实际 LoadedReady → Elevation
-Right: Loading → 实际 LoadedReady → Elevation
+Left : Loading → physical LoadedReady → Elevation
+Right: Loading → physical LoadedReady → Elevation
 ```
 
-仰角调整以 **真实 `LoadedReady`** 为门槛，不依赖 ETA 推算。
+Elevation starts from the **real `LoadedReady` state**, not from an ETA prediction.
 
-共享炮塔方位不依赖装填完成。一旦首发顺序确定：
+The shared turret does not wait for loading to finish. As soon as the firing order is committed:
 
 ```text
 First committed
       ↓
-立即开始 Azimuth
+start Azimuth immediately
 ```
 
-同时左右炮仍可继续各自装填和调整仰角。
+Loading and elevation continue in parallel.
 
-真正进入 Review / Arm / Fire 前要求：
+The final firing sequence requires both:
 
 ```text
 Azimuth Ready + Elevation Ready
 ```
 
+before Review / Arm / Fire.
+
 ### ETA
 
-ETA 只用于规划和首发比较，不作为真实完成条件。
+ETA is used for planning and First / Second comparison only. Physical state remains the final execution gate.
 
-概念上：
+Conceptually:
 
 ```text
-Local ETA = Loading ETA + Elevation ETA
+Local ETA      = Loading ETA + Elevation ETA
 Fire-ready ETA = max(Local ETA, Azimuth ETA)
 ```
 
-对于已经进行中的 Persistent Loading transaction，会考虑它在规划期间真实经过的时间；Fresh Load 则不会把规划耗时误算成“已经开始装填”。
+An already-running persistent loading transaction is allowed to make real progress while ballistic planning is happening. A fresh load does not receive "free" elapsed planning time before the FirePlan actually exists.
 
-正式版实测参考：
+Measured planning baselines from the current game build are approximately:
 
 ```text
-炮塔方位速度 ≈ 4°/s
-炮管仰角速度 ≈ 2°/s
-Fresh Load 到 LoadedReady ≈ 32s（仅作规划基线）
+Turret azimuth speed ≈ 4°/s
+Gun elevation speed  ≈ 2°/s
+Fresh load to LoadedReady ≈ 32s
 ```
+
+These values are estimates for planning; actual firing still waits for physical readiness.
 
 ---
 
-## 弹道计算
+## Ballistic Calculator
 
-FCS 驱动游戏原生 Ballistic Calculator：
+The FCS drives the game's native Ballistic Calculator directly:
 
-- 自动设置距离与方向
-- 自动选择弹种与装药
-- 支持 `Max Charge`
-- 使用完整 Calculate Down/Up 交互
-- 等待结果稳定后读取仰角
-- 无法可靠确认结果时让当前规划失败，而不是使用疑似旧结果
+- sets target distance and direction
+- chooses shell and powder charge
+- supports `Max Charge`
+- performs the full Calculate Down / Up interaction
+- waits for the output to stabilize
+- rejects an unconfirmed result instead of firing with a suspected stale elevation
 
-### 同一规划轮的弹道缓存
+### Per-task ballistic cache
 
-同一个 Task 在比较 Left / Right 候选时，如果两边最终使用相同的 `Shell + Charge`，只会执行一次实际 Calculate：
+A single task may evaluate both guns before choosing one. If both candidates need the same shell and charge, the physical calculator is only operated once:
 
 ```text
 T1 Left  = HE C2 → Calculate → E=30.08°
-T1 Right = HE C2 → cache hit → 复用 E=30.08°
+T1 Right = HE C2 → cache hit → reuse E=30.08°
 ```
 
-因此不会因为“一个任务要比较两门炮”而生成两张完全相同的计算贴纸。
+This prevents one submitted task from generating two identical calculation stickers.
 
-如果左右候选确实使用不同装药方案，例如 `HE C2` 与 `HE C3`，则仍会分别计算。
+If the candidates genuinely require different solutions, such as `HE C2` versus `HE C3`, each unique solution is calculated separately.
 
 ---
 
-## Persistent Loading 与 F9
+## F9 Hot Reload and Persistent Loading
 
-装填系统接受的事务只有：
-
-```text
-Gun + Shell + Charge
-```
-
-一旦接受，新的 TaskSystem 不能覆盖仍在进行的装填事务。
-
-F9 的语义是：
+F9 intentionally separates **firing intent** from **accepted physical loading work**:
 
 ```text
 TaskSystem FirePlans / queue / order
-→ 清空并重新创建
+→ destroyed and recreated
 
 Persistent LoadingSystem accepted transaction
-→ 保留并继续执行
+→ preserved and continues
 
-游戏真实炮膛 / reload state
-→ 始终作为事实来源
+Physical chamber / reload state
+→ always remains the factual source of truth
 ```
 
-已经实测覆盖：
+This has been tested while loading was already in progress:
 
 ```text
 Left  : FinalSequence
@@ -251,22 +336,22 @@ Right : CloseShellGuide
         ↓
        F9
         ↓
-新 TaskSystem 启动
+new TaskSystem starts
         ↓
-两笔装填继续推进
+accepted loading transactions continue
         ↓
 Left / Right → LoadedReady
 ```
 
-F9 后新任务会重新读取当时的真实炮膛、装药、reload state、仰角和炮塔方位，再生成新的 FirePlan。
+After F9, newly submitted tasks read the current chamber, powder charge, reload state, elevation, and turret azimuth before creating new FirePlans.
 
 ---
 
 ## Trigger Console
 
-正式版中部分控制台对象的逻辑状态并不能稳定代表物理姿态，因此 FCS 会读取开关与保险杆 Transform 位置进行确认。
+Some full-release control objects do not expose a sufficiently reliable logical ON/OFF state, so the FCS also verifies the physical Transform positions of switches and arm levers.
 
-执行顺序为：
+The final sequence is:
 
 ```text
 Local Ready + Azimuth Ready
@@ -275,98 +360,66 @@ Review Console
         ↓
 Arm Left / Right
         ↓
-手动击发或 Auto Fire
+Manual Fire or Auto Fire
         ↓
-观察真实炮膛变化确认已经击发
+confirm the real chamber transition
 ```
 
 ---
 
-## 基础功能
+## Supported Features
 
-- T1~T4 一键提交火力任务
-- 双炮滚动执行队列
-- 自动读取目标距离与方向
-- 自动弹道解算
-- 自动购买炮弹与药包
-- 自动装弹 / 装药
-- 左右炮独立仰角
-- 共享炮塔方位自动控制
-- 一次性 FirePlan 首发比较
-- 手动 / Auto Fire
+- T1–T4 fire missions
+- dual-gun rolling task execution
+- target distance / direction reading
+- automatic ballistic solving
+- automatic ammunition and powder purchasing
+- automatic shell / powder loading
+- independent left/right elevation
+- shared turret azimuth control
+- one-time FirePlan order comparison
+- manual fire / Auto Fire
 - Max Charge
-- 物理状态恢复
-- Alt-Tab 失焦保护
-- F9 TaskSystem 热重载
-- 分类诊断日志
+- physical-state recovery
+- Alt-Tab focus protection
+- F9 TaskSystem hot reload
+- categorized diagnostics
 
-### 弹种
-
-当前逻辑支持游戏中的多种弹药，包括：
+Supported ammunition includes multiple in-game shell types such as:
 
 `AP / HCHE / HE / STAR / SMK / PCLM ...`
 
-内部游戏枚举仍可能使用 `PLCM`，UI 使用正式拼写 `PCLM`。
+The internal game enum may still use `PLCM`; the FCS UI uses the displayed spelling `PCLM`.
 
 ---
 
-## 典型工作流程
+## Verified In-Game Behavior
 
-```text
-移动地图炮击标记
-        ↓
-点击 T1 / T2 / T3 / T4
-        ↓
-标记稳定采样
-        ↓
-任务进入 planning round
-        ↓
-读取一次真实状态快照
-        ↓
-对 Left / Right 构建候选
-        ↓
-Ballistic Calculator
-（相同 Shell+Charge 本轮只算一次）
-        ↓
-生成固定 Task + Gun FirePlan
-        ↓
-左右 FirePlan 各自开始本地准备
-        ↓
-两个未比较 Plan → 一次性决定 First / Second
-        ↓
-First 立即开始共享炮塔方位
-        │
-        ├──────────────┐
-        ↓              ↓
-Persistent Loading   Azimuth
-        ↓              ↓
-实际 LoadedReady   Azimuth Ready
-        ↓              │
-Elevation             │
-        ↓              │
-Local Ready ──────────┘
-        ↓
-Review / Arm
-        ↓
-手动击发 / Auto Fire
-        ↓
-确认真实击发
-        ↓
-该炮恢复后释放槽位
-```
+The current architecture has been validated in the game for the following cases:
+
+- one task with identical left/right `Shell + Charge` candidates performs only one physical ballistic Calculate
+- left and right guns load independently
+- each gun starts elevation after its own physical `LoadedReady`
+- shared azimuth starts immediately after firing order commitment instead of waiting for loading
+- two unpaired FirePlans are compared exactly once
+- an already-compared Second plan is promoted without re-comparison
+- gun slots are reused on a rolling basis
+- new plans use the turret's real current azimuth after previous shots
+- F9 destroys TaskSystem state without clearing an already-loaded physical round
+- F9 during active `CloseShellGuide / FinalSequence` loading preserves the accepted transaction until `LoadedReady`
 
 ---
 
-## 工程结构
+## Project Structure
 
-| 项目 | 角色 | 说明 |
+| Project | Role | Description |
 | --- | --- | --- |
-| `IronNestFCS` | **稳定 Host** | MelonLoader 入口、Persistent LoadingSystem、Logic 生命周期、F9 |
-| `IronNestFCS.Abstractions` | **共享契约** | Host / Logic 共用接口与装填事务类型 |
-| `IronNestFCS.Logic` | **TaskSystem** | 地图、FirePlanner、FirePlanExecutor、炮塔/仰角、Trigger、UI |
-| `IronNestFCS.CustomRecords` | **独立 Mod** | 自定义唱片机，与 FCS 火控无直接依赖 |
+| `IronNestFCS` | **Stable Host** | MelonLoader entry point, Persistent LoadingSystem, Logic lifecycle, F9 |
+| `IronNestFCS.Abstractions` | **Shared contract** | Host / Logic interfaces and loading transaction types |
+| `IronNestFCS.Logic` | **TaskSystem** | map, FirePlanner, FirePlanExecutor, turret/elevation, trigger, UI |
+| `IronNestFCS.CustomRecords` | **Independent mod** | custom record-player functionality; no direct dependency on the FCS core |
 
-关键代码：
+Key files:
 
 - [PersistentLoadingSystem.cs](IronNestFCS/PersistentLoadingSystem.cs)
 - [LogicReloader.cs](IronNestFCS/LogicReloader.cs)
@@ -376,134 +429,61 @@ Review / Arm
 - [FirePlanExecutor.cs](IronNestFCS.Logic/Execution/FirePlanExecutor.cs)
 - [FSC.cs](IronNestFCS.Logic/FSC.cs)
 
-更详细的重构设计记录见 [docs/FSC_MODULARIZATION_PLAN.md](docs/FSC_MODULARIZATION_PLAN.md)。
+The detailed refactor design record is available in [docs/FSC_MODULARIZATION_PLAN.md](docs/FSC_MODULARIZATION_PLAN.md).
 
 ---
 
-## 构建与部署
+## Development
 
-### 前置条件
-
-- 游戏本体
-- MelonLoader（IL2CPP）
-- .NET SDK（版本约束见 [global.json](global.json)）
-
-### 完整部署
-
-当 Host / Abstractions 有变化，或首次安装当前架构时，退出游戏后运行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\Deploy.ps1
-```
-
-默认游戏目录：
-
-```text
-D:\Steam\steamapps\common\Iron Nest Heavy Turret Simulator
-```
-
-也可显式指定：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\Deploy.ps1 `
-  -GameDir "D:\Steam\steamapps\common\Iron Nest Heavy Turret Simulator" `
-  -Configuration Release
-```
-
-脚本会构建完整 solution，并部署：
-
-| 文件 | 位置 |
-| --- | --- |
-| `IronNestFCS.dll` | `<GameDir>\Mods\` |
-| `IronNestFCS.Abstractions.dll` | `<GameDir>\UserLibs\` |
-| `IronNestFCS.Logic.dll` | `<GameDir>\UserData\IronNestFCS\` |
-| `IronNestFCS.CustomRecords.dll` | `Mods/`（如单独构建/安装） |
-
-完整部署后需要重启游戏一次。
-
-### 日常 Logic 开发
-
-如果只修改 `IronNestFCS.Logic`，可以直接：
+For Logic-only changes:
 
 ```powershell
 dotnet build .\IronNestFCS.Logic\IronNestFCS.Logic.csproj -c Debug `
   -p:GameDir="D:\Steam\steamapps\common\Iron Nest Heavy Turret Simulator"
 ```
 
-然后回到游戏按 **F9**，无需重启进程。
+Then return to the game and press **F9**. A full process restart is not required for normal `IronNestFCS.Logic` changes.
 
-当前 Host 启动提示应包含：
-
-```text
-IronNestFCS v1.1.1
-Press F9 to hot reload TaskSystem.
-```
+When the Host or Abstractions contract changes, run the full deployment script and restart the game once.
 
 ---
 
-## 使用
+## Diagnostic Logs
 
-1. 安装 MelonLoader 与本 Mod。
-2. 进入包含重炮炮塔和 Tactical Map 的场景。
-3. 将地图上的编号炮击标记 **1~4** 移动到目标位置。
-4. 在 FCS 面板选择弹种，并按需设置 `Auto Fire` / `Max Charge`。
-5. 点击 `T1` ~ `T4` 提交对应目标。
-6. FCS 自动完成规划、装填、瞄准、共享方位和击发控制。
-7. 手动模式下由玩家完成最终击发；Auto Fire 模式由 FCS 自动击发。
-
----
-
-## 调试日志
-
-日志位于：
+Logs are written to:
 
 ```text
 <GameDir>\UserData\IronNestFCS\Logs\yyyy-MM-dd\run-HHmmss-pidNNNN\
 ```
 
-主要文件：
-
-| 文件 | 内容 |
+| File | Purpose |
 | --- | --- |
-| `all.log` | 全部事件 |
-| `dispatch.log` | Task queue / planning / FirePlan |
-| `ballistic.log` | Ballistic Calculator 输入、稳定结果、planning cache |
-| `reload.log` | Persistent Loading、物理炮膛与 reload state |
-| `order.log` | 一次性 First / Second 顺序与 promotion |
-| `turret.log` | 标记与共享炮塔方位 |
-| `trigger.log` | Review / Arm / Fire 与物理开关姿态 |
-| `problems.log` | 真正需要关注的 warning / failure |
-| `arbitration.log` | 旧日志分类兼容保留；当前架构正常情况下基本为空 |
+| `all.log` | all events |
+| `dispatch.log` | task queue, planning, FirePlan creation |
+| `ballistic.log` | calculator input, stable result, planning cache |
+| `reload.log` | persistent loading, chamber state, reload controller state |
+| `order.log` | one-time First / Second ordering and promotion |
+| `turret.log` | target markers and shared azimuth |
+| `trigger.log` | Review / Arm / Fire and physical switch state |
+| `problems.log` | warnings and failures that need attention |
+| `arbitration.log` | legacy compatibility category; normally mostly empty in the current architecture |
 
-排障建议优先看：
+For troubleshooting, start with:
 
 ```text
 problems.log
-→ 对应分类日志
+→ relevant category log
 → all.log
 ```
 
 ---
 
-## 当前已验证行为
+## Credits
 
-当前重构版本已经在游戏中验证：
+IronNestFCS Enhanced is based on the original [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS). Credit for the original implementation belongs to its original author and contributors.
 
-- 同一个 Task 左右候选相同 `Shell + Charge` 时只生成一次 Ballistic Calculate
-- 两门炮独立装填
-- 实际 `LoadedReady` 后立即开始各自仰角
-- 首发确定后共享炮塔立即开始转向，不等待装填
-- 两个未比较 FirePlan 只比较一次
-- 已比较的 Second 不被后来新任务重新挑战
-- 炮槽可滚动复用
-- 开炮后新 Plan 使用炮塔真实当前方位，而不是假定归零
-- F9 清空 TaskSystem，但不清空已经装入炮膛的真实弹药
-- **F9 发生在 `CloseShellGuide / FinalSequence` 等装填中间状态时，Persistent Loading transaction 仍会继续推进到 `LoadedReady`**
-
----
+This fork focuses on full-release compatibility, reliability, physical-state recovery, persistent loading, and the current dual-gun FirePlan architecture.
 
 ## License
 
-本项目沿用仓库中的 [MIT License](LICENSE)。
-
-感谢原项目 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 提供基础实现。
+Released under the repository's [MIT License](LICENSE).
