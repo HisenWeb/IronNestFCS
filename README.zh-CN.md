@@ -1,14 +1,14 @@
-# IronNestFCS Enhanced
+# IronNestFCS Smart
 
 [English](README.md) | **简体中文**
 
-这是一个面向 **Iron Nest: Heavy Turret Simulator** 的自动化火控系统增强 Mod。
+这是一个面向 **Iron Nest: Heavy Turret Simulator** 的智能自动火控 Mod。
 
-你只需要在 Tactical Map 上放好目标标记，IronNestFCS Enhanced 就可以接管大部分火控流程：弹道解算、左右炮分配、自动购买和装填炮弹/药包、调整仰角、旋转炮塔、准备 Review / Arm，并可选择自动完成最终击发。
+你只需要在 Tactical Map 上放好目标标记，IronNestFCS Smart 就可以接管大部分火控流程：弹道解算、左右炮分配、自动购买和装填炮弹/药包、调整仰角、旋转炮塔、准备 Review / Arm，并可选择自动完成最终击发。
 
 [下载最新版](https://github.com/HisenWeb/IronNestFCS/releases/latest) · [原作者 Demo Video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST Steam 页面](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
 
-> 原作者 Demo Video 可以用来了解基本操作方式。Enhanced 版本的内部调度、状态处理和部分 UI 已经发生变化。
+> 原作者 Demo Video 可以用来了解基本操作方式。Smart 版本的任务安排、状态处理和部分玩家界面已经发生变化。
 
 ---
 
@@ -84,9 +84,9 @@ Mod 直接读取游戏里的真实对象、炮膛和控制器状态，不使用 
 
 先说结论：**原版已经能完成大部分自动火控。** T1～T4 任务队列、自动把任务交给空闲炮、两门炮同时准备、自动购买炮弹 / 药包、Auto Fire、Max Charge、F9 热重载，原版 v1.0.6 都已经有。
 
-**Enhanced 主要不是“多加几个自动功能”，而是让原来的自动火控在连续作战、任务重置和中途状态变化时更聪明、更不容易乱。**
+**Smart 主要不是“多加几个自动功能”，而是让原来的自动火控在连续作战、任务重置和中途状态变化时更聪明、更不容易乱。**
 
-| 你在游戏里遇到的情况 | 原版 IronNestFCS | IronNestFCS Enhanced |
+| 你在游戏里遇到的情况 | 原版 IronNestFCS | IronNestFCS Smart |
 | --- | --- | --- |
 | **两门炮现在都能接任务** | 直接把任务交给第一个空闲炮位；两门都空闲时左炮会先接 | 先看两门炮现在各自装了什么、仰角多少、炮塔朝哪里，再判断哪一门更适合这一发 |
 | **两门炮都在准备下一发** | 两个任务各自等待使用共享炮塔，谁先拿到炮塔就先继续 | 会估算两发谁更早能准备好，尽量让更早能打的那一发先打；顺序确定后不会被后来的任务随便打乱 |
@@ -97,7 +97,7 @@ Mod 直接读取游戏里的真实对象、炮膛和控制器状态，不使用 
 | **按 F9 时炮塔还在转向旧目标** | 旧任务协程会停止，但原版没有专门取消游戏里已经写进去的旧转向目标 | 会先取消旧任务留下的转向目标，让炮塔停在当前真实方向；重新发任务后，再从这里继续计算下一次转向 |
 | **想看中文界面** | 没有独立的中英文切换层 | 玩家界面支持简体中文 / English，并可通过配置文件切换 |
 
-简单说：**原版已经会“自动打”，Enhanced 重点解决的是“连续打很多发、两门炮同时忙、按 F9 重来、炮已经装到一半”这些复杂情况下，火控还能不能根据现场真实状态继续正确工作。**
+简单说：**原版已经会“自动打”，Smart 重点解决的是“连续打很多发、两门炮同时忙、按 F9 重来、炮已经装到一半”这些复杂情况下，火控还能不能根据现场真实状态继续正确工作。**
 
 ---
 
@@ -107,7 +107,7 @@ Mod 直接读取游戏里的真实对象、炮膛和控制器状态，不使用 
 
 1. **Iron Nest: Heavy Turret Simulator 游戏本体**
 2. **适用于 IL2CPP 的 MelonLoader**
-3. 一份 IronNestFCS Enhanced 安装包
+3. 一份 IronNestFCS Smart 安装包
 
 建议先安装好 MelonLoader，并至少正常启动一次游戏，再安装本 Mod。
 
@@ -115,12 +115,12 @@ Mod 直接读取游戏里的真实对象、炮膛和控制器状态，不使用 
 
 ## 下载与安装
 
-打开 [GitHub 最新 Release](https://github.com/HisenWeb/IronNestFCS/releases/latest)，按语言下载 **其中一个**：
+打开 [GitHub 最新 Release](https://github.com/HisenWeb/IronNestFCS/releases/latest)，按语言下载 **其中一个 ZIP**：
 
-```text
-IronNestFCS-Enhanced_v*_zh-CN.zip   简体中文 UI
-IronNestFCS-Enhanced_v*_en-US.zip   English UI
-```
+- 文件名以 `_zh-CN.zip` 结尾：简体中文 UI
+- 文件名以 `_en-US.zip` 结尾：English UI
+
+> v1.1.1 的安装包在项目更名为 **IronNestFCS Smart** 之前已经发布，因此这两个 ZIP 文件名仍保留旧的 `Enhanced` 名称。仓库之后生成的新安装包使用 `IronNestFCS-Smart_v*`。
 
 两个安装包使用完全相同的 Mod DLL，只是默认 UI 语言不同。
 
@@ -284,7 +284,7 @@ problems.log
 
 ## Credits
 
-IronNestFCS Enhanced 基于原项目 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 继续开发。原始实现及其贡献归原作者和原项目贡献者所有。
+IronNestFCS Smart 基于原项目 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 继续开发。原始实现及其贡献归原作者和原项目贡献者所有。
 
 ## License
 
