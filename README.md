@@ -2,487 +2,246 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-> An enhanced automated fire-control-system mod for **Iron Nest: Heavy Turret Simulator**.
->
-> Built on top of [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS), with full-release compatibility, dual-gun FirePlan scheduling, physical-state recovery, persistent loading, and F9 hot reload.
+An enhanced automated fire-control-system mod for **Iron Nest: Heavy Turret Simulator**.
 
-[Original Demo Video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST on Steam](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
+After you place a target marker on the Tactical Map, IronNestFCS Enhanced can handle most of the firing workflow for you: ballistic calculation, gun assignment, ammunition loading, elevation, turret azimuth, trigger preparation, and optional automatic firing.
 
-IronNestFCS Enhanced reads the game's actual map, turret, gun, loading mechanism, ballistic calculator, and trigger-console state directly. It does **not** use OCR or screen recognition.
+[Download the latest release](https://github.com/HisenWeb/IronNestFCS/releases/latest) · [Original author's demo video](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST on Steam](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
 
-A typical fire mission looks like this:
+> The original demo video is useful for understanding the basic interaction flow. The Enhanced fork has a different internal scheduler and additional UI/features.
+
+---
+
+## What this mod does
+
+A typical fire mission becomes:
 
 ```text
-Target marker
-    ↓
-Ballistic solution
-    ↓
-FirePlan scheduling
-    ↓
-Independent left/right loading + elevation
-    ↓
-Shared turret azimuth
-    ↓
-Review Console → Arm
-    ↓
+Place T1–T4 target marker
+        ↓
+Select ammunition
+        ↓
+Submit target
+        ↓
+Ballistic calculation
+        ↓
+Choose left/right gun
+        ↓
+Load shell + powder
+        ↓
+Set elevation + turret azimuth
+        ↓
+Review / Arm
+        ↓
 Manual fire or Auto Fire
-    ↓
-Physical shot confirmation and recovery
 ```
 
-<!-- Hero screenshot will be added here later. -->
+The mod reads the game's real objects and physical state directly. It does **not** use OCR or screen recognition.
 
 ---
 
 ## Highlights
 
-- **Dual-gun FirePlan scheduling** — both guns can prepare in parallel while sharing one turret azimuth.
-- **Persistent loading across F9** — accepted loading transactions survive TaskSystem hot reloads.
-- **Physical-state-aware planning** — chamber contents, powder charge, reload state, elevation, and current turret azimuth are treated as the source of truth.
-- **One-time firing-order comparison** — two unpaired FirePlans are compared once; an already-compared second plan is not displaced by later arrivals.
-- **Rolling gun-slot reuse** — one gun can accept the next task as soon as it physically recovers, without waiting for the other gun.
-- **Reliable ballistic calculation** — waits for a stable result instead of blindly reading the calculator after a fixed delay.
-- **Per-task ballistic cache** — if left and right candidates use the same shell and charge, the calculator is operated only once, avoiding duplicate calculation stickers.
-- **Manual or automatic firing** — supports both player-triggered fire and `Auto Fire`.
-- **Max Charge mode** and automatic shell / powder purchasing.
-- **F9 TaskSystem hot reload** for faster development and recovery.
-- **Categorized diagnostic logs** for planning, ballistics, loading, firing order, turret control, trigger control, and failures.
+- **Automatic ballistic calculation** using the game's own ballistic calculator.
+- **Dual-gun scheduling** — the left and right guns can load and prepare independently.
+- **Rolling gun reuse** — a recovered gun can take the next task without waiting for the other gun to finish.
+- **Physical-state-aware control** — the real chamber, powder charge, reload state, elevation, and turret position are treated as the source of truth.
+- **Persistent loading across F9** — an accepted loading operation continues even when the TaskSystem is hot-reloaded.
+- **Reliable ballistic result handling** — waits for a stable result instead of blindly reading an old calculator value.
+- **Duplicate-solve avoidance** — identical candidates inside one task reuse the same ballistic result.
+- **Automatic shell and powder purchasing** when needed.
+- **Max Charge mode**.
+- **Manual fire or Auto Fire**.
+- **English and Simplified Chinese UI**.
+- **Diagnostic logs** for troubleshooting.
 
 ---
 
-## Quick Start
+## Compared with the original IronNestFCS
 
-### Requirements
+This project is based on [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS). The Enhanced fork keeps the same basic goal — automating the heavy turret fire-control workflow — while substantially reworking the runtime behavior for the current game release.
 
-- Iron Nest: Heavy Turret Simulator
-- MelonLoader for IL2CPP
-- .NET SDK matching [global.json](global.json) when building from source
+The main additions/reworks are:
 
-### Current installation method
-
-A prebuilt public release package is not included yet. For now, install from source with the deployment script.
-
-Clone or download this repository, close the game, then run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\Deploy.ps1 -Configuration Release
-```
-
-The default game directory is:
-
-```text
-D:\Steam\steamapps\common\Iron Nest Heavy Turret Simulator
-```
-
-To use a different location:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\Deploy.ps1 `
-  -GameDir "D:\Your\Iron Nest Heavy Turret Simulator" `
-  -Configuration Release
-```
-
-The script builds and deploys:
-
-| File | Destination |
+| Area | IronNestFCS Enhanced |
 | --- | --- |
-| `IronNestFCS.dll` | `<GameDir>\Mods\` |
-| `IronNestFCS.Abstractions.dll` | `<GameDir>\UserLibs\` |
-| `IronNestFCS.Logic.dll` | `<GameDir>\UserData\IronNestFCS\` |
-
-Restart the game once after a full Host / Abstractions deployment.
-
-The current Host banner should include:
-
-```text
-IronNestFCS v1.1.1
-Press F9 to hot reload TaskSystem.
-```
+| Game compatibility | Updated for the current full-release game behavior |
+| Dual-gun control | FirePlan-based scheduling with independent left/right preparation |
+| Task flow | Rolling gun-slot reuse instead of waiting for both guns as one batch |
+| Reload handling | Persistent loading transactions survive F9 TaskSystem reloads |
+| State handling | Plans from the actual physical chamber/reload/elevation/turret state |
+| Ballistics | Stable-result checking and per-task duplicate-solve cache |
+| Hot reload | F9 reloads TaskSystem logic without discarding accepted loading work |
+| UI | English / Simplified Chinese |
+| Distribution | Ready-to-install release ZIPs |
 
 ---
 
-## How to Use
+## Requirements
 
-1. Enter a scene containing the heavy artillery turret and Tactical Map.
-2. Move one of the numbered map markers **T1–T4** onto a target.
-3. Choose the desired shell type in the FCS panel.
-4. Optionally enable `Auto Fire` and/or `Max Charge`.
-5. Click `T1`, `T2`, `T3`, or `T4` to submit the corresponding fire mission.
-6. The FCS reads the physical state, solves the trajectory, assigns a gun, loads ammunition, sets elevation, rotates the turret, and prepares the trigger console.
-7. In manual mode, fire when the system has completed Review + Arm. In `Auto Fire`, the FCS performs the final trigger action automatically.
+You need:
 
-Multiple tasks can be submitted in succession. The left and right guns are scheduled independently and reuse freed gun slots as soon as the physical gun state allows it.
+1. **Iron Nest: Heavy Turret Simulator**
+2. **MelonLoader for IL2CPP**
+3. One IronNestFCS Enhanced release package
+
+Install and run the game with MelonLoader at least once before installing the mod.
 
 ---
 
-## Core Architecture
+## Download and installation
 
-The current FCS has two top-level runtime systems.
+Open the [latest GitHub Release](https://github.com/HisenWeb/IronNestFCS/releases/latest) and download **one** language package:
 
-### TaskSystem
+```text
+IronNestFCS-Enhanced_v1.1.1_en-US.zip   English UI
+IronNestFCS-Enhanced_v1.1.1_zh-CN.zip   简体中文 UI
+```
 
-`IronNestFCS.Logic.dll` is hot-reloadable and owns the current firing intent:
+Both packages contain the same mod binaries. Only the default UI language is different.
 
-- T1–T4 task queue
-- one planning snapshot per planning round
-- ballistic solving
-- FirePlan creation
-- left/right gun-slot assignment
-- one-time First / Second ordering
-- gun elevation
-- shared turret azimuth
-- Review Console / Arm / Fire
-- UI and task history
+### Install
 
-Pressing **F9** destroys and recreates the TaskSystem.
+1. Close the game.
+2. Open the downloaded ZIP.
+3. Extract **everything directly into the game root directory**.
+4. Allow Windows to merge the `Mods`, `UserLibs`, and `UserData` folders if prompted.
+5. Start the game normally through MelonLoader.
 
-### Persistent LoadingSystem
+After extraction, these files should exist:
 
-The stable Host `IronNestFCS.dll` owns accepted loading transactions:
+```text
+<GameDir>/Mods/IronNestFCS.dll
+<GameDir>/UserLibs/IronNestFCS.Abstractions.dll
+<GameDir>/UserData/IronNestFCS/IronNestFCS.Logic.dll
+<GameDir>/UserData/IronNestFCS/language.txt
+```
 
-- independent left/right shell loading
-- independent left/right powder loading
-- accepted `Gun + Shell + Charge` transactions
-- physical loading-stage tracking
-- continued loading while TaskSystem is being reloaded
-
-Its lifecycle is independent from the TaskSystem.
-
-The design rule is simple:
-
-> **The physical game state is the highest source of truth. TaskSystem represents firing intent; Persistent LoadingSystem owns accepted loading transactions.**
+Do **not** place the whole ZIP inside the `Mods` folder.
 
 ---
 
-## FirePlan
+## How to use it in game
 
-A `FirePlan` is the fixed scheduling and execution unit for one task on one gun.
+### 1. Enter a heavy-turret scene
 
-It contains:
+Enter a scene that contains the heavy artillery turret and Tactical Map. The FCS will bind to the required game controls after the scene loads.
 
-- Task
-- Gun (`Left` / `Right`)
-- Shell
-- Charge
-- Elevation
-- Target Azimuth
-- ETA / planning metadata
+### 2. Place a target marker
 
-Once a FirePlan is created, its **Task + Gun** binding is not dynamically rewritten. If the assignment must change, the current plan is discarded and the task is planned again from a fresh physical snapshot.
+On the Tactical Map, move one of the numbered markers:
 
-### Planning snapshot
+```text
+T1 / T2 / T3 / T4
+```
 
-When a task enters the active planning round, the FCS reads the current state once:
+to the target you want to fire at.
 
-- left gun physical state
-- right gun physical state
-- persistent loading transactions
-- actual left/right elevation
-- actual current turret azimuth
+### 3. Select ammunition
 
-The target azimuth stored in the FirePlan remains fixed. The current turret azimuth is **not** continuously re-read to dynamically reshuffle plans.
+Use the FCS ammunition selector to choose the shell type for the task.
 
-This matters because the turret does not automatically return to zero after firing. A later task therefore plans from the turret's real current position instead of assuming `0°`.
+Optional controls:
+
+- **Auto Fire** — the FCS performs the final firing action automatically.
+- **Max Charge** — prefers the highest usable powder charge.
+
+### 4. Submit the fire mission
+
+Click the matching `T1`, `T2`, `T3`, or `T4` button in the FCS controls.
+
+The FCS will then automatically:
+
+```text
+read target
+→ read current gun/turret state
+→ solve ballistics
+→ assign a gun
+→ load ammunition
+→ set elevation
+→ rotate turret
+→ prepare Review / Arm
+```
+
+### 5. Fire
+
+- With **Auto Fire ON**, the FCS completes the final firing action when the gun and turret are physically ready.
+- With **Auto Fire OFF**, wait until the FCS has prepared the shot, then perform the final fire action manually.
+
+You can submit multiple targets in succession. The two guns are scheduled independently and a recovered gun can immediately accept another task.
 
 ---
 
-## Dual-Gun Scheduling
+## F9 hot reload
 
-Each gun has one execution slot. Loading and elevation are local to each gun; turret azimuth is shared.
+Press **F9** to reload the TaskSystem logic.
 
-### One-time firing-order comparison
+This clears/recreates the current task-planning state, but an already accepted physical loading operation is owned separately and continues running.
 
-When two FirePlans that have never been compared are present together:
-
-```text
-[A unpaired, B unpaired]
-        ↓
-compare once
-        ↓
-First / Second fixed
-```
-
-The system does not continuously re-arbitrate them.
-
-Example:
-
-```text
-A / B were already compared
-A fires
-C enters the newly free gun slot
-```
-
-The state becomes:
-
-```text
-B = already compared
-C = not yet compared
-→ no B/C re-comparison
-→ B remains next
-```
-
-After B finishes, another new plan can pair with C and be compared once.
-
-If only one FirePlan exists and there is no queued or currently-planning task, that plan commits directly instead of waiting indefinitely for a future task.
-
-### Rolling gun-slot reuse
-
-The system does not require both guns to finish an entire pair before accepting more work.
-
-As soon as one gun physically returns to a reusable state, its slot can accept the next task while the other gun continues its existing plan.
+This is useful if you want to reload the FCS logic without restarting the whole game.
 
 ---
 
-## Parallel Preparation and Shared Azimuth
+## Change UI language
 
-Local preparation is independent:
-
-```text
-Left : Loading → physical LoadedReady → Elevation
-Right: Loading → physical LoadedReady → Elevation
-```
-
-Elevation starts from the **real `LoadedReady` state**, not from an ETA prediction.
-
-The shared turret does not wait for loading to finish. As soon as the firing order is committed:
+The selected language is stored in:
 
 ```text
-First committed
-      ↓
-start Azimuth immediately
+<GameDir>/UserData/IronNestFCS/language.txt
 ```
 
-Loading and elevation continue in parallel.
-
-The final firing sequence requires both:
+Use either:
 
 ```text
-Azimuth Ready + Elevation Ready
+en-US
 ```
 
-before Review / Arm / Fire.
-
-### ETA
-
-ETA is used for planning and First / Second comparison only. Physical state remains the final execution gate.
-
-Conceptually:
+or:
 
 ```text
-Local ETA      = Loading ETA + Elevation ETA
-Fire-ready ETA = max(Local ETA, Azimuth ETA)
+zh-CN
 ```
 
-An already-running persistent loading transaction is allowed to make real progress while ballistic planning is happening. A fresh load does not receive "free" elapsed planning time before the FirePlan actually exists.
-
-Measured planning baselines from the current game build are approximately:
-
-```text
-Turret azimuth speed ≈ 4°/s
-Gun elevation speed  ≈ 2°/s
-Fresh load to LoadedReady ≈ 32s
-```
-
-These values are estimates for planning; actual firing still waits for physical readiness.
+Save the file and press **F9**, or restart the game.
 
 ---
 
-## Ballistic Calculator
+## Troubleshooting
 
-The FCS drives the game's native Ballistic Calculator directly:
+If the FCS does not appear or does not bind correctly:
 
-- sets target distance and direction
-- chooses shell and powder charge
-- supports `Max Charge`
-- performs the full Calculate Down / Up interaction
-- waits for the output to stabilize
-- rejects an unconfirmed result instead of firing with a suspected stale elevation
+1. Confirm MelonLoader is installed for the IL2CPP game build.
+2. Confirm the three DLLs are in the exact paths shown above.
+3. Restart the game after changing the Host or Abstractions DLLs.
+4. After the turret scene is fully loaded, press **F9** once.
+5. Check the diagnostic logs.
 
-### Per-task ballistic cache
-
-A single task may evaluate both guns before choosing one. If both candidates need the same shell and charge, the physical calculator is only operated once:
+Logs are stored under:
 
 ```text
-T1 Left  = HE C2 → Calculate → E=30.08°
-T1 Right = HE C2 → cache hit → reuse E=30.08°
+<GameDir>/UserData/IronNestFCS/Logs/
 ```
 
-This prevents one submitted task from generating two identical calculation stickers.
+Start with `problems.log`, then check the relevant category log or `all.log`.
 
-If the candidates genuinely require different solutions, such as `HE C2` versus `HE C3`, each unique solution is calculated separately.
+When reporting a bug, include the relevant log folder and describe what the turret was doing when the problem happened.
 
 ---
 
-## F9 Hot Reload and Persistent Loading
+## For developers
 
-F9 intentionally separates **firing intent** from **accepted physical loading work**:
+The source code remains split into a stable Host, shared Abstractions, and hot-reloadable Logic assembly. Development notes are available in [docs/FSC_MODULARIZATION_PLAN.md](docs/FSC_MODULARIZATION_PLAN.md).
 
-```text
-TaskSystem FirePlans / queue / order
-→ destroyed and recreated
+The repository also includes:
 
-Persistent LoadingSystem accepted transaction
-→ preserved and continues
-
-Physical chamber / reload state
-→ always remains the factual source of truth
-```
-
-This has been tested while loading was already in progress:
-
-```text
-Left  : FinalSequence
-Right : CloseShellGuide
-        ↓
-       F9
-        ↓
-new TaskSystem starts
-        ↓
-accepted loading transactions continue
-        ↓
-Left / Right → LoadedReady
-```
-
-After F9, newly submitted tasks read the current chamber, powder charge, reload state, elevation, and turret azimuth before creating new FirePlans.
-
----
-
-## Trigger Console
-
-Some full-release control objects do not expose a sufficiently reliable logical ON/OFF state, so the FCS also verifies the physical Transform positions of switches and arm levers.
-
-The final sequence is:
-
-```text
-Local Ready + Azimuth Ready
-        ↓
-Review Console
-        ↓
-Arm Left / Right
-        ↓
-Manual Fire or Auto Fire
-        ↓
-confirm the real chamber transition
-```
-
----
-
-## Supported Features
-
-- T1–T4 fire missions
-- dual-gun rolling task execution
-- target distance / direction reading
-- automatic ballistic solving
-- automatic ammunition and powder purchasing
-- automatic shell / powder loading
-- independent left/right elevation
-- shared turret azimuth control
-- one-time FirePlan order comparison
-- manual fire / Auto Fire
-- Max Charge
-- physical-state recovery
-- Alt-Tab focus protection
-- F9 TaskSystem hot reload
-- categorized diagnostics
-
-Supported ammunition includes multiple in-game shell types such as:
-
-`AP / HCHE / HE / STAR / SMK / PCLM ...`
-
-The internal game enum may still use `PLCM`; the FCS UI uses the displayed spelling `PCLM`.
-
----
-
-## Verified In-Game Behavior
-
-The current architecture has been validated in the game for the following cases:
-
-- one task with identical left/right `Shell + Charge` candidates performs only one physical ballistic Calculate
-- left and right guns load independently
-- each gun starts elevation after its own physical `LoadedReady`
-- shared azimuth starts immediately after firing order commitment instead of waiting for loading
-- two unpaired FirePlans are compared exactly once
-- an already-compared Second plan is promoted without re-comparison
-- gun slots are reused on a rolling basis
-- new plans use the turret's real current azimuth after previous shots
-- F9 destroys TaskSystem state without clearing an already-loaded physical round
-- F9 during active `CloseShellGuide / FinalSequence` loading preserves the accepted transaction until `LoadedReady`
-
----
-
-## Project Structure
-
-| Project | Role | Description |
-| --- | --- | --- |
-| `IronNestFCS` | **Stable Host** | MelonLoader entry point, Persistent LoadingSystem, Logic lifecycle, F9 |
-| `IronNestFCS.Abstractions` | **Shared contract** | Host / Logic interfaces and loading transaction types |
-| `IronNestFCS.Logic` | **TaskSystem** | map, FirePlanner, FirePlanExecutor, turret/elevation, trigger, UI |
-| `IronNestFCS.CustomRecords` | **Independent mod** | custom record-player functionality; no direct dependency on the FCS core |
-
-Key files:
-
-- [PersistentLoadingSystem.cs](IronNestFCS/PersistentLoadingSystem.cs)
-- [LogicReloader.cs](IronNestFCS/LogicReloader.cs)
-- [FirePlan.cs](IronNestFCS.Logic/Scheduling/FirePlan.cs)
-- [FirePlanner.cs](IronNestFCS.Logic/Scheduling/FirePlanner.cs)
-- [TaskDispatcher.cs](IronNestFCS.Logic/Scheduling/TaskDispatcher.cs)
-- [FirePlanExecutor.cs](IronNestFCS.Logic/Execution/FirePlanExecutor.cs)
-- [FSC.cs](IronNestFCS.Logic/FSC.cs)
-
-The detailed refactor design record is available in [docs/FSC_MODULARIZATION_PLAN.md](docs/FSC_MODULARIZATION_PLAN.md).
-
----
-
-## Development
-
-For Logic-only changes:
-
-```powershell
-dotnet build .\IronNestFCS.Logic\IronNestFCS.Logic.csproj -c Debug `
-  -p:GameDir="D:\Steam\steamapps\common\Iron Nest Heavy Turret Simulator"
-```
-
-Then return to the game and press **F9**. A full process restart is not required for normal `IronNestFCS.Logic` changes.
-
-When the Host or Abstractions contract changes, run the full deployment script and restart the game once.
-
----
-
-## Diagnostic Logs
-
-Logs are written to:
-
-```text
-<GameDir>\UserData\IronNestFCS\Logs\yyyy-MM-dd\run-HHmmss-pidNNNN\
-```
-
-| File | Purpose |
-| --- | --- |
-| `all.log` | all events |
-| `dispatch.log` | task queue, planning, FirePlan creation |
-| `ballistic.log` | calculator input, stable result, planning cache |
-| `reload.log` | persistent loading, chamber state, reload controller state |
-| `order.log` | one-time First / Second ordering and promotion |
-| `turret.log` | target markers and shared azimuth |
-| `trigger.log` | Review / Arm / Fire and physical switch state |
-| `problems.log` | warnings and failures that need attention |
-| `arbitration.log` | legacy compatibility category; normally mostly empty in the current architecture |
-
-For troubleshooting, start with:
-
-```text
-problems.log
-→ relevant category log
-→ all.log
-```
+- `tools/Deploy.ps1` — build and deploy a development copy
+- `tools/Build-ReleasePackages.ps1` — generate the bilingual release ZIPs
 
 ---
 
 ## Credits
 
 IronNestFCS Enhanced is based on the original [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS). Credit for the original implementation belongs to its original author and contributors.
-
-This fork focuses on full-release compatibility, reliability, physical-state recovery, persistent loading, and the current dual-gun FirePlan architecture.
 
 ## License
 
