@@ -15,7 +15,7 @@ $DeclaredVersion = Get-IronNestFcsVersion -RepoRoot $RepoRoot
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = $DeclaredVersion
 }
-elif ($Version -ne $DeclaredVersion) {
+elseif ($Version -ne $DeclaredVersion) {
     throw "Package version v$Version does not match Host version v$DeclaredVersion. Update the Host version first or use tools\Release.ps1."
 }
 
