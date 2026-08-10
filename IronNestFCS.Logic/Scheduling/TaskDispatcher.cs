@@ -102,18 +102,37 @@ internal sealed class TaskDispatcher {
 
         // Exclusion only applies to the exact fixed loaded configuration already tried and rejected.
         // Shell-only or empty is a new usable physical state.
-        if (LeftTask == null && !IsGunExcluded(task, LeftRight.Left)
-            && leftState != null && leftState.CanReuseLoadedFor(task.bulletType)) {
-            slot = LeftRight.Left;
+        var leftReusable = LeftTask == null
+                           && !IsGunExcluded(task, LeftRight.Left)
+                           && leftState != null
+                           && leftState.CanReuseLoadedFor(task.bulletType);
+        var rightReusable = RightTask == null
+                            && !IsGunExcluded(task, LeftRight.Right)
+                            && rightState != null
+                            && rightState.CanReuseLoadedFor(task.bulletType);
+
+        if (leftReusable || rightReusable) {
+            if (leftReusable && rightReusable) {
+                var preferredCharge = BallisticCalculator.MinimumCharge(task.distance);
+                var leftScore = LoadedRoundDispatchScore(leftState!.PowderCharges, preferredCharge);
+                var rightScore = LoadedRoundDispatchScore(rightState!.PowderCharges, preferredCharge);
+
+                // Preserve deterministic Left-first behavior only for a genuine suitability tie. Otherwise use
+                // the already-loaded round whose charge best fits the target's normal charge band. This matters
+                // especially after F9, where both physical rounds survive but their C-values can differ.
+                slot = rightScore < leftScore ? LeftRight.Right : LeftRight.Left;
+                var chosen = slot == LeftRight.Left ? leftState : rightState;
+                MelonLogger.Msg(
+                    $"[FCS] T{task.targetId}: preloaded pairing preferred=C{preferredCharge}; " +
+                    $"Left=C{leftState.PowderCharges} score={leftScore}, Right=C{rightState.PowderCharges} score={rightScore}; " +
+                    $"choosing {slot} C{chosen!.PowderCharges}");
+            }
+            else {
+                slot = leftReusable ? LeftRight.Left : LeftRight.Right;
+            }
+
             mode = GunTaskMode.ReuseLoadedRound;
-            ResetPhysicalRecoveryTracking(LeftRight.Left, leftState);
-            return true;
-        }
-        if (RightTask == null && !IsGunExcluded(task, LeftRight.Right)
-            && rightState != null && rightState.CanReuseLoadedFor(task.bulletType)) {
-            slot = LeftRight.Right;
-            mode = GunTaskMode.ReuseLoadedRound;
-            ResetPhysicalRecoveryTracking(LeftRight.Right, rightState);
+            ResetPhysicalRecoveryTracking(slot, slot == LeftRight.Left ? leftState! : rightState!);
             return true;
         }
 
@@ -146,6 +165,17 @@ internal sealed class TaskDispatcher {
         }
 
         return false;
+    }
+
+    private static int LoadedRoundDispatchScore(int actualCharge, int preferredCharge) {
+        var delta = actualCharge - preferredCharge;
+        if (delta == 0)
+            return 0;
+
+        // A higher-than-normal charge is usually still a usable ballistic configuration and will be verified by
+        // the real calculator. A charge below MinimumCharge is much more likely to be out of range, so prefer any
+        // available over-charge before an under-charge while still allowing the latter as a fallback.
+        return delta > 0 ? delta : 100 - delta;
     }
 
     private static int GunMask(LeftRight side) => side == LeftRight.Left ? 1 : 2;
