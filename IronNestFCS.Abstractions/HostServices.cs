@@ -21,7 +21,7 @@ public enum ShellTypeCode
     HE = 10,
     INCN = 11,
     LE = 12,
-    PLCM = 13,
+    PCLM = 13,
     PHGN = 14,
     PRPG = 15,
     SMK = 16,
