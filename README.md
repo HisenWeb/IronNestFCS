@@ -94,8 +94,8 @@ Install and run the game with MelonLoader at least once before installing the mo
 Open the [latest GitHub Release](https://github.com/HisenWeb/IronNestFCS/releases/latest) and download **one** language package:
 
 ```text
-IronNestFCS-Enhanced_v1.1.1_en-US.zip   English UI
-IronNestFCS-Enhanced_v1.1.1_zh-CN.zip   简体中文 UI
+IronNestFCS-Enhanced_v*_en-US.zip   English UI
+IronNestFCS-Enhanced_v*_zh-CN.zip   简体中文 UI
 ```
 
 Both packages contain the same mod binaries. Only the default UI language is different.
