@@ -8,17 +8,21 @@ namespace IronNestFCS.Logic.FCS;
 /// Temporary targeted diagnostic for the fast azimuth lever.
 /// It never writes to game state. On bind it dumps the native IL2CPP component/API
 /// surface under Aiming Console/Locking Lever Rotation/Lever, then logs lever motion
-/// and turret response only when the lever actually moves.
+/// plus low-frequency turret response while the lever is held.
 /// </summary>
 internal sealed class AzimuthControlDiagnosticProbe
 {
     private const float SampleIntervalSeconds = 0.10f;
+    private const float HoldLogIntervalSeconds = 0.25f;
     private const float LeverChangeToleranceDegrees = 0.20f;
+    private const float ActiveLeverThresholdDegrees = 0.50f;
+    private const float ActiveVelocityThreshold = 0.05f;
     private const int ApiChildDepth = 3;
 
     private Transform? _fastLever;
     private TurretController? _turretController;
     private float _nextSampleTime;
+    private float _nextHoldLogTime;
     private float _lastLeverY;
     private bool _haveLeverY;
     private bool _bound;
@@ -39,6 +43,7 @@ internal sealed class AzimuthControlDiagnosticProbe
         _lastLeverY = NormalizeSignedAngle(_fastLever.localEulerAngles.y);
         _haveLeverY = true;
         _nextSampleTime = Time.realtimeSinceStartup + SampleIntervalSeconds;
+        _nextHoldLogTime = Time.realtimeSinceStartup + HoldLogIntervalSeconds;
         _bound = true;
 
         MelonLogger.Msg(
@@ -48,8 +53,9 @@ internal sealed class AzimuthControlDiagnosticProbe
         DumpApiTree(_fastLever, ApiChildDepth);
 
         MelonLogger.Msg(
-            "[FCS DIAG AZ API] TEST: move FAST azimuth lever left and hold ~1s, return center ~1s, " +
-            "move right and hold ~1s, then return center. No automatic control is applied by this probe.");
+            "[FCS DIAG AZ API] TEST: for each direction, hold FAST azimuth lever at full deflection until speed stabilizes, " +
+            "then move toward center until the slowest sustained non-zero speed stabilizes, then return to center and stop. " +
+            "Repeat in the opposite direction. No automatic control is applied by this probe.");
     }
 
     public void Update()
@@ -71,6 +77,20 @@ internal sealed class AzimuthControlDiagnosticProbe
             _lastLeverY = leverY;
             _haveLeverY = true;
         }
+
+        if (now >= _nextHoldLogTime)
+        {
+            _nextHoldLogTime = now + HoldLogIntervalSeconds;
+
+            var movingLever = Mathf.Abs(leverY) >= ActiveLeverThresholdDegrees;
+            var movingTurret = _turretController != null &&
+                               Mathf.Abs(_turretController.rotationVelocity) >= ActiveVelocityThreshold;
+            if (movingLever || movingTurret)
+            {
+                MelonLogger.Msg(
+                    $"[FCS DIAG AZ API] HOLD y={leverY:F2}° {GetTurretState()}");
+            }
+        }
     }
 
     public void Reset()
@@ -80,6 +100,7 @@ internal sealed class AzimuthControlDiagnosticProbe
         _bound = false;
         _haveLeverY = false;
         _nextSampleTime = 0f;
+        _nextHoldLogTime = 0f;
         _lastLeverY = 0f;
     }
 
