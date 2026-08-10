@@ -28,7 +28,7 @@ public class FcsModule : IFcsModule
         var rightPhysical = bound ? SafePhysicalSummary("Right") : "unbound";
         FcsDiagnosticLog.MarkBindResult(bound, _fcs.FirePriority.Generation, leftPhysical, rightPhysical);
 
-        if (bound)
+        if (bound && FcsDiagnosticLog.DetailedDiagnosticsEnabled)
         {
             PhysicalStateProbe.LogCurrentState();
             TriggerConsoleProbe.BindAndLog();
@@ -44,7 +44,7 @@ public class FcsModule : IFcsModule
             return;
 
         fcs.Update();
-        if (fcs.IsBound)
+        if (fcs.IsBound && FcsDiagnosticLog.DetailedDiagnosticsEnabled)
         {
             PhysicalStateProbe.Tick();
             TriggerConsoleProbe.Tick();
