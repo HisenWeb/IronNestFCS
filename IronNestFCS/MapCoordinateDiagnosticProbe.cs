@@ -5,7 +5,7 @@ using UnityEngine;
 namespace IronNestFCS;
 
 /// <summary>
-/// Diagnostic-only probe for the legacy-vs-converted map-coordinate investigation.
+/// Diagnostic-only probe for legacy marker, converted marker, and TurretLocation origins.
 /// Lives in the stable Host so it keeps sampling across TaskSystem F9 unload/reload gaps.
 /// It never mutates scene objects or participates in fire-control calculations.
 /// </summary>
@@ -48,7 +48,7 @@ internal sealed class MapCoordinateDiagnosticProbe : IDisposable
             _writer = new StreamWriter(stream) { AutoFlush = true };
             WriteRaw(
                 $"START | processStart={processStarted:yyyy-MM-dd HH:mm:ss} | pid={process.Id} | " +
-                $"sample={SampleIntervalSeconds:F2}s | diagnostic-only legacy-active/new-compare-only");
+                $"sample={SampleIntervalSeconds:F2}s | diagnostic-only legacy-active/new-compare-only/TurretLocation-compare-only");
         }
         catch
         {
@@ -152,6 +152,15 @@ internal sealed class MapCoordinateDiagnosticProbe : IDisposable
         var legacy = turret.localPosition;
         var converted = map.InverseTransformPoint(turretWorld);
 
+        var turretLocationObject = GameObject.Find("TurretLocation");
+        var turretLocation = turretLocationObject != null ? turretLocationObject.transform : null;
+        var turretLocationParent = turretLocation != null ? turretLocation.parent : null;
+        var turretLocationExists = turretLocation != null;
+        var turretLocationWorld = turretLocationExists ? turretLocation!.position : Vector3.zero;
+        var turretLocationOnMap = turretLocationExists
+            ? map.InverseTransformPoint(turretLocationWorld)
+            : Vector3.zero;
+
         return new Snapshot
         {
             TurretId = turret.GetInstanceID(),
@@ -186,6 +195,27 @@ internal sealed class MapCoordinateDiagnosticProbe : IDisposable
             LegacyOrigin = legacy,
             ConvertedOrigin = converted,
             OriginDelta = converted - legacy,
+
+            TurretLocationExists = turretLocationExists,
+            TurretLocationId = turretLocationExists ? turretLocation!.GetInstanceID() : 0,
+            TurretLocationParentId = turretLocationParent != null ? turretLocationParent.GetInstanceID() : 0,
+            TurretLocationSibling = turretLocationExists ? turretLocation!.GetSiblingIndex() : -1,
+            TurretLocationParentChildCount = turretLocationParent != null ? turretLocationParent.childCount : 0,
+            TurretLocationPath = GetPath(turretLocation),
+            TurretLocationParentPath = GetPath(turretLocationParent),
+            TurretLocationActiveSelf = turretLocationObject != null && turretLocationObject.activeSelf,
+            TurretLocationActiveInHierarchy = turretLocationObject != null && turretLocationObject.activeInHierarchy,
+            TurretLocationLocalPosition = turretLocationExists ? turretLocation!.localPosition : Vector3.zero,
+            TurretLocationWorldPosition = turretLocationWorld,
+            TurretLocationLocalRotation = turretLocationExists ? turretLocation!.localRotation : Quaternion.identity,
+            TurretLocationWorldRotation = turretLocationExists ? turretLocation!.rotation : Quaternion.identity,
+            TurretLocationLocalEuler = turretLocationExists ? turretLocation!.localEulerAngles : Vector3.zero,
+            TurretLocationWorldEuler = turretLocationExists ? turretLocation!.eulerAngles : Vector3.zero,
+            TurretLocationLocalScale = turretLocationExists ? turretLocation!.localScale : Vector3.zero,
+            TurretLocationLossyScale = turretLocationExists ? turretLocation!.lossyScale : Vector3.zero,
+            TurretLocationOnMap = turretLocationOnMap,
+            TurretLocationMinusLegacy = turretLocationExists ? turretLocationOnMap - legacy : Vector3.zero,
+            TurretLocationMinusConverted = turretLocationExists ? turretLocationOnMap - converted : Vector3.zero,
         };
     }
 
@@ -222,6 +252,25 @@ internal sealed class MapCoordinateDiagnosticProbe : IDisposable
         AddVectorChange(changes, "legacyOrigin", before.LegacyOrigin, after.LegacyOrigin, PositionTolerance);
         AddVectorChange(changes, "convertedOrigin", before.ConvertedOrigin, after.ConvertedOrigin, PositionTolerance);
         AddVectorChange(changes, "originDelta", before.OriginDelta, after.OriginDelta, PositionTolerance);
+
+        if (before.TurretLocationExists != after.TurretLocationExists) changes.Add("turretLocation.exists");
+        if (before.TurretLocationId != after.TurretLocationId) changes.Add("turretLocation.id");
+        if (before.TurretLocationParentId != after.TurretLocationParentId) changes.Add("turretLocation.parent");
+        if (before.TurretLocationSibling != after.TurretLocationSibling) changes.Add("turretLocation.sibling");
+        if (before.TurretLocationParentChildCount != after.TurretLocationParentChildCount) changes.Add("turretLocation.parentChildCount");
+        if (before.TurretLocationActiveSelf != after.TurretLocationActiveSelf) changes.Add("turretLocation.activeSelf");
+        if (before.TurretLocationActiveInHierarchy != after.TurretLocationActiveInHierarchy) changes.Add("turretLocation.activeInHierarchy");
+        if (!string.Equals(before.TurretLocationPath, after.TurretLocationPath, StringComparison.Ordinal)) changes.Add("turretLocation.path");
+        if (!string.Equals(before.TurretLocationParentPath, after.TurretLocationParentPath, StringComparison.Ordinal)) changes.Add("turretLocation.parentPath");
+        AddVectorChange(changes, "turretLocation.localPos", before.TurretLocationLocalPosition, after.TurretLocationLocalPosition, PositionTolerance);
+        AddVectorChange(changes, "turretLocation.worldPos", before.TurretLocationWorldPosition, after.TurretLocationWorldPosition, PositionTolerance);
+        AddRotationChange(changes, "turretLocation.localRot", before.TurretLocationLocalRotation, after.TurretLocationLocalRotation);
+        AddRotationChange(changes, "turretLocation.worldRot", before.TurretLocationWorldRotation, after.TurretLocationWorldRotation);
+        AddVectorChange(changes, "turretLocation.localScale", before.TurretLocationLocalScale, after.TurretLocationLocalScale, ScaleTolerance);
+        AddVectorChange(changes, "turretLocation.lossyScale", before.TurretLocationLossyScale, after.TurretLocationLossyScale, ScaleTolerance);
+        AddVectorChange(changes, "turretLocation.onMap", before.TurretLocationOnMap, after.TurretLocationOnMap, PositionTolerance);
+        AddVectorChange(changes, "turretLocation-minus-legacy", before.TurretLocationMinusLegacy, after.TurretLocationMinusLegacy, PositionTolerance);
+        AddVectorChange(changes, "turretLocation-minus-converted", before.TurretLocationMinusConverted, after.TurretLocationMinusConverted, PositionTolerance);
 
         return changes;
     }
@@ -276,7 +325,14 @@ internal sealed class MapCoordinateDiagnosticProbe : IDisposable
             $"localPos={V(s.MapLocalPosition)} worldPos={V(s.MapWorldPosition)} " +
             $"localEuler={V(s.MapLocalEuler)} worldEuler={V(s.MapWorldEuler)} " +
             $"localScale={V(s.MapLocalScale)} lossyScale={V(s.MapLossyScale)} | " +
-            $"legacyOrigin={V(s.LegacyOrigin)} convertedOrigin={V(s.ConvertedOrigin)} delta={V(s.OriginDelta)}";
+            $"legacyOrigin={V(s.LegacyOrigin)} convertedOrigin={V(s.ConvertedOrigin)} delta={V(s.OriginDelta)} | " +
+            $"turretLocation exists={s.TurretLocationExists} id=#{s.TurretLocationId} parent=#{s.TurretLocationParentId} " +
+            $"sibling={s.TurretLocationSibling}/{s.TurretLocationParentChildCount} active={s.TurretLocationActiveSelf}/{s.TurretLocationActiveInHierarchy} " +
+            $"path={s.TurretLocationPath} parentPath={s.TurretLocationParentPath} " +
+            $"localPos={V(s.TurretLocationLocalPosition)} worldPos={V(s.TurretLocationWorldPosition)} " +
+            $"localEuler={V(s.TurretLocationLocalEuler)} worldEuler={V(s.TurretLocationWorldEuler)} " +
+            $"localScale={V(s.TurretLocationLocalScale)} lossyScale={V(s.TurretLocationLossyScale)} " +
+            $"onMap={V(s.TurretLocationOnMap)} minusLegacy={V(s.TurretLocationMinusLegacy)} minusConverted={V(s.TurretLocationMinusConverted)}";
     }
 
     private static string V(Vector3 value) => $"({value.x:F5},{value.y:F5},{value.z:F5})";
@@ -331,5 +387,26 @@ internal sealed class MapCoordinateDiagnosticProbe : IDisposable
         public Vector3 LegacyOrigin;
         public Vector3 ConvertedOrigin;
         public Vector3 OriginDelta;
+
+        public bool TurretLocationExists;
+        public int TurretLocationId;
+        public int TurretLocationParentId;
+        public int TurretLocationSibling;
+        public int TurretLocationParentChildCount;
+        public bool TurretLocationActiveSelf;
+        public bool TurretLocationActiveInHierarchy;
+        public string TurretLocationPath = "";
+        public string TurretLocationParentPath = "";
+        public Vector3 TurretLocationLocalPosition;
+        public Vector3 TurretLocationWorldPosition;
+        public Quaternion TurretLocationLocalRotation;
+        public Quaternion TurretLocationWorldRotation;
+        public Vector3 TurretLocationLocalEuler;
+        public Vector3 TurretLocationWorldEuler;
+        public Vector3 TurretLocationLocalScale;
+        public Vector3 TurretLocationLossyScale;
+        public Vector3 TurretLocationOnMap;
+        public Vector3 TurretLocationMinusLegacy;
+        public Vector3 TurretLocationMinusConverted;
     }
 }
