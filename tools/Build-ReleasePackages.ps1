@@ -2,7 +2,7 @@ param(
     [string]$GameDir = "D:\Steam\steamapps\common\Iron Nest Heavy Turret Simulator",
     [ValidateSet("Release")]
     [string]$Configuration = "Release",
-    [string]$Version = "1.1.1",
+    [string]$Version = "1.1.2",
     [string]$OutputDir = ""
 )
 
