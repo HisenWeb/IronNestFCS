@@ -297,7 +297,23 @@ Logs are stored under:
 <GameDir>/UserData/IronNestFCS/Logs/
 ```
 
-Start with `problems.log`, then check the relevant category log or `all.log`.
+By default, only the compact `problems.log` is written. Normal play no longer continuously generates the full categorized diagnostic set.
+
+To reproduce a bug with full diagnostics, open:
+
+```text
+<GameDir>/UserData/IronNestFCS/diagnostics.txt
+```
+
+change it to:
+
+```text
+on
+```
+
+save the file, then press **F9**. Full logging will resume with `all.log`, `dispatch.log`, `ballistic.log`, `reload.log`, `order.log`, `arbitration.log`, `turret.log`, `trigger.log`, and `problems.log`. When troubleshooting is finished, change `diagnostics.txt` back to `off` and press F9 again.
+
+If `diagnostics.txt` does not exist, the mod creates it automatically with `off` as the default.
 
 When reporting a bug, include the relevant log folder and describe what the turret was doing when the problem happened.
 
