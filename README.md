@@ -171,6 +171,8 @@ On the **left side** of the Tactical Map, use one of the red numbered markers:
 
 Drag it to the map position you want to attack. Red marker `1` corresponds to task `T1`, `2` to `T2`, and so on.
 
+![Red target markers 1–4 on the left side of the Tactical Map](docs/images/ironnest_usage-target-markers.jpg)
+
 ### 3. Select ammunition
 
 Use the FCS controls on the right side of the map to choose the shell type for this task.
@@ -183,6 +185,8 @@ Optional controls:
 ### 4. Submit the fire mission
 
 Click the task button on the right that matches the marker you placed:
+
+![T1–T4 mission submit buttons on the right side of the Tactical Map](docs/images/ironnest_usage-submit-buttons.jpg)
 
 ```text
 red 1 → T1
