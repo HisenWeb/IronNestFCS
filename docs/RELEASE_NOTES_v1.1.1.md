@@ -2,12 +2,8 @@
 
 ## Downloads / 下载
 
-> v1.1.1 was packaged before the project was renamed to **IronNestFCS Smart**, so the published ZIP filenames still use the previous `Enhanced` name.
->
-> v1.1.1 的安装包在项目更名为 **IronNestFCS Smart** 之前已经生成，因此已发布 ZIP 文件名仍保留旧的 `Enhanced` 名称。
-
-- `IronNestFCS-Enhanced_v1.1.1_en-US.zip` — English UI
-- `IronNestFCS-Enhanced_v1.1.1_zh-CN.zip` — 简体中文 UI
+- `IronNestFCS-Smart_v1.1.1_en-US.zip` — English UI
+- `IronNestFCS-Smart_v1.1.1_zh-CN.zip` — 简体中文 UI
 
 Both packages contain the **same binaries**. Only `UserData/IronNestFCS/language.txt` is different.
 
@@ -29,7 +25,6 @@ Extract the selected archive directly into the **Iron Nest: Heavy Turret Simulat
 - Manual fire and Auto Fire support.
 - Max Charge and automatic ammunition/powder purchasing.
 - English and Simplified Chinese player-facing UI packages.
-- Canonical `PCLM` naming inside the FCS domain while retaining compatibility with the game's legacy `PLCM` identifier.
 - Categorized diagnostics for planning, loading, firing order, turret, trigger, and failures.
 
 ## 主要更新
@@ -42,7 +37,6 @@ Extract the selected archive directly into the **Iron Nest: Heavy Turret Simulat
 - 支持手动击发与 Auto Fire。
 - 支持 Max Charge、自动购买炮弹和药包。
 - 提供英文与简体中文玩家 UI 安装包。
-- FCS 内部统一使用正式拼写 `PCLM`，同时兼容游戏遗留的 `PLCM` 标识。
 - 规划、装填、射击顺序、炮塔、Trigger 与异常均有分类诊断日志。
 
 ---
