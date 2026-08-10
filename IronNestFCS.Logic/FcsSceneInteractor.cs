@@ -76,6 +76,7 @@ public class FcsSceneInteractor {
         GameObject? autoFireButton = null;
         autoFireButton = AddButton(() => {
             AutoFire = !AutoFire;
+            MelonLogger.Msg($"[FCS] AutoFire toggled {(AutoFire ? "ON" : "OFF")}");
             SetColor(autoFireButton, AutoFire ? Color.red : Color.white);
             if (autoFireLabel != null)
                 autoFireLabel.text = AutoFire ? "自动开火：开" : "自动开火：关";
@@ -95,6 +96,7 @@ public class FcsSceneInteractor {
         GameObject maxChargeButton = null;
         maxChargeButton = AddButton(() => {
             maxCharge = !maxCharge;
+            MelonLogger.Msg($"[FCS] MaxCharge toggled {(maxCharge ? "ON" : "OFF")}");
             SetColor(maxChargeButton, maxCharge ? Color.red : Color.white);
             if (maxChargeLabel != null)
                 maxChargeLabel.text = maxCharge ? "最大装药：开" : "最大装药：关";
