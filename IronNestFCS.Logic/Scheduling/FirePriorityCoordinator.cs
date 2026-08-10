@@ -1,4 +1,5 @@
 using IronNestFCS.Logic.FCS;
+using IronNestFCS.Logic.Localization;
 using MelonLoader;
 using UnityEngine;
 
@@ -11,7 +12,7 @@ namespace IronNestFCS.Logic.Scheduling;
 internal sealed class FirePriorityCoordinator
 {
     private int _generation;
-    private string _statusText = "射击顺序：未提交";
+    private string _statusText = FcsLocalization.T("射击顺序：未提交", "Firing order: not committed");
     private string _leftDetail = "";
     private string _rightDetail = "";
 
@@ -23,7 +24,7 @@ internal sealed class FirePriorityCoordinator
     public void Reset()
     {
         _generation++;
-        _statusText = "射击顺序：未提交（已重置）";
+        _statusText = FcsLocalization.T("射击顺序：未提交（已重置）", "Firing order: not committed (reset)");
         _leftDetail = "";
         _rightDetail = "";
     }
@@ -79,7 +80,9 @@ internal sealed class FirePriorityCoordinator
         a.Compared = true;
         b.Compared = true;
         UpdateDetails(a, b);
-        _statusText = $"射击顺序：T{first.Task.targetId} → T{second.Task.targetId}（一次性比对）";
+        _statusText = FcsLocalization.T(
+            $"射击顺序：T{first.Task.targetId} → T{second.Task.targetId}（一次性比对）",
+            $"Firing order: T{first.Task.targetId} → T{second.Task.targetId} (compared once)");
         MelonLogger.Msg($"[FCS Order] paired once: {first.Label} first, {second.Label} second; {reason}");
         return first;
     }
@@ -93,25 +96,34 @@ internal sealed class FirePriorityCoordinator
             plan.RefreshEstimatedReadyAt(FcsRuntimeClock.Now);
 
         UpdateDetails(plan, null);
-        _statusText = $"射击顺序：T{plan.Task.targetId} 单独执行（{reason}）";
-        MelonLogger.Msg($"[FCS Order] single committed: {plan.Label}; {reason}");
+        var uiReason = FcsLocalization.UiReason(reason);
+        _statusText = FcsLocalization.T(
+            $"射击顺序：T{plan.Task.targetId} 单独执行（{uiReason}）",
+            $"Firing order: T{plan.Task.targetId} single commit ({uiReason})");
+        MelonLogger.Msg($"[FCS Order] single committed: {plan.Label}; {FcsLocalization.LogReason(reason)}");
     }
 
     public void PromoteCommitted(FirePlan plan)
     {
-        _statusText = $"射击顺序：T{plan.Task.targetId} 按既定顺序执行";
+        _statusText = FcsLocalization.T(
+            $"射击顺序：T{plan.Task.targetId} 按既定顺序执行",
+            $"Firing order: T{plan.Task.targetId} promoted in committed order");
         MelonLogger.Msg($"[FCS Order] promoting previously compared plan without re-compare: {plan.Label}");
     }
 
     public void MarkWaitingForPair(FirePlan plan)
     {
         UpdateDetails(plan, null);
-        _statusText = $"射击顺序：T{plan.Task.targetId} 未比对，等待另一个 FirePlan";
+        _statusText = FcsLocalization.T(
+            $"射击顺序：T{plan.Task.targetId} 未比对，等待另一个 FirePlan",
+            $"Firing order: T{plan.Task.targetId} unpaired, waiting for another FirePlan");
     }
 
     public void MarkShot(FirePlan plan)
     {
-        _statusText = $"射击顺序：T{plan.Task.targetId} 已击发，推进既定顺序";
+        _statusText = FcsLocalization.T(
+            $"射击顺序：T{plan.Task.targetId} 已击发，推进既定顺序",
+            $"Firing order: T{plan.Task.targetId} fired, advancing committed order");
     }
 
     private void UpdateDetails(FirePlan? a, FirePlan? b)
@@ -126,12 +138,20 @@ internal sealed class FirePriorityCoordinator
         if (plan == null)
             return "";
 
+        var sideName = side == LeftRight.Left
+            ? FcsLocalization.T("左炮", "Left")
+            : FcsLocalization.T("右炮", "Right");
+
         if (plan.EtaKnown)
         {
             var eta = Math.Max(0f, plan.EstimatedReadyAt - FcsRuntimeClock.Now);
-            return $"{side} T{plan.Task.targetId}: 计划ETA {eta:F1}s，E{plan.Elevation:F1} / Az{plan.Azimuth:F1}";
+            return FcsLocalization.T(
+                $"{sideName} T{plan.Task.targetId}: 计划ETA {eta:F1}s，E{plan.Elevation:F1} / Az{plan.Azimuth:F1}",
+                $"{sideName} T{plan.Task.targetId}: planned ETA {eta:F1}s, E{plan.Elevation:F1} / Az{plan.Azimuth:F1}");
         }
 
-        return $"{side} T{plan.Task.targetId}: ETA待测，alignment={plan.AlignmentScore:F1}";
+        return FcsLocalization.T(
+            $"{sideName} T{plan.Task.targetId}: ETA待测，alignment={plan.AlignmentScore:F1}",
+            $"{sideName} T{plan.Task.targetId}: ETA unavailable, alignment={plan.AlignmentScore:F1}");
     }
 }
