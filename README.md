@@ -12,6 +12,16 @@ After you place a target marker on the Tactical Map, IronNestFCS Smart can handl
 
 ---
 
+## Design philosophy
+
+**Automate the work, not the tactics.**
+
+You choose the targets, ammunition, and what goes into the task queue. Smart executes the plan.
+
+Submit T1–T4 missions in sequence to build a task queue. If the plan or queue is wrong, press **F9** to clear the current tasks, waiting queue, and firing order, then submit them again. Physical loading already in progress keeps going, and the new plan uses the guns' real current state.
+
+---
+
 ## What this mod does
 
 The basic idea is simple: **you decide where to shoot and which ammunition to use; the FCS handles most of the repetitive heavy-turret work.**
@@ -64,11 +74,11 @@ The mod reads the game's real objects and physical state directly. It does **not
 
 ## Highlights
 
+- **Build a task queue with T1–T4** — submit several missions in the order you want, and the FCS keeps both guns working through them.
+- **Press F9 to replan** — clear the current tasks, waiting queue, and firing order, then submit a new plan without pretending an already-started physical load never happened.
 - **Place a target and let the FCS do the repetitive work** — calculate the shot, choose a gun, load ammunition, aim, and prepare the trigger for you.
 - **Both guns can stay busy at the same time** — one gun can be loading or aiming while the other is doing its own preparation.
-- **Better for several targets in a row** — when one gun finishes and becomes usable again, it can immediately start the next queued target instead of waiting for both guns to finish together.
 - **It uses where the turret really is now** — after a shot, the turret does not have to return to zero before the next target is planned.
-- **F9 can reset the current missions and let you submit them again** — useful if a target or task was wrong; a physical ammunition load already in progress is not forcibly interrupted.
 - **Ballistic calculation is less likely to use an old result** — the mod waits for the calculator output to settle before trusting it.
 - **One target will not needlessly press Calculate twice for the same solution** — identical left/right possibilities reuse the result already obtained.
 - **Can buy missing shells and powder automatically** when the selected task needs them.
