@@ -25,6 +25,7 @@ public class FcsHostMod : MelonMod
     private LogicReloader? _reloader;
     private bool _sceneBindPending;
     private float _nextBindAttemptAt;
+    private bool _shutdownStarted;
 
     public override void OnInitializeMelon()
     {
@@ -125,12 +126,30 @@ public class FcsHostMod : MelonMod
         catch (Exception ex) { MelonLogger.Error($"Logic.OnGui() exception: {ex}"); }
     }
 
-    public override void OnDeinitializeMelon()
+    private void ShutdownRuntime()
     {
+        if (_shutdownStarted)
+            return;
+
+        _shutdownStarted = true;
         _sceneBindPending = false;
+
+        // OnApplicationQuit runs before Unity tears down scene objects. Release TaskSystem and persistent
+        // physical-click ownership here while LookAtTarget components are still valid. OnDeinitializeMelon
+        // remains a fallback for non-application unload paths and is guarded against double disposal.
         _reloader?.Unload();
         _reloader = null;
         _hostServices.LoadingRuntime.Dispose();
+    }
+
+    public override void OnApplicationQuit()
+    {
+        ShutdownRuntime();
+    }
+
+    public override void OnDeinitializeMelon()
+    {
+        ShutdownRuntime();
     }
 
     private sealed class FcsHostServices : IFcsHostServices
