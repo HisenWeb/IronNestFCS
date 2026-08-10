@@ -79,8 +79,15 @@ try {
     }
     $tagExists = -not [string]::IsNullOrWhiteSpace($remoteTagText)
 
-    & gh release view $Tag --repo $Repository *> $null
-    $releaseExists = ($LASTEXITCODE -eq 0)
+    $releaseListJson = @(& gh release list --repo $Repository --limit 1000 --json tagName) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not inspect GitHub releases."
+    }
+    $releaseList = @()
+    if (-not [string]::IsNullOrWhiteSpace($releaseListJson)) {
+        $releaseList = @($releaseListJson | ConvertFrom-Json)
+    }
+    $releaseExists = @($releaseList | Where-Object { $_.tagName -eq $Tag }).Count -gt 0
 
     if (($tagExists -or $releaseExists) -and -not $RepairExisting) {
         throw "$Tag already exists. Use -RepairExisting only when intentionally repairing that published version."
