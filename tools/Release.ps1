@@ -63,7 +63,7 @@ try {
     }
 
     Write-Host "Updating master..."
-    & git pull --ff-only origin master
+    & git pull --ff-only origin refs/heads/master
     if ($LASTEXITCODE -ne 0) {
         throw "git pull --ff-only failed."
     }
@@ -131,7 +131,7 @@ try {
         $versionCommitted = $true
     }
 
-    & git push origin master
+    & git push origin "refs/heads/master:refs/heads/master"
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to push master."
     }
