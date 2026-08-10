@@ -297,13 +297,23 @@ en-US
 <GameDir>/UserData/IronNestFCS/Logs/
 ```
 
-优先查看：
+默认只写入精简的 `problems.log`，正常游戏不会再持续生成完整的分类诊断日志。
+
+如果需要复现 Bug 并收集完整日志，打开：
 
 ```text
-problems.log
-→ 对应分类日志
-→ all.log
+<GameDir>/UserData/IronNestFCS/diagnostics.txt
 ```
+
+把内容改成：
+
+```text
+on
+```
+
+保存后按 **F9**。之后会恢复 `all.log`、`dispatch.log`、`ballistic.log`、`reload.log`、`order.log`、`arbitration.log`、`turret.log`、`trigger.log` 和 `problems.log`。排查结束后把 `diagnostics.txt` 改回 `off` 并再次按 F9 即可。
+
+`diagnostics.txt` 如果不存在，Mod 会自动创建，并默认写入 `off`。
 
 反馈 Bug 时，最好附上对应那一轮的日志文件夹，并说明出问题时炮塔正在做什么。
 
