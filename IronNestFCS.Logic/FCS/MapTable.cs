@@ -53,6 +53,7 @@ public class MapTable {
         }
 
         MelonLogger.Msg($"[FCS] 找到 Player Turret Piece: {turret}, Artilleries: {artilleries.Count}");
+        LogCoordinateBindDiagnostics();
 
         var fireMissionObject = GameObject.Find("Fire Mission Root");
         if (fireMissionObject != null) {
@@ -71,13 +72,62 @@ public class MapTable {
 
     private ArtilleryTask BuildMarkTarget(Vector3 artilleryLocalPosition, Vector3 target) {
         var dist = target.magnitude * 3.8164f;
-        var angle = Vector3.SignedAngle(target, Vector3.up, Vector3.forward);
-        if (angle < 0) angle += 360;
+        var angle = GetAzimuth(target);
         return new ArtilleryTask {
             angel = angle,
             distance = dist,
             position = artilleryLocalPosition * 3.8164f + new Vector3(10.016f, 5.235f, 0f)
         };
+    }
+
+    private static float GetAzimuth(Vector3 target) {
+        var angle = Vector3.SignedAngle(target, Vector3.up, Vector3.forward);
+        if (angle < 0) angle += 360;
+        return angle;
+    }
+
+    private static float GetSignedAzimuthDelta(float current, float legacy) {
+        return Mathf.DeltaAngle(legacy, current);
+    }
+
+    private void LogCoordinateBindDiagnostics() {
+        if (turret == null || mapSurface == null) return;
+
+        var converted = mapSurface.InverseTransformPoint(turret.position);
+        var legacy = turret.localPosition;
+        var delta = converted - legacy;
+        var turretParent = turret.parent != null ? turret.parent.name : "<none>";
+        var mapParent = mapSurface.parent != null ? mapSurface.parent.name : "<none>";
+
+        MelonLogger.Msg(
+            $"[FCS DIAG] bind turretWorld={turret.position:F4}, turretLocal(legacy)={legacy:F4}, " +
+            $"turretOnMap(current)={converted:F4}, turretCoordDelta(current-legacy)={delta:F4}");
+        MelonLogger.Msg(
+            $"[FCS DIAG] hierarchy turretParent={turretParent}, mapParent={mapParent}, " +
+            $"mapWorld={mapSurface.position:F4}, mapEuler={mapSurface.eulerAngles:F3}, mapScale={mapSurface.lossyScale:F4}");
+    }
+
+    private void LogAimComparison(int index, Vector3 markerLocal, Vector3 currentTarget) {
+        if (turret == null || mapSurface == null) return;
+
+        var currentTurretOnMap = mapSurface.InverseTransformPoint(turret.position);
+        var legacyTurretLocal = turret.localPosition;
+        var legacyTarget = markerLocal - legacyTurretLocal;
+
+        var currentAzimuth = GetAzimuth(currentTarget);
+        var legacyAzimuth = GetAzimuth(legacyTarget);
+        var currentDistance = currentTarget.magnitude * 3.8164f;
+        var legacyDistance = legacyTarget.magnitude * 3.8164f;
+        var azimuthDelta = GetSignedAzimuthDelta(currentAzimuth, legacyAzimuth);
+        var distanceDelta = currentDistance - legacyDistance;
+
+        MelonLogger.Msg(
+            $"[FCS DIAG] T{index} marker={markerLocal:F4}, turretLocal(legacy)={legacyTurretLocal:F4}, " +
+            $"turretOnMap(current)={currentTurretOnMap:F4}, turretCoordDelta(current-legacy)={(currentTurretOnMap - legacyTurretLocal):F4}");
+        MelonLogger.Msg(
+            $"[FCS DIAG] T{index} legacy az={legacyAzimuth:F3}° dist={legacyDistance:F4}km target={legacyTarget:F4} | " +
+            $"current az={currentAzimuth:F3}° dist={currentDistance:F4}km target={currentTarget:F4} | " +
+            $"delta current-legacy: az={azimuthDelta:+0.000;-0.000;0.000}° dist={distanceDelta:+0.0000;-0.0000;0.0000}km");
     }
 
     public ArtilleryTask? GetMarkTarget(int index) {
@@ -93,6 +143,7 @@ public class MapTable {
 
         var turretLocalOnMap = mapSurface.InverseTransformPoint(turret.position);
         var target = artillery.localPosition - turretLocalOnMap;
+        LogAimComparison(index, artillery.localPosition, target);
         return BuildMarkTarget(artillery.localPosition, target);
     }
 
@@ -145,6 +196,7 @@ public class MapTable {
                 MelonLogger.Msg(
                     $"[FCS] T{index} marker stabilized: samples={sampleCount}, drift={lastDelta:F5}, " +
                     $"azimuth={task.angel:F2}°, distance={task.distance:F3}km");
+                LogAimComparison(index, markerLocal, relative);
                 completed(task);
                 yield break;
             }
