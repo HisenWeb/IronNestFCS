@@ -14,6 +14,9 @@ $BuildPackagesScript = Join-Path $PSScriptRoot "Build-ReleasePackages.ps1"
 $HostSourceRelative = "IronNestFCS/FcsHostMod.cs"
 $OutputDir = Join-Path $RepoRoot "artifacts\release-v$Version"
 $Tag = "v$Version"
+$oldVersion = ""
+$versionChanged = $false
+$versionCommitted = $false
 
 . (Join-Path $PSScriptRoot "Version.ps1")
 
@@ -118,10 +121,12 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "Version commit failed."
         }
-        & git push origin master
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to push master."
-        }
+        $versionCommitted = $true
+    }
+
+    & git push origin master
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to push master."
     }
 
     $trackedDirty = @(& git status --porcelain --untracked-files=no)
@@ -182,8 +187,8 @@ try {
             $releasePrefix = @"
 ## Downloads / 下载
 
-- `IronNestFCS-Smart_v${Version}_en-US.zip` — English UI
-- `IronNestFCS-Smart_v${Version}_zh-CN.zip` — 简体中文 UI
+- IronNestFCS-Smart_v${Version}_en-US.zip — English UI
+- IronNestFCS-Smart_v${Version}_zh-CN.zip — 简体中文 UI
 
 Both packages contain the same DLLs; only the default UI language differs.
 
@@ -206,6 +211,18 @@ Extract the selected archive directly into the game directory.
     Write-Host "Release complete: $title"
     Write-Host "Repository: $Repository"
     Write-Host "Assets: $OutputDir"
+}
+catch {
+    if ($versionChanged -and -not $versionCommitted -and -not [string]::IsNullOrWhiteSpace($oldVersion)) {
+        & git reset -- $HostSourceRelative *> $null
+        try {
+            Set-IronNestFcsVersion -RepoRoot $RepoRoot -Version $oldVersion | Out-Null
+        }
+        catch {
+            Write-Warning "Release failed and automatic version rollback also failed. Check git status."
+        }
+    }
+    throw
 }
 finally {
     Pop-Location
