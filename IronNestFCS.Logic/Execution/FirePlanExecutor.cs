@@ -1,3 +1,7 @@
+// Smart fork modifications Copyright (c) 2026 HisenWeb
+// Based on IronNestFCS by svr2kos2
+// SPDX-License-Identifier: MIT
+
 using System.Collections;
 using IronNestFCS.Abstractions;
 using IronNestFCS.Logic.FCS;
