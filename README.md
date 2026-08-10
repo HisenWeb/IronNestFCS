@@ -92,22 +92,17 @@ The mod reads the game's real objects and physical state directly. It does **not
 
 This project continues directly from the source of [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS).
 
-First, the important part: **the original already automates most of the fire-control workflow.** T1–T4 queueing, assigning tasks to a free gun, both guns preparing at the same time, automatic shell/powder purchasing, Auto Fire, Max Charge, and an F9 Logic reload are already present in v1.0.6.
+First, the important part: **the original already provides the complete core automated fire-control workflow.** T1–T4 queueing, dual-gun operation, automatic shell/powder purchasing and loading, Auto Fire, Max Charge, and F9-triggered Logic reload all come from the original project.
 
-**Smart is mainly about making that existing automation behave better when several things are happening at once: repeated missions, both guns being busy, F9 replanning, or a gun being halfway through loading.**
+**Smart is not mainly about adding more automation. It changes the boundary between mission planning, physical state, and execution scheduling.** The table below intentionally avoids a feature-by-feature list and only summarizes the core runtime-model differences.
 
-| What happens in game | Original IronNestFCS | IronNestFCS Smart |
+| Area | Original IronNestFCS | IronNestFCS Smart |
 | --- | --- | --- |
-| **Both guns can take a new mission** | Gives the mission to the first free gun slot; when both are free, Left is chosen first | Looks at what each gun currently contains, its elevation, and where the turret is pointing, then chooses the gun that better fits the shot |
-| **Both guns are preparing their next shots** | Each task waits for access to the shared turret; whichever task gets it first continues first | Estimates which shot can become ready sooner and tries to fire that one first; once the order is chosen, later tasks do not casually reshuffle it |
-| **You submitted the wrong task and press F9** | The current tasks, waiting queue, and the coroutines running those tasks are cleared when Logic reloads | The task list and firing order reset, but an actual shell/powder loading sequence that has already started can keep going; you can then submit T1–T4 again |
-| **After F9, a gun is already loaded or only half loaded** | The new Logic instance has no separate in-progress loading transaction to inherit | Reads what is physically there now — empty, shell loaded, fully loaded, or still loading — and plans the new task around that real state |
-| **The ballistic calculator is slow to update** | Waits fixed short delays and then reads the elevation display | Waits until Calculate is actually usable and watches the result until it has settled; if the result cannot be trusted, it will not use a suspicious old value |
-| **Review / Arm controls were already moved** | The task flow directly clicks those controls | Checks the real physical position first and changes only what is needed, reducing the chance of toggling an already-correct control the wrong way |
-| **You press F9 while the turret is still turning toward an old target** | The old task coroutine stops, but the original wrapper does not explicitly clear the old game-side rotation target | Cancels the stale target, holds the turret at its current real direction, and lets newly submitted tasks plan from there |
-| **You want a Chinese UI** | No separate English/Chinese localization layer | Player-facing UI can switch between Simplified Chinese and English |
+| **Tasks vs. physical state** | The task flow drives actions such as loading; when F9 reloads Logic, the current task execution ends with it | Replannable tasks are separated from persistent physical loading; tasks can be rebuilt while a physical load that has already been accepted continues to exist |
+| **Dual-gun scheduling** | Primarily advances by free gun slots and each task's own flow, with running tasks competing for the shared turret | Schedules later execution from both guns' current loading state, elevation, turret state, and estimated readiness |
+| **State decisions** | More often continues from the state expected by the task flow | Tries to read the real chamber, loading mechanism, turret, and controller state before deciding what to do next |
 
-In short: **the original already knows how to “auto-fire the turret.” Smart focuses on keeping that automation sensible when missions overlap, you replan with F9, or the guns are already in the middle of doing something.**
+In short: **the original focuses on running the automated fire-control workflow; Smart focuses on how the system continues from real battlefield state when the plan and reality no longer line up perfectly.**
 
 ---
 
