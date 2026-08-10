@@ -1,11 +1,12 @@
+using IronNestFCS.Logic.FCS;
+using IronNestFCS.Logic.Localization;
 using MelonLoader;
 using UnityEngine;
-using IronNestFCS.Logic.FCS;
 
 namespace IronNestFCS.Logic;
 
 /// <summary>
-/// 火控系统的 IMGUI 状态窗口。使用绝对 Rect，避免 IL2CPP 下 GUILayout pass 不完整导致控件错位。
+/// FCS IMGUI status window. Absolute Rect positioning avoids incomplete GUILayout passes under IL2CPP.
 /// </summary>
 public class FcsWindow
 {
@@ -32,7 +33,8 @@ public class FcsWindow
         var recentStart = Math.Max(0, recentItems.Length - RecentDisplayLimit);
 
         var lineCount = 2;
-        if (fcs.IsBound) {
+        if (fcs.IsBound)
+        {
             lineCount = 0;
             lineCount += fcs.LeftTask == null ? 1 : 2;
             lineCount += fcs.RightTask == null ? 1 : 2;
@@ -43,7 +45,8 @@ public class FcsWindow
             lineCount += 1 + queue.Count;
             lineCount += 2;
 
-            for (var i = recentStart; i < recentItems.Length; i++) {
+            for (var i = recentStart; i < recentItems.Length; i++)
+            {
                 lineCount += 1;
                 var task = recentItems[i];
                 if (task.progress == Progress.Failed && !string.IsNullOrEmpty(task.failureReason))
@@ -52,29 +55,35 @@ public class FcsWindow
         }
 
         var windowRect = defaultWindowRect;
+        windowRect.width = FcsLocalization.WindowWidth;
         windowRect.height = 42f + lineCount * 24f;
-        GUI.Box(windowRect, "IronNest 火控系统");
-        
-        float x = windowRect.x + 10f;
-        float w = windowRect.width - 20f;
-        float y = windowRect.y + 25f;
+        GUI.Box(windowRect, FcsLocalization.T("IronNest 火控系统", "IronNest Fire Control System"));
+
+        var x = windowRect.x + 10f;
+        var w = windowRect.width - 20f;
+        var y = windowRect.y + 25f;
         const float h = 21f;
         const float gap = 3f;
 
-        void Label(string text) {
+        void Label(string text)
+        {
             GUI.Label(new Rect(x, y, w, h), text);
             y += h + gap;
         }
 
         if (!fcs.IsBound)
         {
-            Label("等待 Iron Nest 火控场景加载。 ");
-            Label("场景就绪后按 F9 重新初始化火控逻辑。 ");
+            Label(FcsLocalization.T(
+                "等待 Iron Nest 火控场景加载。",
+                "Waiting for an Iron Nest fire-control scene."));
+            Label(FcsLocalization.T(
+                "场景就绪后按 F9 重新初始化火控逻辑。",
+                "Press F9 after the scene is ready to reinitialize the TaskSystem."));
             return;
         }
 
-        DrawGun("左", "Left", fcs.LeftTask, Label);
-        DrawGun("右", "Right", fcs.RightTask, Label);
+        DrawGun(FcsLocalization.T("左炮", "Left gun"), "Left", fcs.LeftTask, Label);
+        DrawGun(FcsLocalization.T("右炮", "Right gun"), "Right", fcs.RightTask, Label);
 
         Label(fcs.FirePriorityStatusText);
         if (!string.IsNullOrEmpty(fcs.FirePriorityLeftDetail))
@@ -82,110 +91,101 @@ public class FcsWindow
         if (!string.IsNullOrEmpty(fcs.FirePriorityRightDetail))
             Label($"  {fcs.FirePriorityRightDetail}");
 
-        Label($"自动开火：{OnOff(fcs.AutoFireEnabled)}    最大装药：{OnOff(fcs.MaxChargeEnabled)}");
+        Label(FcsLocalization.T(
+            $"自动开火：{FcsLocalization.OnOff(fcs.AutoFireEnabled)}    最大装药：{FcsLocalization.OnOff(fcs.MaxChargeEnabled)}",
+            $"Auto Fire: {FcsLocalization.OnOff(fcs.AutoFireEnabled)}    Max Charge: {FcsLocalization.OnOff(fcs.MaxChargeEnabled)}"));
 
-        Label($"等待队列：{queue.Count}");
+        Label(FcsLocalization.T($"等待队列：{queue.Count}", $"Pending queue: {queue.Count}"));
         foreach (var item in queue)
         {
-            Label($"  T{item.targetId} {item.bulletType.DisplayName()}  方位 {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}");
+            Label(FcsLocalization.T(
+                $"  T{item.targetId} {item.bulletType.DisplayName()}  方位 {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}",
+                $"  T{item.targetId} {item.bulletType.DisplayName()}  Az {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}"));
         }
 
-        Label($"本轮：完成 {fcs.CompletedTaskCount}    成功 {fcs.SuccessfulTaskCount}    失败 {fcs.FailedTaskCount}");
+        Label(FcsLocalization.T(
+            $"本轮：完成 {fcs.CompletedTaskCount}    成功 {fcs.SuccessfulTaskCount}    失败 {fcs.FailedTaskCount}",
+            $"Session: completed {fcs.CompletedTaskCount}    success {fcs.SuccessfulTaskCount}    failed {fcs.FailedTaskCount}"));
+
         var shownRecent = recentItems.Length - recentStart;
-        Label($"近期记录：最近 {shownRecent} 条（内部保留 {recent.Count}/20）");
+        Label(FcsLocalization.T(
+            $"近期记录：最近 {shownRecent} 条（内部保留 {recent.Count}/20）",
+            $"Recent: showing {shownRecent} (kept {recent.Count}/20)"));
+
         for (var i = recentStart; i < recentItems.Length; i++)
         {
             var item = recentItems[i];
-            var result = item.progress == Progress.Finished ? "成功" : "失败";
+            var result = item.progress == Progress.Finished
+                ? FcsLocalization.T("成功", "SUCCESS")
+                : FcsLocalization.T("失败", "FAILED");
             var duration = item.completedAt > item.startedAt ? item.completedAt - item.startedAt : 0f;
-            Label($"  {result} T{item.targetId} {item.bulletType.DisplayName()}  装药{item.chargeCount} 仰角{item.elevation:F1}°  {duration:F0}秒");
-            if (item.progress == Progress.Failed && !string.IsNullOrEmpty(item.failureReason)) {
-                Label($"    原因：{LocalizeFailureReason(item.failureReason)}");
+
+            Label(FcsLocalization.T(
+                $"  {result} T{item.targetId} {item.bulletType.DisplayName()}  装药{item.chargeCount} 仰角{item.elevation:F1}°  {duration:F0}秒",
+                $"  {result} T{item.targetId} {item.bulletType.DisplayName()}  C{item.chargeCount} E{item.elevation:F1}°  {duration:F0}s"));
+
+            if (item.progress == Progress.Failed && !string.IsNullOrEmpty(item.failureReason))
+            {
+                Label(FcsLocalization.T(
+                    $"    原因：{FcsLocalization.FailureReason(item.failureReason)}",
+                    $"    Reason: {FcsLocalization.FailureReason(item.failureReason)}"));
             }
         }
     }
 
-    private static string OnOff(bool value) => value ? "开" : "关";
-
-    private static string LocalizeFailureReason(string reason)
+    private static void DrawGun(string gunName, string side, ArtilleryTask? task, Action<string> label)
     {
-        const string incompatiblePrefix = "no compatible gun for current physical loads;";
-        if (reason.StartsWith(incompatiblePrefix, StringComparison.Ordinal))
+        if (task == null)
         {
-            var detail = reason.Substring(incompatiblePrefix.Length).Trim();
-            detail = detail
-                .Replace("Left=", "左炮=")
-                .Replace("Right=", "右炮=")
-                .Replace("loaded ", "已装填 ")
-                .Replace("shell-loaded ", "已入膛 ")
-                .Replace("empty", "空炮");
-            return $"当前实装弹药无法匹配任务；{detail}";
-        }
-
-        return reason;
-    }
-
-    private static void DrawGun(string name, string side, ArtilleryTask? task, Action<string> label)
-    {
-        if (task == null) {
             var state = GunPhysicalState.Read(side);
-            switch (state.Kind) {
+            switch (state.Kind)
+            {
                 case GunPhysicalStateKind.LoadedReady:
-                    label($"{name}炮：已装填 {state.ShellType!.Value.DisplayName()} / 装药{state.PowderCharges}，等待目标");
+                    label(FcsLocalization.T(
+                        $"{gunName}：已装填 {state.ShellType!.Value.DisplayName()} / 装药{state.PowderCharges}，等待目标",
+                        $"{gunName}: loaded {state.ShellType!.Value.DisplayName()} / C{state.PowderCharges}, waiting for target"));
                     break;
                 case GunPhysicalStateKind.ShellLoaded:
-                    label($"{name}炮：已入膛 {state.ShellType!.Value.DisplayName()} / 未装药，等待同弹种目标");
+                    label(FcsLocalization.T(
+                        $"{gunName}：已入膛 {state.ShellType!.Value.DisplayName()} / 未装药，等待同弹种目标",
+                        $"{gunName}: chambered {state.ShellType!.Value.DisplayName()} / no charge, waiting for matching target"));
                     break;
                 case GunPhysicalStateKind.EmptyReady:
-                    label($"{name}炮：空闲（空炮）");
+                    label(FcsLocalization.T($"{gunName}：空闲（空炮）", $"{gunName}: idle / empty"));
                     break;
                 case GunPhysicalStateKind.PostShotRecovery:
-                    label($"{name}炮：击发后复位中");
+                    label(FcsLocalization.T($"{gunName}：击发后复位中", $"{gunName}: post-shot recovery"));
                     break;
                 case GunPhysicalStateKind.Recovering:
-                    label($"{name}炮：状态恢复中  {state.Summary()}");
+                    label(FcsLocalization.T($"{gunName}：状态恢复中  {state.Summary()}", $"{gunName}: recovering  {state.Summary()}"));
                     break;
                 case GunPhysicalStateKind.Unknown:
-                    label($"{name}炮：状态待确认  {state.Summary()}");
+                    label(FcsLocalization.T($"{gunName}：状态待确认  {state.Summary()}", $"{gunName}: state unknown  {state.Summary()}"));
                     break;
                 default:
-                    label($"{name}炮：未绑定");
+                    label(FcsLocalization.T($"{gunName}：未绑定", $"{gunName}: unbound"));
                     break;
             }
             return;
         }
 
         var elapsed = task.startedAt > 0f ? FcsRuntimeClock.Now - task.startedAt : 0f;
-        label($"{name}炮：T{task.targetId} {task.bulletType.DisplayName()}  {ProgressText(task.progress)}  {elapsed:F0}秒");
-        label($"  方位 {task.angel:F1}° / 距离 {task.distance:F2}km   装药 {task.chargeCount}   仰角 {task.elevation:F1}°");
+        label(FcsLocalization.T(
+            $"{gunName}：T{task.targetId} {task.bulletType.DisplayName()}  {FcsLocalization.ProgressText(task.progress)}  {elapsed:F0}秒",
+            $"{gunName}: T{task.targetId} {task.bulletType.DisplayName()}  {FcsLocalization.ProgressText(task.progress)}  {elapsed:F0}s"));
+        label(FcsLocalization.T(
+            $"  方位 {task.angel:F1}° / 距离 {task.distance:F2}km   装药 {task.chargeCount}   仰角 {task.elevation:F1}°",
+            $"  Az {task.angel:F1}° / Range {task.distance:F2}km   Charge {task.chargeCount}   Elevation {task.elevation:F1}°"));
     }
 
-    private static string ProgressText(Progress progress)
-    {
-        return progress switch {
-            Progress.Pending => "等待",
-            Progress.Calculating => "弹道解算",
-            Progress.SelectingBullet => "选弹",
-            Progress.LoadingBullet => "装弹",
-            Progress.LoadingPowder => "装药",
-            Progress.WaitLoading => "等待装填完成",
-            Progress.Aiming => "瞄准",
-            Progress.WaitingForFire => "等待开火",
-            Progress.BackToIdle => "复位",
-            Progress.Finished => "完成",
-            Progress.Failed => "失败",
-            _ => progress.ToString()
-        };
-    }
-
-    /// <summary>计算坐标点所对应的区域字符串。</summary>
+    /// <summary>Converts a map coordinate into the grid/sub-grid notation used by the tactical map.</summary>
     public static string ConvertPosition(Vector3 position)
     {
-        int leterIndex = (int)position.x;
-        string zoneCol = leterIndex >= 0 && leterIndex < 26 ? ((char)('A' + leterIndex)).ToString() : "#";
-        int zoneRow = (int)position.y + 1;
-        int subCol = (int)(position.x * 10) % 10;
-        int subRow = (int)(position.y * 10) % 10;
+        var letterIndex = (int)position.x;
+        var zoneCol = letterIndex >= 0 && letterIndex < 26 ? ((char)('A' + letterIndex)).ToString() : "#";
+        var zoneRow = (int)position.y + 1;
+        var subCol = (int)(position.x * 10) % 10;
+        var subRow = (int)(position.y * 10) % 10;
 
         return $"{zoneCol}{zoneRow}  {subCol}:{subRow}";
     }
