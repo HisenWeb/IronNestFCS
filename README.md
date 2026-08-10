@@ -52,12 +52,12 @@ Manual fire or Auto Fire
 
 You can also submit several T1–T4 missions in succession. The FCS distributes work between the two guns, and a gun that recovers can continue with later targets.
 
-**F9 can also be used as a practical “reset current fire missions” key.** If you placed the wrong target, submitted the wrong mission, or simply want the current tasks to be planned again:
+**F9 is the replan key.** If you placed the wrong target, submitted the wrong mission, or simply want to change the current queue or firing order:
 
 ```text
 Press F9
   ↓
-clear and recreate current tasks / waiting queue / firing order
+clear current tasks / waiting queue / firing order
   ↓
 any physical loading sequence already in progress keeps going
   ↓
@@ -66,7 +66,7 @@ place the targets again and resubmit T1 / T2 / T3 / T4
 the FCS replans from the gun and turret state that really exists now
 ```
 
-So F9 is not only a development hot-reload key. In normal play, you can use it to **abandon the current task arrangement and issue the missions again**. A shell/powder load already accepted by the loading system is not forcibly undone; the new missions plan around the real chamber and turret state after the reset.
+Use F9 to **abandon the current plan and issue a new one**. A shell/powder load already accepted by the loading system is not forcibly undone; the new missions plan around the real chamber and turret state.
 
 The mod reads the game's real objects and physical state directly. It does **not** use OCR or screen recognition.
 
@@ -92,9 +92,9 @@ The mod reads the game's real objects and physical state directly. It does **not
 
 This project continues directly from the source of [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS).
 
-First, the important part: **the original already automates most of the fire-control workflow.** T1–T4 queueing, assigning tasks to a free gun, both guns preparing at the same time, automatic shell/powder purchasing, Auto Fire, Max Charge, and F9 hot reload are already present in v1.0.6.
+First, the important part: **the original already automates most of the fire-control workflow.** T1–T4 queueing, assigning tasks to a free gun, both guns preparing at the same time, automatic shell/powder purchasing, Auto Fire, Max Charge, and an F9 Logic reload are already present in v1.0.6.
 
-**Smart is mainly about making that existing automation behave better when several things are happening at once: repeated missions, both guns being busy, F9 resets, or a gun being halfway through loading.**
+**Smart is mainly about making that existing automation behave better when several things are happening at once: repeated missions, both guns being busy, F9 replanning, or a gun being halfway through loading.**
 
 | What happens in game | Original IronNestFCS | IronNestFCS Smart |
 | --- | --- | --- |
@@ -107,7 +107,7 @@ First, the important part: **the original already automates most of the fire-con
 | **You press F9 while the turret is still turning toward an old target** | The old task coroutine stops, but the original wrapper does not explicitly clear the old game-side rotation target | Cancels the stale target, holds the turret at its current real direction, and lets newly submitted tasks plan from there |
 | **You want a Chinese UI** | No separate English/Chinese localization layer | Player-facing UI can switch between Simplified Chinese and English |
 
-In short: **the original already knows how to “auto-fire the turret.” Smart focuses on keeping that automation sensible when missions overlap, F9 is used to start over, or the guns are already in the middle of doing something.**
+In short: **the original already knows how to “auto-fire the turret.” Smart focuses on keeping that automation sensible when missions overlap, you replan with F9, or the guns are already in the middle of doing something.**
 
 ---
 
@@ -204,28 +204,28 @@ read target
 
 You can submit multiple targets in succession. The two guns are scheduled independently and a recovered gun can immediately accept another task.
 
-### 6. Reset and issue the missions again
+### 6. Replan with F9
 
-Press **F9** to reset the current task system. The waiting queue, current planning state, and firing order are recreated; after the reload, you can place targets again and click `T1`, `T2`, `T3`, or `T4` again.
+Press **F9** to clear the current tasks, waiting queue, and firing order. Then place targets again and submit a new T1–T4 plan.
 
-A physical shell/powder load that has already started is not forcibly cancelled by F9. New missions read the real chamber, elevation, and turret position after the reset and plan from that state.
+A physical shell/powder load that has already started is not forcibly cancelled by F9. New missions read the real chamber, elevation, and turret position and plan from that state.
 
 ---
 
-## F9: reset missions / hot reload
+## F9: replan missions
 
-Press **F9** to reload the current task system and reset the current mission arrangement.
+Press **F9** whenever you want to abandon the current task plan and build a new one.
 
 This is useful when:
 
 - you placed the wrong target marker;
 - you submitted the wrong T1–T4 mission;
-- you want to abandon the current waiting order;
+- you want to change the waiting queue or firing order;
 - you want the FCS to plan again from the current real gun and turret state.
 
-After F9 finishes, you can immediately submit new T1–T4 missions again.
+After F9, submit the T1–T4 missions you want again.
 
-Important: **F9 resets task intent, but it does not forcibly cancel a physical loading operation that the loading system has already accepted.** If a gun is already loading shell/powder, that sequence continues; newly submitted missions plan around the resulting real physical state.
+Important: **F9 resets the plan, not physical reality.** If a gun is already loading shell/powder, that sequence continues; the new plan uses the resulting real physical state.
 
 ---
 
@@ -277,7 +277,7 @@ When reporting a bug, include the relevant log folder and describe what the turr
 
 ## For developers
 
-The source code remains split into a stable Host, shared Abstractions, and hot-reloadable Logic assembly. Development notes are available in [docs/FSC_MODULARIZATION_PLAN.md](docs/FSC_MODULARIZATION_PLAN.md).
+The source code remains split into a stable Host, shared Abstractions, and hot-reloadable Logic assembly. The player-facing **F9 replan** is implemented by reloading the TaskSystem/Logic while Host-owned physical loading remains alive. Development notes are available in [docs/FSC_MODULARIZATION_PLAN.md](docs/FSC_MODULARIZATION_PLAN.md).
 
 The repository also includes:
 
