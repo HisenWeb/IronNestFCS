@@ -210,14 +210,29 @@ read target
 → prepare Review / Arm
 ```
 
-### 5. Fire
+### 5. Check FCS status
+
+An `IronNest Fire Control System` status panel appears in the **top-left corner** of the game screen. It is mainly for monitoring what the FCS is doing; you do not need to operate the FCS from this panel.
+
+It shows:
+
+- the physical state of the left and right guns, or their current T mission and progress;
+- current mission azimuth, range, charge, elevation, and elapsed time;
+- current firing-order / priority status;
+- whether **Auto Fire** and **Max Charge** are enabled;
+- the pending queue and the missions waiting in it;
+- session completed / success / failed counts and recent mission history; failed missions also show the failure reason.
+
+The status panel is visible in the top-left corner of the target-marker screenshot above.
+
+### 6. Fire
 
 - With **Auto Fire ON**, the FCS completes the final firing action when the gun and turret are physically ready.
 - With **Auto Fire OFF**, wait until the FCS has prepared the shot, then perform the final fire action manually.
 
 The two guns are scheduled independently and a recovered gun can immediately accept another task.
 
-### 6. Replan with F9
+### 7. Replan with F9
 
 Press **F9** to clear the current tasks, waiting queue, and firing order. Then reposition red markers 1–4 and submit a new T1–T4 plan.
 
