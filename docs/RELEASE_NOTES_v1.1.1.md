@@ -1,6 +1,10 @@
-# IronNestFCS Enhanced v1.1.1
+# IronNestFCS Smart v1.1.1
 
 ## Downloads / 下载
+
+> v1.1.1 was packaged before the project was renamed to **IronNestFCS Smart**, so the published ZIP filenames still use the previous `Enhanced` name.
+>
+> v1.1.1 的安装包在项目更名为 **IronNestFCS Smart** 之前已经生成，因此已发布 ZIP 文件名仍保留旧的 `Enhanced` 名称。
 
 - `IronNestFCS-Enhanced_v1.1.1_en-US.zip` — English UI
 - `IronNestFCS-Enhanced_v1.1.1_zh-CN.zip` — 简体中文 UI
