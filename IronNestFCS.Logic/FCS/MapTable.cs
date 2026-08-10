@@ -12,12 +12,14 @@ public class MapTable {
     private const int MarkerStableSampleCount = 3;
 
     private Transform? turret;
+    private Transform? mapSurface;
     private Dictionary<int, Transform> artilleries = new();
     private Transform? fireMissionRoot;
     private FireMission? fireMission;
     
     public bool TryBind() {
         artilleries = new Dictionary<int, Transform>();
+        mapSurface = null;
         fireMissionRoot = null;
         fireMission = null;
 
@@ -34,7 +36,8 @@ public class MapTable {
         }
 
         turret = turretObject.transform;
-        var map = mapObject.transform;
+        mapSurface = mapObject.transform;
+        var map = mapSurface;
         for (var i = 0; i < map.childCount; ++i) {
             var t = map.GetChild(i);
             if (t.name != "MapToken_Artillery") continue;
@@ -78,8 +81,8 @@ public class MapTable {
     }
 
     public ArtilleryTask? GetMarkTarget(int index) {
-        if (turret == null) {
-            MelonLogger.Error("[FCS] GetMarkTarget: turret unbound");
+        if (turret == null || mapSurface == null) {
+            MelonLogger.Error("[FCS] GetMarkTarget: turret or map surface unbound");
             return null;
         }
 
@@ -88,14 +91,15 @@ public class MapTable {
             return null;
         }
 
-        var target = artillery.localPosition - turret.localPosition;
+        var turretLocalOnMap = mapSurface.InverseTransformPoint(turret.position);
+        var target = artillery.localPosition - turretLocalOnMap;
         return BuildMarkTarget(artillery.localPosition, target);
     }
 
     public IEnumerator GetStableMarkTarget(int index, Action<ArtilleryTask?> completed,
         float timeoutSeconds = MarkerStabilizeTimeoutSeconds) {
-        if (turret == null) {
-            MelonLogger.Error("[FCS] GetStableMarkTarget: turret unbound");
+        if (turret == null || mapSurface == null) {
+            MelonLogger.Error("[FCS] GetStableMarkTarget: turret or map surface unbound");
             completed(null);
             yield break;
         }
@@ -119,8 +123,8 @@ public class MapTable {
                 break;
 
             var markerLocal = artillery.localPosition;
-            var turretLocal = turret.localPosition;
-            var relative = markerLocal - turretLocal;
+            var turretLocalOnMap = mapSurface.InverseTransformPoint(turret.position);
+            var relative = markerLocal - turretLocalOnMap;
             sampleCount++;
 
             if (!havePrevious) {
