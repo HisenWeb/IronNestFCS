@@ -17,7 +17,9 @@ internal sealed class FirePlan
     public float Azimuth { get; }
     public float PlannedAt { get; }
     public bool EtaKnown { get; }
-    public float EstimatedReadyAt { get; }
+    public float EstimatedLocalReadyAt { get; }
+    public float AzimuthSeconds { get; }
+    public float EstimatedReadyAt { get; private set; }
     public float AlignmentScore { get; }
     public int Generation { get; }
 
@@ -38,7 +40,8 @@ internal sealed class FirePlan
         float azimuth,
         float plannedAt,
         bool etaKnown,
-        float estimatedReadyAt,
+        float estimatedLocalReadyAt,
+        float azimuthSeconds,
         float alignmentScore,
         int generation)
     {
@@ -50,9 +53,25 @@ internal sealed class FirePlan
         Azimuth = azimuth;
         PlannedAt = plannedAt;
         EtaKnown = etaKnown;
-        EstimatedReadyAt = estimatedReadyAt;
+        EstimatedLocalReadyAt = estimatedLocalReadyAt;
+        AzimuthSeconds = azimuthSeconds;
         AlignmentScore = alignmentScore;
         Generation = generation;
+        EstimatedReadyAt = etaKnown
+            ? Math.Max(estimatedLocalReadyAt, plannedAt + azimuthSeconds)
+            : float.NaN;
+    }
+
+    /// <summary>
+    /// Estimate completion if this plan receives the shared azimuth lane at sharedStartAt. The azimuth
+    /// distance itself remains the one captured by this planning round; this does not re-read or re-plan.
+    /// </summary>
+    public float RefreshEstimatedReadyAt(float sharedStartAt)
+    {
+        EstimatedReadyAt = EtaKnown
+            ? Math.Max(EstimatedLocalReadyAt, sharedStartAt + AzimuthSeconds)
+            : float.NaN;
+        return EstimatedReadyAt;
     }
 
     public GunSide HostSide => Side == LeftRight.Left ? GunSide.Left : GunSide.Right;
@@ -67,7 +86,9 @@ internal sealed class FirePlanCandidate
     public int Charge { get; }
     public float Elevation { get; }
     public bool EtaKnown { get; }
-    public float EstimatedReadyAt { get; }
+    public bool LoadAlreadyRunning { get; }
+    public float EstimatedLocalReadyAt { get; private set; }
+    public float EstimatedReadyAt { get; private set; }
     public float AlignmentScore { get; }
     public float LoadSeconds { get; }
     public float ElevationSeconds { get; }
@@ -80,7 +101,7 @@ internal sealed class FirePlanCandidate
         int charge,
         float elevation,
         bool etaKnown,
-        float estimatedReadyAt,
+        bool loadAlreadyRunning,
         float alignmentScore,
         float loadSeconds,
         float elevationSeconds,
@@ -92,11 +113,35 @@ internal sealed class FirePlanCandidate
         Charge = charge;
         Elevation = elevation;
         EtaKnown = etaKnown;
-        EstimatedReadyAt = estimatedReadyAt;
+        LoadAlreadyRunning = loadAlreadyRunning;
         AlignmentScore = alignmentScore;
         LoadSeconds = loadSeconds;
         ElevationSeconds = elevationSeconds;
         AzimuthSeconds = azimuthSeconds;
         LoadLabel = loadLabel;
+        EstimatedLocalReadyAt = float.NaN;
+        EstimatedReadyAt = float.NaN;
+    }
+
+    /// <summary>
+    /// Finalize both gun candidates against one common planning-decision timestamp. Only an already-running
+    /// persistent transaction is allowed to consume time while ballistics are being solved. Fresh loading and
+    /// elevation cannot start until a FirePlan is actually committed.
+    /// </summary>
+    public void FinalizeTiming(float snapshotAt, float decisionAt)
+    {
+        if (!EtaKnown)
+        {
+            EstimatedLocalReadyAt = float.NaN;
+            EstimatedReadyAt = float.NaN;
+            return;
+        }
+
+        var loadReadyAt = LoadAlreadyRunning
+            ? snapshotAt + LoadSeconds
+            : decisionAt + LoadSeconds;
+
+        EstimatedLocalReadyAt = Math.Max(decisionAt, loadReadyAt) + ElevationSeconds;
+        EstimatedReadyAt = Math.Max(EstimatedLocalReadyAt, decisionAt + AzimuthSeconds);
     }
 }

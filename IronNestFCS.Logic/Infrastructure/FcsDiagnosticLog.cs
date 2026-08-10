@@ -20,6 +20,7 @@ internal static class FcsDiagnosticLog {
         "dispatch",
         "ballistic",
         "reload",
+        "order",
         "arbitration",
         "turret",
         "trigger",
@@ -191,6 +192,11 @@ internal static class FcsDiagnosticLog {
             return "ballistic";
 
         if (ContainsAny(value,
+                "[FCS Order]", "paired once", "single committed",
+                "promoting previously compared plan", "waiting for pair"))
+            return "order";
+
+        if (ContainsAny(value,
                 "Fire arbitration", "Fire priority", "arbitration",
                 "ballistic solution registered", "queued behind current fire priority",
                 "首发仲裁", "hard-committed", "fire lane", "provisionally"))
@@ -207,6 +213,7 @@ internal static class FcsDiagnosticLog {
             return "turret";
 
         if (ContainsAny(value,
+                "[FCS Loading]", "LoadingSystem", "LoadingTransaction", "LoadedReady", "loading transaction",
                 "ReloadTrace", "reload", "Reload", "powder", "Powder", "shell", "Shell",
                 "chamber", "cylinder", "rammer", "LoadBullet", "LoadPowder", "physical state",
                 "PHYSICAL", "requisition", "BuyShell", "BuyPowders", "loaded-ready"))
@@ -220,11 +227,12 @@ internal static class FcsDiagnosticLog {
         if (!string.Equals(level, "INFO", StringComparison.OrdinalIgnoreCase))
             return true;
 
-        // INFO-level physical recovery transitions are normal and intentionally excluded. Only exceptional
-        // state-machine events are promoted here so problems.log remains a fast first-look file.
+        // INFO-level physical recovery transitions and normal F9 reset traces are intentionally excluded.
+        // Only exceptional state-machine events are promoted so problems.log stays a useful first-look file.
         return ContainsAny(text,
             "[FCS Stall]", "STALL", "invalidated", "discarded stale", "reclass",
-            "rejected", "F9", "automatic fire was not observed", "manual fire wait timed out");
+            "rejected", "F9 recovery failed", "F9 reset failed",
+            "automatic fire was not observed", "manual fire wait timed out");
     }
 
     private static bool ContainsAny(string value, params string[] needles) {

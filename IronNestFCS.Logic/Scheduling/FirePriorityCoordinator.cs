@@ -39,7 +39,13 @@ internal sealed class FirePriorityCoordinator
 
         if (a.EtaKnown && b.EtaKnown)
         {
-            var delta = a.EstimatedReadyAt - b.EstimatedReadyAt;
+            // Neither unpaired plan owns shared azimuth yet. Evaluate both from the same comparison instant,
+            // while preserving each plan's fixed planning-snapshot azimuth distance and local-ready estimate.
+            var comparisonAt = FcsRuntimeClock.Now;
+            var aReadyAt = a.RefreshEstimatedReadyAt(comparisonAt);
+            var bReadyAt = b.RefreshEstimatedReadyAt(comparisonAt);
+            var delta = aReadyAt - bReadyAt;
+
             if (Mathf.Abs(delta) <= FireReadyEstimator.EtaTieToleranceSeconds)
             {
                 first = a.PlannedAt <= b.PlannedAt ? a : b;
@@ -82,6 +88,9 @@ internal sealed class FirePriorityCoordinator
     {
         if (!plan.Compared)
             plan.Compared = true;
+
+        if (plan.EtaKnown)
+            plan.RefreshEstimatedReadyAt(FcsRuntimeClock.Now);
 
         UpdateDetails(plan, null);
         _statusText = $"射击顺序：T{plan.Task.targetId} 单独执行（{reason}）";

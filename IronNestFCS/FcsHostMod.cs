@@ -1,11 +1,10 @@
-using System.Collections;
 using IronNestFCS.Abstractions;
 using MelonLoader;
 using MelonLoader.Utils;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
-[assembly: MelonInfo(typeof(IronNestFCS.FcsHostMod), "IronNestFCS", "1.1.0", "svr2kos2")]
+[assembly: MelonInfo(typeof(IronNestFCS.FcsHostMod), "IronNestFCS", "1.1.1", "svr2kos2")]
 [assembly: MelonGame()]
 
 namespace IronNestFCS;
@@ -18,9 +17,14 @@ public class FcsHostMod : MelonMod
 {
     private const string ReloadKeyName = "F9";
     private const string LogicTypeName = "IronNestFCS.Logic.FcsModule";
+    private const float InitialBindDelaySeconds = 1f;
+    private const float SceneBindDelaySeconds = 3f;
+    private const float BindRetryDelaySeconds = 1f;
 
     private readonly FcsHostServices _hostServices = new();
     private LogicReloader? _reloader;
+    private bool _sceneBindPending;
+    private float _nextBindAttemptAt;
 
     public override void OnInitializeMelon()
     {
@@ -33,12 +37,15 @@ public class FcsHostMod : MelonMod
         MelonLogger.Msg($"IronNestFCS Host Started. Logic path: {logicDll}");
         MelonLogger.Msg($"Press {ReloadKeyName} to hot reload TaskSystem.");
 
-        _hostServices.LoadingRuntime.TryBindScene();
         _reloader = new LogicReloader(
             logicDll,
             LogicTypeName,
             _hostServices);
-        _reloader.Reload();
+
+        // Do not instantiate TaskSystem before the persistent physical runtime is bound. During process start
+        // the game objects commonly do not exist yet; loading Logic at that point only creates a false failed
+        // diagnostic session which immediately has to be replaced.
+        ScheduleSceneBind(InitialBindDelaySeconds);
     }
 
     private static bool ReloadKeyPressed()
@@ -49,16 +56,39 @@ public class FcsHostMod : MelonMod
 
     public override void OnSceneWasLoaded(int buildIndex, string sceneName)
     {
-        // Scene transitions really do invalidate physical handles. F9 does not.
+        // A real scene transition invalidates both TaskSystem handles and persistent physical handles.
+        // Stop TaskSystem immediately and perform one serialized delayed rebind instead of stacking coroutines.
+        _reloader?.Unload();
         _hostServices.LoadingRuntime.OnSceneChanged();
-        MelonCoroutines.Start(RebindSceneCoroutine());
+        ScheduleSceneBind(SceneBindDelaySeconds);
     }
 
-    private IEnumerator RebindSceneCoroutine()
+    private void ScheduleSceneBind(float delaySeconds)
     {
-        yield return new WaitForSeconds(3f);
-        _hostServices.LoadingRuntime.TryBindScene();
-        _reloader?.Reload();
+        _sceneBindPending = true;
+        _nextBindAttemptAt = Time.unscaledTime + Math.Max(0f, delaySeconds);
+    }
+
+    private void TryActivateScene()
+    {
+        if (!_sceneBindPending || _reloader == null || Time.unscaledTime < _nextBindAttemptAt)
+            return;
+
+        if (!_hostServices.LoadingRuntime.IsBound && !_hostServices.LoadingRuntime.TryBindScene())
+        {
+            _nextBindAttemptAt = Time.unscaledTime + BindRetryDelaySeconds;
+            return;
+        }
+
+        if (_reloader.Reload())
+        {
+            _sceneBindPending = false;
+            return;
+        }
+
+        // Loading may already be ready while another scene-owned console is still appearing. Retry Logic only;
+        // do not tear down a successfully bound persistent loader just because TaskSystem binding was early.
+        _nextBindAttemptAt = Time.unscaledTime + BindRetryDelaySeconds;
     }
 
     public override void OnUpdate()
@@ -68,6 +98,12 @@ public class FcsHostMod : MelonMod
 
         if (_reloader == null)
             return;
+
+        if (_sceneBindPending)
+        {
+            TryActivateScene();
+            return;
+        }
 
         if (ReloadKeyPressed() || _reloader.CheckDllUpdated())
         {
@@ -91,6 +127,7 @@ public class FcsHostMod : MelonMod
 
     public override void OnDeinitializeMelon()
     {
+        _sceneBindPending = false;
         _reloader?.Unload();
         _reloader = null;
         _hostServices.LoadingRuntime.Dispose();
