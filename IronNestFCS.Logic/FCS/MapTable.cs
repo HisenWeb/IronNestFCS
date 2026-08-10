@@ -11,7 +11,7 @@ public class MapTable {
     private const float MarkerStableToleranceLocal = 0.0025f;
     private const int MarkerStableSampleCount = 3;
 
-    private Transform? turret;
+    private Transform? turretLocation;
     private Transform? mapSurface;
     private Dictionary<int, Transform> artilleries = new();
     private Transform? fireMissionRoot;
@@ -19,13 +19,14 @@ public class MapTable {
     
     public bool TryBind() {
         artilleries = new Dictionary<int, Transform>();
+        turretLocation = null;
         mapSurface = null;
         fireMissionRoot = null;
         fireMission = null;
 
-        var turretObject = GameObject.Find("Player Turret Piece");
-        if (turretObject == null) {
-            MelonLogger.Warning("[FCS] 未找到 Player Turret Piece，当前场景尚未就绪");
+        var turretLocationObject = GameObject.Find("TurretLocation");
+        if (turretLocationObject == null) {
+            MelonLogger.Warning("[FCS] 未找到 TurretLocation，当前场景尚未就绪");
             return false;
         }
 
@@ -35,7 +36,7 @@ public class MapTable {
             return false;
         }
 
-        turret = turretObject.transform;
+        turretLocation = turretLocationObject.transform;
         mapSurface = mapObject.transform;
         var map = mapSurface;
         for (var i = 0; i < map.childCount; ++i) {
@@ -52,7 +53,7 @@ public class MapTable {
             return false;
         }
 
-        MelonLogger.Msg($"[FCS] 找到 Player Turret Piece: {turret}, Artilleries: {artilleries.Count}");
+        MelonLogger.Msg($"[FCS] 找到 TurretLocation: {turretLocation}, Artilleries: {artilleries.Count}");
 
         var fireMissionObject = GameObject.Find("Fire Mission Root");
         if (fireMissionObject != null) {
@@ -80,9 +81,15 @@ public class MapTable {
         };
     }
 
+    private Vector3 GetTurretLocalOnMap() {
+        if (turretLocation == null || mapSurface == null)
+            return Vector3.zero;
+        return mapSurface.InverseTransformPoint(turretLocation.position);
+    }
+
     public ArtilleryTask? GetMarkTarget(int index) {
-        if (turret == null || mapSurface == null) {
-            MelonLogger.Error("[FCS] GetMarkTarget: turret or map surface unbound");
+        if (turretLocation == null || mapSurface == null) {
+            MelonLogger.Error("[FCS] GetMarkTarget: TurretLocation or map surface unbound");
             return null;
         }
 
@@ -91,15 +98,14 @@ public class MapTable {
             return null;
         }
 
-        var turretLocalOnMap = mapSurface.InverseTransformPoint(turret.position);
-        var target = artillery.localPosition - turretLocalOnMap;
+        var target = artillery.localPosition - GetTurretLocalOnMap();
         return BuildMarkTarget(artillery.localPosition, target);
     }
 
     public IEnumerator GetStableMarkTarget(int index, Action<ArtilleryTask?> completed,
         float timeoutSeconds = MarkerStabilizeTimeoutSeconds) {
-        if (turret == null || mapSurface == null) {
-            MelonLogger.Error("[FCS] GetStableMarkTarget: turret or map surface unbound");
+        if (turretLocation == null || mapSurface == null) {
+            MelonLogger.Error("[FCS] GetStableMarkTarget: TurretLocation or map surface unbound");
             completed(null);
             yield break;
         }
@@ -123,8 +129,7 @@ public class MapTable {
                 break;
 
             var markerLocal = artillery.localPosition;
-            var turretLocalOnMap = mapSurface.InverseTransformPoint(turret.position);
-            var relative = markerLocal - turretLocalOnMap;
+            var relative = markerLocal - GetTurretLocalOnMap();
             sampleCount++;
 
             if (!havePrevious) {
