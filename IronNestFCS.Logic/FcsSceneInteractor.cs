@@ -2,6 +2,7 @@ using System.Collections;
 using Il2Cpp;
 using Il2CppTMPro;
 using IronNestFCS.Logic.FCS;
+using IronNestFCS.Logic.Localization;
 using MelonLoader;
 using UnityEngine;
 using Object = UnityEngine.Object;
@@ -86,12 +87,12 @@ public class FcsSceneInteractor
 
             SetColor(autoFireButton!, AutoFire ? Color.red : Color.white);
             if (autoFireLabel != null)
-                autoFireLabel.text = AutoFire ? "自动开火：开" : "自动开火：关";
+                autoFireLabel.text = AutoFireText(AutoFire);
         }, Color.white);
 
         autoFireButton.transform.position = new Vector3(x, y, z);
         autoFireButton.transform.localScale = Vector3.one * 0.02f;
-        var autoFireText = AddText("自动开火：关", 14f);
+        var autoFireText = AddText(AutoFireText(false), 14f);
         autoFireLabel = autoFireText.GetComponent<TextMeshPro>();
         autoFireText.transform.SetParent(autoFireButton.transform, false);
         autoFireText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
@@ -108,12 +109,12 @@ public class FcsSceneInteractor
             MelonLogger.Msg($"[FCS] MaxCharge toggled {(maxCharge ? "ON" : "OFF")}");
             SetColor(maxChargeButton!, maxCharge ? Color.red : Color.white);
             if (maxChargeLabel != null)
-                maxChargeLabel.text = maxCharge ? "最大装药：开" : "最大装药：关";
+                maxChargeLabel.text = MaxChargeText(maxCharge);
         }, Color.white);
 
         maxChargeButton.transform.position = new Vector3(x, y, z);
         maxChargeButton.transform.localScale = Vector3.one * 0.02f;
-        var maxChargeText = AddText("最大装药：关", 14f);
+        var maxChargeText = AddText(MaxChargeText(false), 14f);
         maxChargeLabel = maxChargeText.GetComponent<TextMeshPro>();
         maxChargeText.transform.SetParent(maxChargeButton.transform, false);
         maxChargeText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
@@ -151,6 +152,12 @@ public class FcsSceneInteractor
             y -= 0.0045f;
         }
     }
+
+    private static string AutoFireText(bool enabled) =>
+        FcsLocalization.T($"自动开火：{FcsLocalization.OnOff(enabled)}", $"Auto Fire: {FcsLocalization.OnOff(enabled)}");
+
+    private static string MaxChargeText(bool enabled) =>
+        FcsLocalization.T($"最大装药：{FcsLocalization.OnOff(enabled)}", $"Max Charge: {FcsLocalization.OnOff(enabled)}");
 
     private IEnumerator QueueStableTarget(int targetId, BulletType bulletType, GameObject button)
     {
