@@ -1,0 +1,48 @@
+param(
+    [string]$GameDir = "D:\Steam\steamapps\common\Iron Nest Heavy Turret Simulator",
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Debug"
+)
+
+$ErrorActionPreference = "Stop"
+
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+$Solution = Join-Path $RepoRoot "IronNestFCS.sln"
+$HostDll = Join-Path $RepoRoot "IronNestFCS\bin\$Configuration\IronNestFCS.dll"
+$AbstractionsDll = Join-Path $RepoRoot "IronNestFCS.Abstractions\bin\$Configuration\IronNestFCS.Abstractions.dll"
+$LogicDll = Join-Path $GameDir "UserData\IronNestFCS\IronNestFCS.Logic.dll"
+$ModsDir = Join-Path $GameDir "Mods"
+$UserLibsDir = Join-Path $GameDir "UserLibs"
+
+if (-not (Test-Path $GameDir)) {
+    throw "Game directory does not exist: $GameDir"
+}
+
+Write-Host "Building refactor stack..."
+& dotnet build $Solution -c $Configuration "-p:GameDir=$GameDir"
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet build failed with exit code $LASTEXITCODE"
+}
+
+foreach ($path in @($HostDll, $AbstractionsDll, $LogicDll)) {
+    if (-not (Test-Path $path)) {
+        throw "Expected build output was not produced: $path"
+    }
+}
+
+New-Item -ItemType Directory -Force -Path $ModsDir | Out-Null
+New-Item -ItemType Directory -Force -Path $UserLibsDir | Out-Null
+
+Write-Host "Deploying stable Host..."
+Copy-Item -Force $HostDll (Join-Path $ModsDir "IronNestFCS.dll")
+
+Write-Host "Deploying shared ABI..."
+Copy-Item -Force $AbstractionsDll (Join-Path $UserLibsDir "IronNestFCS.Abstractions.dll")
+
+# IronNestFCS.Logic.csproj already outputs directly to UserData\IronNestFCS.
+Write-Host "Logic output: $LogicDll"
+Write-Host ""
+Write-Host "Full refactor stack deployed. Restart the game once."
+Write-Host "Expected startup banner: IronNestFCS v1.1.0"
+Write-Host "Expected host message: Press F9 to hot reload TaskSystem."
+Write-Host "After this one-time Host/Abstractions deployment, normal Logic edits can use F9 again."
