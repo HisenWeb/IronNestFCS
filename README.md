@@ -80,24 +80,24 @@ The mod reads the game's real objects and physical state directly. It does **not
 
 ## What is different from the original IronNestFCS?
 
-This fork is built directly on [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS), so the comparison matters.
+This project continues directly from the source of [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS).
 
-The original v1.0.6 already has many of the features people may associate with this fork: **T1–T4 task queueing, automatic assignment to a free gun, both guns preparing in parallel, a gun taking another queued task after it recovers, automatic shell/powder purchasing, Auto Fire, Max Charge, and F9 hot reload.** Enhanced does not claim those as new features.
+First, the important part: **the original already automates most of the fire-control workflow.** T1–T4 queueing, assigning tasks to a free gun, both guns preparing at the same time, automatic shell/powder purchasing, Auto Fire, Max Charge, and F9 hot reload are already present in v1.0.6.
 
-The main source-level changes are in **how a task is planned, how two pending shots are ordered, and how the system recovers from the real game state after F9 or an interrupted sequence**:
+**Enhanced is mainly about making that existing automation behave better when several things are happening at once: repeated missions, both guns being busy, F9 resets, or a gun being halfway through loading.**
 
-| Area | Original IronNestFCS | IronNestFCS Enhanced |
+| What happens in game | Original IronNestFCS | IronNestFCS Enhanced |
 | --- | --- | --- |
-| Choosing a gun for a new task | The queued task is assigned immediately to the first free slot: Left if free, otherwise Right | Queueing stores only the mission. When planning starts, the FCS reads both guns' current chamber/loading/elevation state plus the current turret azimuth, evaluates the viable left/right choices, and chooses from their expected readiness/alignment |
-| Deciding which of two shots fires first | Each task reserves the shared turret through a lock; there is no comparison of the two tasks' predicted fire-ready times | Two unpaired FirePlans are compared once. The plan expected to become fire-ready first is committed first; once the order is decided, later arrivals do not reshuffle that pair |
-| What F9 resets | F9 reloads the Logic assembly; shutdown stops the Logic-owned coroutines and clears the task queue and left/right task slots | F9 reloads the TaskSystem, but accepted `Gun + Shell + Charge` loading transactions live in the stable Host and continue across the reload |
-| Replanning with ammunition already in the gun | The normal task routine proceeds through its own selected-shell loading flow; there is no separate persistent loading transaction for the next Logic instance to inherit | Planning recognizes an active loading transaction, a fully loaded round, a shell-loaded gun, or an empty ready gun, and plans around the physical state that actually exists |
-| Ballistic calculator result | The original sets the dials, waits fixed short delays, presses Calculate, waits again, then reads the elevation display | Enhanced waits for the Calculate control to become usable, completes the physical down/up click, watches the output until it is stable, and fails the solve if a trustworthy result cannot be confirmed |
-| Review / Arm controls | The task routine directly clicks the review switches and arming lever | Enhanced reads the actual physical switch/lever poses, changes only controls that are not already in the required state, and reconciles those controls after F9 |
-| Turret state after a task reset | The Logic coroutine is stopped on reload, but the original turret wrapper does not explicitly cancel the old game-side `DesiredRotation` | On rebind, Enhanced holds the turret at its current physical azimuth to cancel stale task intent; new plans then start from the live turret position and rotation commands have cancellation/timeout handling |
-| Player UI | No separate localization layer | Player-facing UI can be switched between `en-US` and `zh-CN` |
+| **Both guns can take a new mission** | Gives the mission to the first free gun slot; when both are free, Left is chosen first | Looks at what each gun currently contains, its elevation, and where the turret is pointing, then chooses the gun that better fits the shot |
+| **Both guns are preparing their next shots** | Each task waits for access to the shared turret; whichever task gets it first continues first | Estimates which shot can become ready sooner and tries to fire that one first; once the order is chosen, later tasks do not casually reshuffle it |
+| **You submitted the wrong task and press F9** | The current tasks, waiting queue, and the coroutines running those tasks are cleared when Logic reloads | The task list and firing order reset, but an actual shell/powder loading sequence that has already started can keep going; you can then submit T1–T4 again |
+| **After F9, a gun is already loaded or only half loaded** | The new Logic instance has no separate in-progress loading transaction to inherit | Reads what is physically there now — empty, shell loaded, fully loaded, or still loading — and plans the new task around that real state |
+| **The ballistic calculator is slow to update** | Waits fixed short delays and then reads the elevation display | Waits until Calculate is actually usable and watches the result until it has settled; if the result cannot be trusted, it will not use a suspicious old value |
+| **Review / Arm controls were already moved** | The task flow directly clicks those controls | Checks the real physical position first and changes only what is needed, reducing the chance of toggling an already-correct control the wrong way |
+| **You press F9 while the turret is still turning toward an old target** | The old task coroutine stops, but the original wrapper does not explicitly clear the old game-side rotation target | Cancels the stale target, holds the turret at its current real direction, and lets newly submitted tasks plan from there |
+| **You want a Chinese UI** | No separate English/Chinese localization layer | Player-facing UI can switch between Simplified Chinese and English |
 
-In short: **the original already automates the heavy turret and already supports two-gun queued operation. Enhanced mainly replaces the original “assign a free gun and run the task coroutine” model with physical-state-aware planning, one-time fire-order comparison, and F9-persistent loading/recovery.**
+In short: **the original already knows how to “auto-fire the turret.” Enhanced focuses on keeping that automation sensible when missions overlap, F9 is used to start over, or the guns are already in the middle of doing something.**
 
 ---
 
