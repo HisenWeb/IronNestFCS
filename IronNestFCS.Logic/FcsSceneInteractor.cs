@@ -77,6 +77,8 @@ public class FcsSceneInteractor {
         autoFireButton = AddButton(() => {
             AutoFire = !AutoFire;
             MelonLogger.Msg($"[FCS] AutoFire toggled {(AutoFire ? "ON" : "OFF")}");
+            if (AutoFire)
+                fcs.TaskRunner.OnAutoFireEnabled();
             SetColor(autoFireButton, AutoFire ? Color.red : Color.white);
             if (autoFireLabel != null)
                 autoFireLabel.text = AutoFire ? "自动开火：开" : "自动开火：关";
