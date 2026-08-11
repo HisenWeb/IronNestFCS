@@ -7,14 +7,14 @@ using Object = UnityEngine.Object;
 namespace IronNestFCS.Logic.Localization;
 
 /// <summary>
-/// Player-facing localization only. The UI follows the game's currently rendered language automatically.
-/// Chinese is selected only when the game UI provides Chinese evidence; any missing/unsupported detection
-/// falls back to English. Runtime diagnostics intentionally stay in English so one log format can be used
-/// for every release package.
+/// Player-facing localization only. Chinese is enabled only when the game's localized left TTI label
+/// explicitly renders 左; every other state/language falls back to English. Runtime diagnostics stay in
+/// English so one log format can be used for every release package.
 /// </summary>
 internal static class FcsLocalization
 {
     private const float LanguagePollSeconds = 1f;
+    private const string ChineseLeftLabel = "左";
 
     private static bool _isChinese;
     private static TMP_Text? _languageProbeText;
@@ -30,51 +30,28 @@ internal static class FcsLocalization
         : value ? "ON" : "OFF";
 
     /// <summary>
-    /// Bind to a stable localized game label after the fire-control scene is ready, then infer the current
-    /// game language from the text the game itself is rendering. No user language configuration is required.
+    /// Bind to the game's localized left Time-To-Impact label. Only the exact Chinese label 左 selects the
+    /// Chinese FCS UI; a missing probe, an empty label, English, or any other locale selects English.
     /// </summary>
     public static void BindGameLanguage()
     {
-        _isChinese = false; // English is the required fallback.
+        _isChinese = false;
         _languageProbeText = null;
         _nextLanguagePollAt = Time.realtimeSinceStartup + LanguagePollSeconds;
 
         try
         {
             _languageProbeText = FindPreferredLanguageProbe();
-            if (_languageProbeText != null)
+            if (_languageProbeText == null)
             {
-                var probe = SafeText(_languageProbeText);
-                if (TryInferFromPreferredProbe(probe, out var chinese))
-                {
-                    _isChinese = chinese;
-                    MelonLogger.Msg($"[FCS] UI language detected from game: {(_isChinese ? "zh-CN" : "en-US")} (probe='{probe}')");
-                    return;
-                }
-            }
-
-            // Fallback scene scan. We only opt into Chinese when the currently rendered game UI contains
-            // clear simplified-Chinese evidence; otherwise the requested fallback is English.
-            var inspected = 0;
-            foreach (var text in Object.FindObjectsOfType<TMP_Text>(true))
-            {
-                if (text == null)
-                    continue;
-
-                var value = SafeText(text);
-                if (string.IsNullOrWhiteSpace(value))
-                    continue;
-
-                inspected++;
-                if (!ContainsSimplifiedChineseSignal(value))
-                    continue;
-
-                _isChinese = true;
-                MelonLogger.Msg($"[FCS] UI language detected from game: zh-CN (scene text scan, inspected={inspected})");
+                MelonLogger.Msg("[FCS] UI language probe not found; using en-US fallback");
                 return;
             }
 
-            MelonLogger.Msg($"[FCS] UI language detected from game: en-US fallback (scene text scan, inspected={inspected})");
+            var probe = SafeText(_languageProbeText);
+            _isChinese = IsChineseProbe(probe);
+            MelonLogger.Msg(
+                $"[FCS] UI language detected from game: {(_isChinese ? "zh-CN" : "en-US")} (probe='{probe}')");
         }
         catch (Exception ex)
         {
@@ -85,8 +62,8 @@ internal static class FcsLocalization
     }
 
     /// <summary>
-    /// Follow an in-game language change without requiring a Logic reload. The cached probe avoids repeated
-    /// scene-wide searches during normal play; if the game rebuilds that UI, the probe is rebound lazily.
+    /// Re-read only the cached TMP label once per second. If the game rebuilds the localized UI object, find
+    /// that one probe again. No scene-wide text scan is performed during normal polling.
     /// </summary>
     public static void TickGameLanguage()
     {
@@ -101,20 +78,33 @@ internal static class FcsLocalization
             {
                 _languageProbeText = FindPreferredLanguageProbe();
                 if (_languageProbeText == null)
+                {
+                    if (_isChinese)
+                    {
+                        _isChinese = false;
+                        MelonLogger.Msg("[FCS] Game UI language probe unavailable; changed to en-US fallback");
+                    }
                     return;
+                }
             }
 
             var probe = SafeText(_languageProbeText);
-            if (!TryInferFromPreferredProbe(probe, out var chinese) || chinese == _isChinese)
+            var chinese = IsChineseProbe(probe);
+            if (chinese == _isChinese)
                 return;
 
             _isChinese = chinese;
-            MelonLogger.Msg($"[FCS] Game UI language changed: {(_isChinese ? "zh-CN" : "en-US")} (probe='{probe}')");
+            MelonLogger.Msg(
+                $"[FCS] Game UI language changed: {(_isChinese ? "zh-CN" : "en-US")} (probe='{probe}')");
         }
         catch
         {
-            // Losing the cached UI object must never affect fire-control execution or force a language flip.
             _languageProbeText = null;
+            if (_isChinese)
+            {
+                _isChinese = false;
+                MelonLogger.Msg("[FCS] Game UI language probe lost; changed to en-US fallback");
+            }
         }
     }
 
@@ -229,7 +219,6 @@ internal static class FcsLocalization
             if (text == null)
                 continue;
 
-            // Prefer the stable watch mirror already used by the TTI reader/probe.
             if (path.Contains("Main Camera/Static Gun Watch Parent", StringComparison.OrdinalIgnoreCase))
                 return text;
 
@@ -239,44 +228,8 @@ internal static class FcsLocalization
         return fallback;
     }
 
-    private static bool TryInferFromPreferredProbe(string value, out bool chinese)
-    {
-        chinese = false;
-        if (string.IsNullOrWhiteSpace(value))
-            return false;
-
-        var trimmed = value.Trim();
-
-        // The game's Chinese TTI dial currently renders 左. English/other locales render non-Chinese text.
-        // This is game UI state, not an OS-language guess.
-        if (string.Equals(trimmed, "左", StringComparison.Ordinal))
-        {
-            chinese = true;
-            return true;
-        }
-
-        if (ContainsSimplifiedChineseSignal(trimmed))
-        {
-            chinese = true;
-            return true;
-        }
-
-        chinese = false;
-        return true;
-    }
-
-    private static bool ContainsSimplifiedChineseSignal(string value)
-    {
-        // Prefer characters whose simplified forms differ from common traditional/Japanese forms, so an
-        // unsupported locale is less likely to be mistaken for Chinese. English remains the fallback.
-        const string signals = "药弹击发时间设置关闭开启进务战敌舰队车这为从后门线显该实装载远达标计预飞";
-        foreach (var ch in value)
-        {
-            if (signals.IndexOf(ch) >= 0)
-                return true;
-        }
-        return false;
-    }
+    private static bool IsChineseProbe(string value) =>
+        string.Equals(value.Trim(), ChineseLeftLabel, StringComparison.Ordinal);
 
     private static string SafeText(TMP_Text? text)
     {
