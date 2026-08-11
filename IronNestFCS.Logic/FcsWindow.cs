@@ -108,9 +108,24 @@ public class FcsWindow
         Label(FcsLocalization.T($"等待队列：{queue.Count}", $"Pending queue: {queue.Count}"));
         foreach (var item in queue)
         {
+            var hintZh = item.pendingHint switch
+            {
+                PendingHint.ShellMismatch => " · 弹种不匹配",
+                PendingHint.ChargeRangeInsufficient => " · 装药射程不足",
+                PendingHint.AmmoMismatch => " · 装药射程不足",
+                _ => "",
+            };
+            var hintEn = item.pendingHint switch
+            {
+                PendingHint.ShellMismatch => " · shell mismatch",
+                PendingHint.ChargeRangeInsufficient => " · charge range insufficient",
+                PendingHint.AmmoMismatch => " · charge range insufficient",
+                _ => "",
+            };
+
             Label(FcsLocalization.T(
-                $"  T{item.targetId} {item.bulletType.DisplayName()}  方位 {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}",
-                $"  T{item.targetId} {item.bulletType.DisplayName()}  Az {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}"));
+                $"  T{item.targetId} {item.bulletType.DisplayName()}  方位 {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}{hintZh}",
+                $"  T{item.targetId} {item.bulletType.DisplayName()}  Az {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}{hintEn}"));
         }
 
         Label(FcsLocalization.T(

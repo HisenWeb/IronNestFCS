@@ -26,6 +26,7 @@ public class FSC
     private HarmonyInstance? _harmony;
     private readonly List<object> _runningCoroutines = new();
     private readonly SceneExposureService _sceneExposure;
+    private int _lastResumeGeneration;
 
     internal ILoadingSystem Loading { get; }
     internal FcsSceneInteractor SceneInteractor { get; private set; }
@@ -94,9 +95,9 @@ public class FSC
 
         SharedResources.Reset();
         FcsRuntimeClock.Reset();
+        _lastResumeGeneration = FcsRuntimeClock.ResumeGeneration;
         TimeToImpactReader.Reset();
         FcsLocalization.ResetGameLanguage();
-        FirePriority.Reset();
         PlanExecutor.DisposeState();
 
         IsBound = Loading.IsBound
@@ -111,10 +112,14 @@ public class FSC
         if (!Loading.IsBound)
             MelonLogger.Warning("[FCS] Persistent LoadingSystem is not bound.");
 
+        // FirePriority caches its rendered status text, so detect the game language before resetting it.
+        if (IsBound)
+            FcsLocalization.BindGameLanguage();
+        FirePriority.Reset();
+
         MelonLogger.Msg("[FCS] Initialize: " + (IsBound ? "success" : "failed"));
         if (IsBound)
         {
-            FcsLocalization.BindGameLanguage();
             SceneInteractor.Initialize();
             TrackCoroutine(SharedResources.ResetFireControlsAfterBind());
             TrackCoroutine(SharedResources.ReplenishPowderLoop());
@@ -129,9 +134,14 @@ public class FSC
         if (!FcsRuntimeClock.IsFocused)
             return;
 
+        if (_lastResumeGeneration != FcsRuntimeClock.ResumeGeneration)
+        {
+            _lastResumeGeneration = FcsRuntimeClock.ResumeGeneration;
+            Dispatcher.TryDispatch();
+        }
+
         FcsLocalization.TickGameLanguage();
         SceneInteractor.Update();
-        Dispatcher.TryDispatch();
         PlanExecutor.Tick();
         CaptureEstimatedFlightTime(LeftRight.Left);
         CaptureEstimatedFlightTime(LeftRight.Right);

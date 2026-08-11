@@ -19,14 +19,17 @@ Press **F9** when you want to abandon the current mission plan and build a new o
 ## Highlights
 
 - Build a T1–T4 mission queue and keep both guns working through it.
+- Tasks that do not match the guns' current loaded shell/charge stay Pending instead of disappearing; later compatible tasks can still be planned.
 - Replan with **F9** without erasing already-started physical loading.
 - Read the real chamber, loading mechanism, turret and control state before making execution decisions.
 - Calculate ballistics through the game's own ballistic calculator.
+- Quickly reject obvious shell-type or fixed-charge range mismatches before driving the slower in-game ballistic calculator UI.
 - Automatically buy missing shells and powder when required.
 - Set elevation and turret azimuth automatically.
 - Optional **Auto Fire** for the final firing action.
 - **Max Charge** can prefer the highest usable powder charge.
 - The top-left FCS panel shows the current mission, progress, range, charge, elevation and **estimated shell flight time**; flight time is available as soon as the FirePlan is created instead of waiting for the mechanical TTI dial to reach the firing-ready stage.
+- Pending tasks can show a short HUD reason such as shell mismatch or insufficient current charge range.
 - The UI automatically follows the game's Chinese/English language state. If Chinese cannot be positively identified, the FCS uses English.
 - One universal release package is used for all players.
 
@@ -90,6 +93,8 @@ red 4 → T4
 
 You can submit several missions in succession. Smart will plan and distribute them between the two guns.
 
+If a mission cannot match the guns' current physical ammunition state, it stays in the Pending queue. That blocked mission does not prevent a later compatible mission from using an available gun. Use **F9** when you want to discard the current queued missions and replan.
+
 ### 3. Let the FCS prepare the shot
 
 A normal mission flows through:
@@ -118,7 +123,7 @@ The top-left `IronNest Fire Control System` panel shows:
 - **estimated shell flight time** as soon as the FirePlan is created;
 - fire-priority/order status;
 - Auto Fire and Max Charge state;
-- pending queue;
+- pending queue, including a short mismatch hint when useful;
 - session success/failure statistics and recent results.
 
 Estimated flight time uses measured in-game C1–C6 fixed charge coefficients and the target range. This makes TTI available immediately after the FirePlan is fixed instead of waiting for `WaitingForFire`. The existing game Time-To-Impact dial reader remains as a fallback if an early estimate is unavailable. The value stored on the FirePlan does not continue counting down with the mechanical dial after firing.
@@ -133,6 +138,8 @@ Estimated flight time uses measured in-game C1–C6 fixed charge coefficients an
 Press **F9** whenever the current plan or queue is wrong. Then reposition the markers and submit new T1–T4 missions.
 
 Important: **F9 resets the plan, not physical reality.** An already accepted shell/powder loading sequence continues. The new plan reads the resulting real chamber, elevation and turret state.
+
+A task that cannot use the current loaded shell/charge may intentionally remain Pending until the gun state changes. If that task is no longer wanted, use F9 to clear the current TaskSystem plan/queue and submit a new one.
 
 ## Diagnostics
 
