@@ -26,7 +26,7 @@ Press **F9** when you want to abandon the current mission plan and build a new o
 - Set elevation and turret azimuth automatically.
 - Optional **Auto Fire** for the final firing action.
 - **Max Charge** can prefer the highest usable powder charge.
-- The top-left FCS panel shows the current mission, progress, range, charge, elevation and **estimated shell flight time**.
+- The top-left FCS panel shows the current mission, progress, range, charge, elevation and **estimated shell flight time**; flight time is available as soon as the FirePlan is created instead of waiting for the mechanical TTI dial to reach the firing-ready stage.
 - The UI automatically follows the game's Chinese/English language state. If Chinese cannot be positively identified, the FCS uses English.
 - One universal release package is used for all players.
 
@@ -115,13 +115,13 @@ The top-left `IronNest Fire Control System` panel shows:
 - mission progress and elapsed time;
 - azimuth and range;
 - charge and elevation;
-- **estimated shell flight time** once the game's Time-To-Impact preset is available;
+- **estimated shell flight time** as soon as the FirePlan is created;
 - fire-priority/order status;
 - Auto Fire and Max Charge state;
 - pending queue;
 - session success/failure statistics and recent results.
 
-The estimated flight-time value is read from the game's own Time-To-Impact dial after the shot solution is ready. It is stored with the current FirePlan and does not count down after firing.
+Estimated flight time uses measured in-game C1–C6 fixed charge coefficients and the target range. This makes TTI available immediately after the FirePlan is fixed instead of waiting for `WaitingForFire`. The existing game Time-To-Impact dial reader remains as a fallback if an early estimate is unavailable. The value stored on the FirePlan does not continue counting down with the mechanical dial after firing.
 
 ### 5. Fire
 
@@ -158,7 +158,7 @@ and press **F9**. Detailed categorized logs are then written under:
 
 Set `diagnostics.txt` back to `off` and press F9 after troubleshooting.
 
-The temporary trajectory-stopwatch probe used during development is not included in release builds; it does not generate a separate `flight.log`.
+Temporary probes used to verify TTI timing, mechanical-dial behavior, and charge coefficients during development are not included in the production branch.
 
 ## Smart architecture
 
