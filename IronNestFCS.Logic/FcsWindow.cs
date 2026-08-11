@@ -112,14 +112,14 @@ public class FcsWindow
             {
                 PendingHint.ShellMismatch => " · 弹种不匹配",
                 PendingHint.ChargeRangeInsufficient => " · 装药射程不足",
-                PendingHint.AmmoMismatch => " · 弹药不匹配",
+                PendingHint.AmmoMismatch => " · 装药射程不足",
                 _ => "",
             };
             var hintEn = item.pendingHint switch
             {
                 PendingHint.ShellMismatch => " · shell mismatch",
                 PendingHint.ChargeRangeInsufficient => " · charge range insufficient",
-                PendingHint.AmmoMismatch => " · ammunition mismatch",
+                PendingHint.AmmoMismatch => " · charge range insufficient",
                 _ => "",
             };
 
