@@ -134,15 +134,14 @@ try {
         Write-Host "Version already set to $Version"
     }
 
-    Write-Host "Building release packages..."
+    Write-Host "Building release package..."
     & $BuildPackagesScript -GameDir $GameDir -Configuration Release -Version $Version -OutputDir $OutputDir
     if ($LASTEXITCODE -ne 0) {
         throw "Release package build failed."
     }
 
     $assets = @(
-        (Join-Path $OutputDir "IronNestFCS-Smart_v${Version}_en-US.zip"),
-        (Join-Path $OutputDir "IronNestFCS-Smart_v${Version}_zh-CN.zip"),
+        (Join-Path $OutputDir "IronNestFCS-Smart_v${Version}.zip"),
         (Join-Path $OutputDir "SHA256SUMS.txt")
     )
     foreach ($asset in $assets) {
