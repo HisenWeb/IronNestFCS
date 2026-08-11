@@ -26,6 +26,7 @@ public class FSC
     private HarmonyInstance? _harmony;
     private readonly List<object> _runningCoroutines = new();
     private readonly SceneExposureService _sceneExposure;
+    private int _lastResumeGeneration;
 
     internal ILoadingSystem Loading { get; }
     internal FcsSceneInteractor SceneInteractor { get; private set; }
@@ -94,6 +95,7 @@ public class FSC
 
         SharedResources.Reset();
         FcsRuntimeClock.Reset();
+        _lastResumeGeneration = FcsRuntimeClock.ResumeGeneration;
         TimeToImpactReader.Reset();
         FcsLocalization.ResetGameLanguage();
         FirePriority.Reset();
@@ -129,9 +131,14 @@ public class FSC
         if (!FcsRuntimeClock.IsFocused)
             return;
 
+        if (_lastResumeGeneration != FcsRuntimeClock.ResumeGeneration)
+        {
+            _lastResumeGeneration = FcsRuntimeClock.ResumeGeneration;
+            Dispatcher.TryDispatch();
+        }
+
         FcsLocalization.TickGameLanguage();
         SceneInteractor.Update();
-        Dispatcher.TryDispatch();
         PlanExecutor.Tick();
         CaptureEstimatedFlightTime(LeftRight.Left);
         CaptureEstimatedFlightTime(LeftRight.Right);
