@@ -1,5 +1,5 @@
 using MelonLoader;
-using TMPro;
+using Il2CppTMPro;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
