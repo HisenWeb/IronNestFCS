@@ -21,7 +21,6 @@ public class FcsModule : IFcsModule
 
         PhysicalStateProbe.Reset();
         TriggerConsoleProbe.Reset();
-        TrajectoryStopwatchProbe.Reset();
 
         var bound = _fcs.TryBind();
 
@@ -33,7 +32,6 @@ public class FcsModule : IFcsModule
         {
             PhysicalStateProbe.LogCurrentState();
             TriggerConsoleProbe.BindAndLog();
-            TrajectoryStopwatchProbe.BindAndLog();
         }
 
         return bound;
@@ -50,7 +48,6 @@ public class FcsModule : IFcsModule
         {
             PhysicalStateProbe.Tick();
             TriggerConsoleProbe.Tick();
-            TrajectoryStopwatchProbe.Tick();
         }
     }
 
@@ -63,7 +60,6 @@ public class FcsModule : IFcsModule
             _fcs?.Dispose();
             PhysicalStateProbe.Reset();
             TriggerConsoleProbe.Reset();
-            TrajectoryStopwatchProbe.Reset();
             _window = null;
             _fcs = null;
         }
