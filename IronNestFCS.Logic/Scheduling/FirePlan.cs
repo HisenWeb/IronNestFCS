@@ -20,6 +20,7 @@ internal sealed class FirePlan
     public float EstimatedLocalReadyAt { get; }
     public float AzimuthSeconds { get; }
     public float EstimatedReadyAt { get; private set; }
+    public float EstimatedFlightSeconds { get; private set; } = float.NaN;
     public float AlignmentScore { get; }
     public int Generation { get; }
 
@@ -72,6 +73,20 @@ internal sealed class FirePlan
             ? Math.Max(EstimatedLocalReadyAt, sharedStartAt + AzimuthSeconds)
             : float.NaN;
         return EstimatedReadyAt;
+    }
+
+    public bool TrySetEstimatedFlightSeconds(float seconds)
+    {
+        if (!float.IsNaN(EstimatedFlightSeconds)
+            || float.IsNaN(seconds)
+            || float.IsInfinity(seconds)
+            || seconds <= 0f)
+        {
+            return false;
+        }
+
+        EstimatedFlightSeconds = seconds;
+        return true;
     }
 
     public GunSide HostSide => Side == LeftRight.Left ? GunSide.Left : GunSide.Right;
