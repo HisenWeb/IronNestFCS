@@ -5,8 +5,8 @@ namespace IronNestFCS.Logic.FCS;
 
 /// <summary>
 /// Read-only adapter for the game's mechanical Time To Impact dials.
-/// The dial advances at 6 degrees per second. We capture the preset only after the gun reaches
-/// WaitingForFire, then store that value on the corresponding FirePlan.
+/// The dial advances at 6 degrees per second. Early flight time is normally estimated when a FirePlan is created;
+/// this reader remains as a fallback when no early estimate is available and the gun reaches WaitingForFire.
 /// </summary>
 internal static class TimeToImpactReader
 {
