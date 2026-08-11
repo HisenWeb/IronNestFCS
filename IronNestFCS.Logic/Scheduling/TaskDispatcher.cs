@@ -15,25 +15,18 @@ namespace IronNestFCS.Logic.Scheduling;
 internal sealed class TaskDispatcher
 {
     private const int RecentTaskLimit = 20;
-    private const float RetryDelaySeconds = 0.5f;
 
     private readonly FSC _fcs;
     private readonly Queue<ArtilleryTask> _taskQueue = new();
     private readonly Queue<ArtilleryTask> _recentTasks = new();
 
     private bool _planning;
-    private float _retryNotBefore;
 
     public int PendingCount => _taskQueue.Count;
-    public bool IsPlanning => _planning;
 
     // FirePlanExecutor uses this to decide whether a lone plan should wait for a possible partner.
-    // Pending tasks that were already scanned and deferred must not block that lone plan forever.
-    public bool HasPendingOrPlanning =>
-        _planning
-        || (_taskQueue.Count > 0
-            && FcsRuntimeClock.Now >= _retryNotBefore
-            && _fcs.PlanExecutor.HasFreeGun);
+    // Only an active planning round can still produce that partner; deferred pending tasks alone cannot.
+    public bool HasPendingOrPlanning => _planning;
 
     public Queue<ArtilleryTask> QueueSnapshot => new(_taskQueue);
     public Queue<ArtilleryTask> RecentSnapshot => new(_recentTasks);
@@ -52,7 +45,6 @@ internal sealed class TaskDispatcher
         _taskQueue.Clear();
         _recentTasks.Clear();
         _planning = false;
-        _retryNotBefore = 0f;
     }
 
     public void EnqueueTask(ArtilleryTask task)
@@ -67,7 +59,6 @@ internal sealed class TaskDispatcher
 
         // Intent-only queue: no gun/loading read here.
         _taskQueue.Enqueue(task);
-        _retryNotBefore = 0f;
         MelonLogger.Msg($"[FCS Dispatch] queued T{task.targetId}; pending={_taskQueue.Count}");
         TryDispatch();
     }
@@ -76,7 +67,6 @@ internal sealed class TaskDispatcher
     {
         if (!FcsRuntimeClock.IsFocused
             || _planning
-            || FcsRuntimeClock.Now < _retryNotBefore
             || _taskQueue.Count == 0
             || !_fcs.PlanExecutor.HasFreeGun)
             return;
@@ -138,12 +128,6 @@ internal sealed class TaskDispatcher
         }
 
         _planning = false;
-
-        // If a free gun remains after every current pending task was examined, avoid re-solving the same
-        // unchanged snapshots every frame. New task submission clears this delay immediately.
-        _retryNotBefore = _taskQueue.Count > 0 && _fcs.PlanExecutor.HasFreeGun
-            ? FcsRuntimeClock.Now + RetryDelaySeconds
-            : 0f;
 
         if (!admittedAny && attempted.Count > 0)
             MelonLogger.Msg($"[FCS Dispatch] planning round deferred {attempted.Count} pending task(s)");
