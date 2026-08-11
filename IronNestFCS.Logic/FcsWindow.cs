@@ -82,8 +82,18 @@ public class FcsWindow
             return;
         }
 
-        DrawGun(FcsLocalization.T("左炮", "Left gun"), "Left", fcs.LeftTask, Label);
-        DrawGun(FcsLocalization.T("右炮", "Right gun"), "Right", fcs.RightTask, Label);
+        DrawGun(
+            FcsLocalization.T("左炮", "Left gun"),
+            "Left",
+            fcs.LeftTask,
+            fcs.PlanExecutor.GetPlan(LeftRight.Left)?.EstimatedFlightSeconds ?? float.NaN,
+            Label);
+        DrawGun(
+            FcsLocalization.T("右炮", "Right gun"),
+            "Right",
+            fcs.RightTask,
+            fcs.PlanExecutor.GetPlan(LeftRight.Right)?.EstimatedFlightSeconds ?? float.NaN,
+            Label);
 
         Label(fcs.FirePriorityStatusText);
         if (!string.IsNullOrEmpty(fcs.FirePriorityLeftDetail))
@@ -133,7 +143,12 @@ public class FcsWindow
         }
     }
 
-    private static void DrawGun(string gunName, string side, ArtilleryTask? task, Action<string> label)
+    private static void DrawGun(
+        string gunName,
+        string side,
+        ArtilleryTask? task,
+        float estimatedFlightSeconds,
+        Action<string> label)
     {
         if (task == null)
         {
@@ -173,9 +188,12 @@ public class FcsWindow
         label(FcsLocalization.T(
             $"{gunName}：T{task.targetId} {task.bulletType.DisplayName()}  {FcsLocalization.ProgressText(task.progress)}  {elapsed:F0}秒",
             $"{gunName}: T{task.targetId} {task.bulletType.DisplayName()}  {FcsLocalization.ProgressText(task.progress)}  {elapsed:F0}s"));
+
+        var flightZh = float.IsNaN(estimatedFlightSeconds) ? "--" : $"{estimatedFlightSeconds:F1}秒";
+        var flightEn = float.IsNaN(estimatedFlightSeconds) ? "--" : $"{estimatedFlightSeconds:F1}s";
         label(FcsLocalization.T(
-            $"  方位 {task.angel:F1}° / 距离 {task.distance:F2}km   装药 {task.chargeCount}   仰角 {task.elevation:F1}°",
-            $"  Az {task.angel:F1}° / Range {task.distance:F2}km   Charge {task.chargeCount}   Elevation {task.elevation:F1}°"));
+            $"  方位 {task.angel:F1}° / 距离 {task.distance:F2}km   装药 {task.chargeCount}   仰角 {task.elevation:F1}°   预计飞行 {flightZh}",
+            $"  Az {task.angel:F1}° / Range {task.distance:F2}km   Charge {task.chargeCount}   Elevation {task.elevation:F1}°   Est. Flight {flightEn}"));
     }
 
     /// <summary>Converts a map coordinate into the grid/sub-grid notation used by the tactical map.</summary>
