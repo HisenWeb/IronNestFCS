@@ -147,14 +147,8 @@ public class FSC
             return;
         }
 
-        if (!TimeToImpactReader.TryReadEstimatedSeconds(side, out var seconds))
-            return;
-
-        if (plan.TrySetEstimatedFlightSeconds(seconds))
-        {
-            MelonLogger.Msg(
-                $"[FCS-FLIGHT-PROBE] captured {side} T{plan.Task.targetId} estimated flight={seconds:F2}s");
-        }
+        if (TimeToImpactReader.TryReadEstimatedSeconds(side, out var seconds))
+            plan.TrySetEstimatedFlightSeconds(seconds);
     }
 
     public void Dispose()
