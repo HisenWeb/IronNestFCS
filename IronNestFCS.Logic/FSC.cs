@@ -4,6 +4,7 @@ using IronNestFCS.Abstractions;
 using IronNestFCS.Logic.Execution;
 using IronNestFCS.Logic.FCS;
 using IronNestFCS.Logic.Infrastructure;
+using IronNestFCS.Logic.Localization;
 using IronNestFCS.Logic.Scheduling;
 using MelonLoader;
 
@@ -94,6 +95,7 @@ public class FSC
         SharedResources.Reset();
         FcsRuntimeClock.Reset();
         TimeToImpactReader.Reset();
+        FcsLocalization.ResetGameLanguage();
         FirePriority.Reset();
         PlanExecutor.DisposeState();
 
@@ -112,6 +114,7 @@ public class FSC
         MelonLogger.Msg("[FCS] Initialize: " + (IsBound ? "success" : "failed"));
         if (IsBound)
         {
+            FcsLocalization.BindGameLanguage();
             SceneInteractor.Initialize();
             TrackCoroutine(SharedResources.ResetFireControlsAfterBind());
             TrackCoroutine(SharedResources.ReplenishPowderLoop());
@@ -126,6 +129,7 @@ public class FSC
         if (!FcsRuntimeClock.IsFocused)
             return;
 
+        FcsLocalization.TickGameLanguage();
         SceneInteractor.Update();
         Dispatcher.TryDispatch();
         PlanExecutor.Tick();
@@ -169,6 +173,7 @@ public class FSC
         PlanExecutor.DisposeState();
         FirePriority.Reset();
         TimeToImpactReader.Reset();
+        FcsLocalization.ResetGameLanguage();
 
         // Only TaskSystem-owned clicks are released here. Persistent loading has a separate Host tracker.
         SceneInteractor.ShutDown();
