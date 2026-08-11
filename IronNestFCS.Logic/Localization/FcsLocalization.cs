@@ -86,7 +86,7 @@ internal static class FcsLocalization
 
     /// <summary>
     /// Follow an in-game language change without requiring a Logic reload. The cached probe avoids repeated
-    /// scene-wide searches during normal play.
+    /// scene-wide searches during normal play; if the game rebuilds that UI, the probe is rebound lazily.
     /// </summary>
     public static void TickGameLanguage()
     {
@@ -98,7 +98,11 @@ internal static class FcsLocalization
         try
         {
             if (_languageProbeText == null)
-                return;
+            {
+                _languageProbeText = FindPreferredLanguageProbe();
+                if (_languageProbeText == null)
+                    return;
+            }
 
             var probe = SafeText(_languageProbeText);
             if (!TryInferFromPreferredProbe(probe, out var chinese) || chinese == _isChinese)
@@ -110,6 +114,7 @@ internal static class FcsLocalization
         catch
         {
             // Losing the cached UI object must never affect fire-control execution or force a language flip.
+            _languageProbeText = null;
         }
     }
 
