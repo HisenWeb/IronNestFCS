@@ -17,6 +17,8 @@ namespace IronNestFCS.Logic.Scheduling;
 /// </summary>
 internal sealed class FirePlanner
 {
+    private const float MaxRangePerChargeKm = 5f;
+
     private readonly FSC _fcs;
 
     public FirePlanner(FSC fcs)
@@ -130,6 +132,22 @@ internal sealed class FirePlanner
                 out var loadAlreadyRunning, out var loadSeconds, out var loadLabel, out var resolveReason))
         {
             setReason(resolveReason);
+            yield break;
+        }
+
+        if (charge is < 1 or > 6)
+        {
+            setReason($"invalid charge C{charge}");
+            yield break;
+        }
+
+        var maxRangeKm = charge * MaxRangePerChargeKm;
+        if (task.distance > maxRangeKm)
+        {
+            setReason($"{shell.DisplayName()} C{charge} max range {maxRangeKm:F2}km < target {task.distance:F2}km");
+            MelonLogger.Msg(
+                $"[FCS Plan] T{task.targetId}: quick reject {side} {shell.DisplayName()} C{charge}; " +
+                $"target={task.distance:F2}km > max={maxRangeKm:F2}km");
             yield break;
         }
 
