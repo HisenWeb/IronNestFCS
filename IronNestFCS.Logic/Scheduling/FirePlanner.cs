@@ -29,6 +29,7 @@ internal sealed class FirePlanner
     public IEnumerator BuildPlan(ArtilleryTask task, Action<FirePlan?, string> completed)
     {
         task.progress = Progress.Calculating;
+        task.pendingHint = PendingHint.None;
 
         var snapshotAt = FcsRuntimeClock.Now;
         var turretController = GameObject.Find("TurretSystem")?.GetComponent<TurretController>();
@@ -50,11 +51,13 @@ internal sealed class FirePlanner
         FirePlanCandidate? right = null;
         var leftReason = "";
         var rightReason = "";
+        var leftHint = PendingHint.None;
+        var rightHint = PendingHint.None;
 
         if (_fcs.PlanExecutor.GetPlan(LeftRight.Left) == null)
         {
             yield return BuildCandidate(task, LeftRight.Left, leftPhysical, leftLoading, currentAzimuth,
-                ballisticCache, result => left = result, reason => leftReason = reason);
+                ballisticCache, result => left = result, reason => leftReason = reason, hint => leftHint = hint);
         }
         else
         {
@@ -64,7 +67,7 @@ internal sealed class FirePlanner
         if (_fcs.PlanExecutor.GetPlan(LeftRight.Right) == null)
         {
             yield return BuildCandidate(task, LeftRight.Right, rightPhysical, rightLoading, currentAzimuth,
-                ballisticCache, result => right = result, reason => rightReason = reason);
+                ballisticCache, result => right = result, reason => rightReason = reason, hint => rightHint = hint);
         }
         else
         {
@@ -80,6 +83,8 @@ internal sealed class FirePlanner
         var chosen = ChooseCandidate(left, right);
         if (chosen == null)
         {
+            task.pendingHint = CombinePendingHint(leftHint, rightHint);
+
             var leftOccupied = _fcs.PlanExecutor.GetPlan(LeftRight.Left) != null;
             var rightOccupied = _fcs.PlanExecutor.GetPlan(LeftRight.Right) != null;
             var transient = leftOccupied || rightOccupied
@@ -91,6 +96,7 @@ internal sealed class FirePlanner
             yield break;
         }
 
+        task.pendingHint = PendingHint.None;
         task.bulletType = chosen.Shell;
         task.chargeCount = chosen.Charge;
         task.elevation = chosen.Elevation;
@@ -118,9 +124,11 @@ internal sealed class FirePlanner
         float currentAzimuth,
         Dictionary<(BulletType Shell, int Charge), BallisticSolveResult> ballisticCache,
         Action<FirePlanCandidate?> setResult,
-        Action<string> setReason)
+        Action<string> setReason,
+        Action<PendingHint> setPendingHint)
     {
         setResult(null);
+        setPendingHint(PendingHint.None);
 
         if (!loading.IsBound)
         {
@@ -135,6 +143,16 @@ internal sealed class FirePlanner
             yield break;
         }
 
+        if (shell != task.bulletType)
+        {
+            setPendingHint(PendingHint.ShellMismatch);
+            setReason($"loaded {shell.DisplayName()} does not match requested {task.bulletType.DisplayName()}");
+            MelonLogger.Msg(
+                $"[FCS Plan] T{task.targetId}: quick reject {side}; " +
+                $"shell={shell.DisplayName()} requested={task.bulletType.DisplayName()}");
+            yield break;
+        }
+
         if (charge is < 1 or > 6)
         {
             setReason($"invalid charge C{charge}");
@@ -144,6 +162,7 @@ internal sealed class FirePlanner
         var maxRangeKm = charge * MaxRangePerChargeKm;
         if (task.distance > maxRangeKm)
         {
+            setPendingHint(PendingHint.ChargeRangeInsufficient);
             setReason($"{shell.DisplayName()} C{charge} max range {maxRangeKm:F2}km < target {task.distance:F2}km");
             MelonLogger.Msg(
                 $"[FCS Plan] T{task.targetId}: quick reject {side} {shell.DisplayName()} C{charge}; " +
@@ -307,6 +326,15 @@ internal sealed class FirePlanner
                 reason = $"physical loading state {loading.PhysicalState} is not plannable";
                 return false;
         }
+    }
+
+    private static PendingHint CombinePendingHint(PendingHint left, PendingHint right)
+    {
+        if (left == right)
+            return left;
+        if (left == PendingHint.None || right == PendingHint.None)
+            return PendingHint.None;
+        return PendingHint.AmmoMismatch;
     }
 
     private static bool IsTransient(LoadingPhysicalState state)
