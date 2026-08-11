@@ -52,6 +52,7 @@ internal sealed class TaskDispatcher
     public void EnqueueTask(ArtilleryTask task)
     {
         task.progress = Progress.Pending;
+        task.pendingHint = PendingHint.None;
         task.startedAt = FcsRuntimeClock.Now;
         task.completedAt = 0f;
         task.failureReason = "";
