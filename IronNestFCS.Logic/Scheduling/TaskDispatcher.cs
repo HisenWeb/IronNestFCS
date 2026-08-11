@@ -26,7 +26,15 @@ internal sealed class TaskDispatcher
 
     public int PendingCount => _taskQueue.Count;
     public bool IsPlanning => _planning;
-    public bool HasPendingOrPlanning => _planning || _taskQueue.Count > 0;
+
+    // FirePlanExecutor uses this to decide whether a lone plan should wait for a possible partner.
+    // Pending tasks that were already scanned and deferred must not block that lone plan forever.
+    public bool HasPendingOrPlanning =>
+        _planning
+        || (_taskQueue.Count > 0
+            && FcsRuntimeClock.Now >= _retryNotBefore
+            && _fcs.PlanExecutor.HasFreeGun);
+
     public Queue<ArtilleryTask> QueueSnapshot => new(_taskQueue);
     public Queue<ArtilleryTask> RecentSnapshot => new(_recentTasks);
 
