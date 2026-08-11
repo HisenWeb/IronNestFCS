@@ -21,6 +21,7 @@ internal sealed class TaskDispatcher
     private readonly Queue<ArtilleryTask> _recentTasks = new();
 
     private bool _planning;
+    private bool _dispatchRequested;
 
     public int PendingCount => _taskQueue.Count;
 
@@ -45,6 +46,7 @@ internal sealed class TaskDispatcher
         _taskQueue.Clear();
         _recentTasks.Clear();
         _planning = false;
+        _dispatchRequested = false;
     }
 
     public void EnqueueTask(ArtilleryTask task)
@@ -65,12 +67,20 @@ internal sealed class TaskDispatcher
 
     public void TryDispatch()
     {
+        // Planning is serialized, but a trigger that arrives while a round is running must not be lost.
+        // Remember only the edge; the next round still re-reads current queue/resource state from scratch.
+        if (_planning)
+        {
+            _dispatchRequested = true;
+            return;
+        }
+
         if (!FcsRuntimeClock.IsFocused
-            || _planning
             || _taskQueue.Count == 0
             || !_fcs.PlanExecutor.HasFreeGun)
             return;
 
+        _dispatchRequested = false;
         _planning = true;
         _fcs.TrackCoroutine(PlanPendingTasks());
     }
@@ -131,6 +141,15 @@ internal sealed class TaskDispatcher
 
         if (!admittedAny && attempted.Count > 0)
             MelonLogger.Msg($"[FCS Dispatch] planning round deferred {attempted.Count} pending task(s)");
+
+        // Consume one coalesced trigger that arrived during this planning round. TryDispatch() sets _planning
+        // synchronously before starting the next coroutine, so EvaluateScheduling() below can still see that a
+        // possible pairing round is active instead of prematurely single-committing an admitted plan.
+        if (_dispatchRequested)
+        {
+            _dispatchRequested = false;
+            TryDispatch();
+        }
 
         _fcs.PlanExecutor.EvaluateScheduling();
     }
