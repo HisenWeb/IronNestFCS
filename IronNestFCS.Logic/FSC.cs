@@ -98,7 +98,6 @@ public class FSC
         _lastResumeGeneration = FcsRuntimeClock.ResumeGeneration;
         TimeToImpactReader.Reset();
         FcsLocalization.ResetGameLanguage();
-        FirePriority.Reset();
         PlanExecutor.DisposeState();
 
         IsBound = Loading.IsBound
@@ -113,10 +112,14 @@ public class FSC
         if (!Loading.IsBound)
             MelonLogger.Warning("[FCS] Persistent LoadingSystem is not bound.");
 
+        // FirePriority caches its rendered status text, so detect the game language before resetting it.
+        if (IsBound)
+            FcsLocalization.BindGameLanguage();
+        FirePriority.Reset();
+
         MelonLogger.Msg("[FCS] Initialize: " + (IsBound ? "success" : "failed"));
         if (IsBound)
         {
-            FcsLocalization.BindGameLanguage();
             SceneInteractor.Initialize();
             TrackCoroutine(SharedResources.ResetFireControlsAfterBind());
             TrackCoroutine(SharedResources.ReplenishPowderLoop());
