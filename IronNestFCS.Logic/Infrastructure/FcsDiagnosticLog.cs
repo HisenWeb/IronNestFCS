@@ -26,7 +26,6 @@ internal static class FcsDiagnosticLog {
         "arbitration",
         "turret",
         "trigger",
-        "flight",
         "problems",
     };
 
@@ -233,9 +232,6 @@ internal static class FcsDiagnosticLog {
 
     private static string Classify(string text) {
         var value = text ?? "";
-
-        if (ContainsAny(value, "[FCS-FLIGHT-PROBE]", "FLIGHT-PROBE"))
-            return "flight";
 
         if (ContainsAny(value,
                 "BALLISTIC", "ballistic", "Calculate", "calculator"))
