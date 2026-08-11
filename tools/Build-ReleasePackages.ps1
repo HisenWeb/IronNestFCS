@@ -48,80 +48,50 @@ foreach ($path in @($HostDll, $AbstractionsDll, $LogicDll, $LicenseFile)) {
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$FileName = "IronNestFCS-Smart_v${Version}.zip"
+$Stage = Join-Path $OutputDir "_stage"
+$Zip = Join-Path $OutputDir $FileName
+$InstallText = @"
+IronNestFCS Smart v$Version
 
-$Packages = @(
-    @{
-        Locale = "zh-CN"
-        FileName = "IronNestFCS-Smart_v${Version}_zh-CN.zip"
-        InstallText = @"
-IronNestFCS Smart v$Version - 简体中文
-
-安装：
+简体中文：
 1. 安装适用于 IL2CPP 的 MelonLoader。
 2. 将本压缩包内容直接解压到游戏根目录。
-3. 启动游戏。
+3. 启动游戏。FCS 界面会自动跟随游戏语言；无法识别时使用英文。
 
-本包与英文包使用完全相同的 DLL，仅默认 UI 语言不同。
-UI 语言文件：UserData\IronNestFCS\language.txt
-"@
-    },
-    @{
-        Locale = "en-US"
-        FileName = "IronNestFCS-Smart_v${Version}_en-US.zip"
-        InstallText = @"
-IronNestFCS Smart v$Version - English
-
-Installation:
+English:
 1. Install MelonLoader for IL2CPP.
 2. Extract this archive directly into the game directory.
-3. Start the game.
-
-This package uses exactly the same DLLs as the Chinese package; only the default UI language differs.
-UI language file: UserData\IronNestFCS\language.txt
+3. Start the game. The FCS UI follows the game's language automatically and falls back to English if detection is unavailable.
 "@
-    }
-)
 
-$Hashes = @()
-foreach ($package in $Packages) {
-    $locale = $package.Locale
-    $stage = Join-Path $OutputDir "_stage-$locale"
-    $zip = Join-Path $OutputDir $package.FileName
-
-    if (Test-Path $stage) {
-        Remove-Item -Recurse -Force $stage
-    }
-    if (Test-Path $zip) {
-        Remove-Item -Force $zip
-    }
-
-    $modsDir = Join-Path $stage "Mods"
-    $userLibsDir = Join-Path $stage "UserLibs"
-    $logicDir = Join-Path $stage "UserData\IronNestFCS"
-    New-Item -ItemType Directory -Force -Path $modsDir, $userLibsDir, $logicDir | Out-Null
-
-    Copy-Item -Force $HostDll (Join-Path $modsDir "IronNestFCS.dll")
-    Copy-Item -Force $AbstractionsDll (Join-Path $userLibsDir "IronNestFCS.Abstractions.dll")
-    Copy-Item -Force $LogicDll (Join-Path $logicDir "IronNestFCS.Logic.dll")
-    Copy-Item -Force $LicenseFile (Join-Path $stage "LICENSE.txt")
-
-    [System.IO.File]::WriteAllText((Join-Path $logicDir "language.txt"), $locale, $Utf8NoBom)
-    [System.IO.File]::WriteAllText((Join-Path $stage "INSTALL.txt"), $package.InstallText.Trim() + [Environment]::NewLine, $Utf8NoBom)
-
-    Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -CompressionLevel Optimal
-    Remove-Item -Recurse -Force $stage
-
-    $hash = Get-FileHash -Algorithm SHA256 $zip
-    $Hashes += $hash
-    Write-Host "Created $($package.FileName)"
-    Write-Host "  SHA256 $($hash.Hash)"
+if (Test-Path $Stage) {
+    Remove-Item -Recurse -Force $Stage
+}
+if (Test-Path $Zip) {
+    Remove-Item -Force $Zip
 }
 
-$hashLines = $Hashes | ForEach-Object {
-    "$($_.Hash.ToLowerInvariant())  $([System.IO.Path]::GetFileName($_.Path))"
-}
-[System.IO.File]::WriteAllLines((Join-Path $OutputDir "SHA256SUMS.txt"), $hashLines, $Utf8NoBom)
+$ModsDir = Join-Path $Stage "Mods"
+$UserLibsDir = Join-Path $Stage "UserLibs"
+$LogicDir = Join-Path $Stage "UserData\IronNestFCS"
+New-Item -ItemType Directory -Force -Path $ModsDir, $UserLibsDir, $LogicDir | Out-Null
 
+Copy-Item -Force $HostDll (Join-Path $ModsDir "IronNestFCS.dll")
+Copy-Item -Force $AbstractionsDll (Join-Path $UserLibsDir "IronNestFCS.Abstractions.dll")
+Copy-Item -Force $LogicDll (Join-Path $LogicDir "IronNestFCS.Logic.dll")
+Copy-Item -Force $LicenseFile (Join-Path $Stage "LICENSE.txt")
+[System.IO.File]::WriteAllText((Join-Path $Stage "INSTALL.txt"), $InstallText.Trim() + [Environment]::NewLine, $Utf8NoBom)
+
+Compress-Archive -Path (Join-Path $Stage "*") -DestinationPath $Zip -CompressionLevel Optimal
+Remove-Item -Recurse -Force $Stage
+
+$Hash = Get-FileHash -Algorithm SHA256 $Zip
+$HashLine = "$($Hash.Hash.ToLowerInvariant())  $([System.IO.Path]::GetFileName($Hash.Path))"
+[System.IO.File]::WriteAllText((Join-Path $OutputDir "SHA256SUMS.txt"), $HashLine + [Environment]::NewLine, $Utf8NoBom)
+
+Write-Host "Created $FileName"
+Write-Host "  SHA256 $($Hash.Hash)"
 Write-Host ""
-Write-Host "Release packages ready: $OutputDir"
-Write-Host "Upload both ZIP files and SHA256SUMS.txt to the same GitHub Release/tag v$Version."
+Write-Host "Release package ready: $OutputDir"
+Write-Host "Upload the universal ZIP and SHA256SUMS.txt to the same GitHub Release/tag v$Version."
