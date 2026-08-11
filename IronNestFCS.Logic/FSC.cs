@@ -93,6 +93,7 @@ public class FSC
 
         SharedResources.Reset();
         FcsRuntimeClock.Reset();
+        TimeToImpactReader.Reset();
         FirePriority.Reset();
         PlanExecutor.DisposeState();
 
@@ -128,6 +129,28 @@ public class FSC
         SceneInteractor.Update();
         Dispatcher.TryDispatch();
         PlanExecutor.Tick();
+        CaptureEstimatedFlightTime(LeftRight.Left);
+        CaptureEstimatedFlightTime(LeftRight.Right);
+    }
+
+    private void CaptureEstimatedFlightTime(LeftRight side)
+    {
+        var plan = PlanExecutor.GetPlan(side);
+        if (plan == null
+            || plan.Task.progress != Progress.WaitingForFire
+            || !float.IsNaN(plan.EstimatedFlightSeconds))
+        {
+            return;
+        }
+
+        if (!TimeToImpactReader.TryReadEstimatedSeconds(side, out var seconds))
+            return;
+
+        if (plan.TrySetEstimatedFlightSeconds(seconds))
+        {
+            MelonLogger.Msg(
+                $"[FCS-FLIGHT-PROBE] captured {side} T{plan.Task.targetId} estimated flight={seconds:F2}s");
+        }
     }
 
     public void Dispose()
@@ -145,6 +168,7 @@ public class FSC
         Dispatcher.DisposeState();
         PlanExecutor.DisposeState();
         FirePriority.Reset();
+        TimeToImpactReader.Reset();
 
         // Only TaskSystem-owned clicks are released here. Persistent loading has a separate Host tracker.
         SceneInteractor.ShutDown();
