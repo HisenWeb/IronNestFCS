@@ -16,6 +16,13 @@ public enum Progress {
     Failed,
 }
 
+public enum PendingHint {
+    None,
+    ShellMismatch,
+    ChargeRangeInsufficient,
+    AmmoMismatch,
+}
+
 public class ArtilleryTask {
     public int targetId;
     public float angel;
@@ -23,6 +30,9 @@ public class ArtilleryTask {
     public Vector3 position;
     public BulletType bulletType;
     public Progress progress;
+
+    // Lightweight UI hint for a task that remains in the pending queue.
+    public PendingHint pendingHint;
 
     // Snapshot of the solved firing data. Keeping it on the task lets the UI show
     // exactly what the automation decided instead of only the current phase.
