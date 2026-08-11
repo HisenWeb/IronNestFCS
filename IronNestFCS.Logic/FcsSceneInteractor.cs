@@ -11,7 +11,7 @@ namespace IronNestFCS.Logic;
 
 public class FcsSceneInteractor
 {
-    private const float UiStartX = 0.60f;
+    private const float UiStartX = 0.425f;
     private const float UiStartY = -0.65f;
     private const float UiRowX = 0.05f;
     private const float UiRowY = 0.0045f;
