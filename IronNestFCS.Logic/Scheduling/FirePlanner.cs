@@ -97,6 +97,9 @@ internal sealed class FirePlanner
             plannedAt, chosen.EtaKnown, chosen.EstimatedLocalReadyAt, chosen.AzimuthSeconds,
             chosen.AlignmentScore, _fcs.FirePriority.Generation);
 
+        if (TimeToImpactEstimator.TryEstimateSeconds(task.distance, chosen.Charge, out var estimatedTti))
+            plan.TrySetEstimatedFlightSeconds(estimatedTti);
+
         MelonLogger.Msg(
             $"[FCS Plan] T{task.targetId}: committed {plan.Label}, E={plan.Elevation:F2}, Az={plan.Azimuth:F2}, " +
             $"ETA={(plan.EtaKnown ? Math.Max(0f, plan.EstimatedReadyAt - plannedAt).ToString("F1") : "unknown")}s, " +
