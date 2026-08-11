@@ -4,138 +4,47 @@
 
 这是一个面向 **Iron Nest: Heavy Turret Simulator** 的智能自动火控 Mod。
 
-你只需要在 Tactical Map 上放好目标标记，IronNestFCS Smart 就可以接管大部分火控流程：弹道解算、左右炮分配、自动购买和装填炮弹/药包、调整仰角、旋转炮塔、准备 Review / Arm，并可选择自动完成最终击发。
+你负责在 Tactical Map 上放置目标、选择弹种和提交任务，IronNestFCS Smart 负责执行大部分重复火控流程：弹道解算、左右炮分配、弹药购买与装填、仰角、炮塔方位、Review / Arm，以及可选的自动击发。
 
-[Nexus Mods](https://www.nexusmods.com/ironnest/mods/32) · [GitHub Release](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest) · [IronNestFCS 演示视频](https://www.bilibili.com/video/BV1xc7F6WEET/) · [IRON NEST Steam 页面](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
-
-> IronNestFCS 演示视频可以用来了解基本操作方式。Smart 版本的任务安排、状态处理和部分玩家界面已经发生变化。
-
----
+[Nexus Mods](https://www.nexusmods.com/ironnest/mods/32) · [GitHub Release](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest) · [IRON NEST Steam 页面](https://store.steampowered.com/app/4300500/) · [MelonLoader](https://melonwiki.xyz/)
 
 ## 设计理念
 
 **自动化操作，不自动化战术。**
 
-你负责决定目标、弹药和任务队列，Smart 负责执行计划。
+你决定目标、弹药和任务顺序，Smart 负责执行计划。
 
-可以连续提交 T1～T4 形成任务队列。计划或队列不满意时，按 **F9** 清空当前任务、等待队列和射击顺序，再重新提交。已经开始的实际装填会继续，新计划会根据两门炮当时的真实状态重新安排。
+需要放弃当前计划时按 **F9**。F9 重置的是 TaskSystem 的任务计划和执行状态，不会假装已经被实际装填系统接受的动作从未发生。重新提交任务后，Smart 会从两门炮此刻真实存在的物理状态继续规划。
 
----
+## 主要功能
 
-## 这个 Mod 是做什么的
-
-它的核心用途很简单：**你负责决定“打哪里、用什么弹”，剩下的大部分重炮操作交给 FCS。**
-
-一次典型炮击任务会变成：
-
-```text
-拖动地图左侧红色 1～4 标记器到目标位置
-        ↓
-选择弹药
-        ↓
-点击右侧对应的 T1～T4 提交任务
-        ↓
-自动弹道解算
-        ↓
-自动选择左炮 / 右炮
-        ↓
-自动购买所需弹药（如果缺少）
-        ↓
-自动装弹 + 装药
-        ↓
-自动调整仰角 + 炮塔方位
-        ↓
-Review / Arm
-        ↓
-手动击发或 Auto Fire
-```
-
-你也可以连续提交多个 T1～T4 任务。FCS 会在两门炮之间安排任务，一门炮恢复后可以继续接后面的目标。
-
-**F9 就是重新规划键。** 如果目标放错了、任务发错了，或者你想改变当前队列或射击顺序：
-
-```text
-按 F9
-  ↓
-清空当前任务 / 等待队列 / 射击顺序
-  ↓
-已经开始执行的实际装弹 / 装药继续进行
-  ↓
-重新放置红色 1～4 标记器并再次提交对应的 T1～T4
-  ↓
-FCS 根据此时真实的炮膛、仰角和炮塔位置重新规划
-```
-
-用 F9 可以直接**放弃当前计划，再重新发布一套计划**。已经被装填系统接受的实际装填不会被强行撤销；新的任务会以当前真实的炮膛和炮塔状态为准。
-
-Mod 直接读取游戏里的真实对象、炮膛和控制器状态，不使用 OCR，也不依赖屏幕识别。
-
----
-
-## 主要亮点
-
-- **T1～T4 可以组成任务队列**：按你想要的顺序连续提交任务，FCS 会让两门炮持续处理这些任务。
-- **按 F9 随时重新规划**：清空当前任务、等待队列和射击顺序，再重新提交；已经开始的真实装填不会被当作没发生过。
-- **放好目标，后面的重复操作基本都可以交给 FCS**：算弹道、选左右炮、买弹药、装填、调仰角、转炮塔、准备击发。
-- **两门炮可以同时忙**：左炮和右炮不用排队做同一件事，一门正在装填或瞄准时，另一门也可以继续自己的准备。
-- **炮塔不用每次打完都回到 0°**：下一发会从炮塔当前真实朝向继续计算，不会假设它已经归零。
-- **弹道结果更稳**：会等游戏里的弹道计算结果稳定后再使用，降低误读上一发旧结果的概率。
-- **同一个目标不会没必要地重复按两次 Calculate**：如果左右炮算出来需要的是同一个方案，会直接复用已经得到的结果。
-- **缺炮弹或药包时可以自动购买**。
-- **Auto Fire** 可以自动完成最后的击发；不想自动开火也可以保持手动。
-- **Max Charge** 可以优先尝试可用的最高装药量。
-- **提供简体中文和英文 UI**。
-
----
-
-## 和上游 IronNestFCS 有什么区别
-
-这个项目是在 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 的源码上继续开发的。
-
-以下对比基于 **上游 IronNestFCS v1.0.7**。该上游版本已经具备完整的核心自动火控能力：T1～T4 任务队列、双炮并行、自动购买和装填炮弹 / 药包、Auto Fire、Max Charge，以及 F9 触发的 Logic 重载。
-
-**Smart 并不是以增加自动化功能为主要目标，而是重新划分任务计划、物理状态和执行调度之间的边界。** 下表不逐项列功能差异，只概括 Smart fork 最核心的运行模型差异。
-
-| 方面 | 上游 IronNestFCS v1.0.7 | IronNestFCS Smart |
-| --- | --- | --- |
-| **任务与物理状态** | 任务流程负责推进装填等动作；F9 重载 Logic 时当前任务执行也随之结束 | 将可重新规划的任务与持续存在的物理装填分开；任务可以重建，已经被接受的实际装填继续存在 |
-| **双炮任务安排** | 主要按空闲炮位和各任务自身流程推进，共享炮塔由正在执行的任务竞争使用 | 根据两门炮当前装填、仰角、炮塔状态和预计准备时间安排后续执行顺序 |
-| **状态判断** | 更多按任务流程预期的状态继续推进 | 尽量直接读取炮膛、装填机构、炮塔和控制器的实际状态，再决定下一步 |
-
-简单说：**上游 IronNestFCS 重点解决“把自动火控流程跑起来”，Smart 更关注“当计划和现实状态不再完全一致时，系统如何根据现场真实状态继续工作”。**
-
----
-
-## 前置要求
-
-需要：
-
-1. **Iron Nest: Heavy Turret Simulator 游戏本体**
-2. **适用于 IL2CPP 的 MelonLoader**
-3. 一份 IronNestFCS Smart 安装包
-
-建议先安装好 MelonLoader，并至少正常启动一次游戏，再安装本 Mod。
-
----
+- T1～T4 可以形成任务队列，并让左右两门炮持续处理任务。
+- 按 **F9** 可以重新规划，不会抹掉已经开始的实际装填。
+- 尽量读取真实炮膛、装填机构、炮塔和控制器状态后再决定下一步。
+- 通过游戏自己的弹道计算器取得射击解算结果。
+- 缺少炮弹或药包时可以自动购买。
+- 自动调整仰角和炮塔方位。
+- **Auto Fire** 可自动完成最终击发。
+- **Max Charge** 可优先使用可用的最高装药量。
+- 左上角 FCS 面板会显示当前任务、进度、距离、装药、仰角，以及**预计炮弹飞行时间**。
+- UI 自动跟随游戏中英文状态；无法明确识别为中文时统一使用英文。
+- 所有玩家共用一个通用发布包。
 
 ## 下载与安装
 
-打开 [GitHub 最新 Release](https://github.com/HisenWeb/IronNestFCS-Smart/releases/latest)，按语言下载 **其中一个安装包**：
+下载最新版通用安装包：
 
 ```text
-IronNestFCS-Smart_v*_zh-CN.zip   简体中文 UI
-IronNestFCS-Smart_v*_en-US.zip   English UI
+IronNestFCS-Smart_vX.X.X.zip
 ```
 
-两个安装包使用完全相同的 Mod DLL，只是默认 UI 语言不同。
+安装步骤：
 
-### 安装步骤
-
-1. 退出游戏。
-2. 打开下载好的 ZIP。
-3. 把压缩包里的**全部内容直接解压到游戏根目录**。
-4. 如果 Windows 提示合并 `Mods`、`UserLibs`、`UserData` 文件夹，允许合并。
-5. 正常启动游戏。
+1. 安装适用于 IL2CPP 的 MelonLoader，并至少正常启动一次游戏。
+2. 退出游戏。
+3. 将 ZIP 中的全部内容直接解压到游戏根目录。
+4. Windows 提示合并 `Mods`、`UserLibs`、`UserData` 时允许合并。
+5. 通过 MelonLoader 正常启动游戏。
 
 安装后应存在：
 
@@ -143,43 +52,32 @@ IronNestFCS-Smart_v*_en-US.zip   English UI
 <GameDir>/Mods/IronNestFCS.dll
 <GameDir>/UserLibs/IronNestFCS.Abstractions.dll
 <GameDir>/UserData/IronNestFCS/IronNestFCS.Logic.dll
-<GameDir>/UserData/IronNestFCS/language.txt
 ```
 
-不要把整个 ZIP 直接丢进 `Mods` 文件夹。
+不要把整个 ZIP 直接放进 `Mods` 文件夹。
 
----
+## UI 自动语言识别
 
-## 游戏内怎么用
+现在不再维护单独的中文包、英文包，也不再使用 `language.txt`。
 
-### 1. 进入重炮场景
+Smart 直接读取游戏左炮 Time-To-Impact 表盘上的本地化标签：
 
-进入包含重炮和 Tactical Map 的场景。场景加载后，FCS 会自动绑定需要的游戏控制对象。
+- 标签严格等于 `左` → FCS 使用简体中文；
+- 其他任何文字、识别不到对象、或游戏使用其他语言 → FCS 使用英文。
 
-### 2. 放置目标标记
+这个游戏 UI 对象会被缓存并定期重新读取，因此游戏运行中切换语言时，FCS 也可以自动跟随，而不需要额外维护 Mod 语言配置。
 
-在 Tactical Map **左侧**找到红色数字标记器：
+## 游戏内使用方法
 
-```text
-1 / 2 / 3 / 4
-```
+### 1. 放置目标标记
 
-拖动其中一个到你想炮击的地图位置。红色 `1` 对应任务 `T1`，`2` 对应 `T2`，以此类推。
+在 Tactical Map 上拖动左侧红色数字标记器 `1～4` 到你要攻击的位置。
 
 ![Tactical Map 左侧红色 1～4 目标标记器](docs/images/ironnest_usage-target-markers.jpg)
 
-### 3. 选择弹药
+### 2. 选择弹种并提交任务
 
-在地图右侧的 FCS 控制区选择这个任务要使用的弹种。
-
-可选功能：
-
-- **Auto Fire**：条件满足后由 FCS 自动完成最终击发。
-- **Max Charge**：优先使用可用的最高装药量。
-
-### 4. 提交任务
-
-点击地图右侧与标记器对应的任务按钮：
+选择弹种，然后点击与红色标记器编号对应的 T1～T4：
 
 ![地图右侧 T1～T4 任务提交按钮](docs/images/ironnest_usage-submit-buttons.jpg)
 
@@ -190,145 +88,96 @@ IronNestFCS-Smart_v*_en-US.zip   English UI
 红色 4 → T4
 ```
 
-点击后任务就会提交。可以继续移动其他红色标记器并点击对应的 T1～T4，连续提交的任务会进入任务队列。
+可以连续提交多个任务，Smart 会根据两门炮当前状态进行分配和执行。
 
-之后 FCS 会自动完成：
+### 3. 让 FCS 执行准备流程
+
+一次正常任务大致会经过：
 
 ```text
 读取目标
-→ 读取当前炮膛 / 炮塔真实状态
+→ 读取当前真实物理状态
 → 弹道解算
-→ 分配左炮或右炮
-→ 自动装弹 / 装药
+→ 选择左右炮
+→ 必要时购买弹药
+→ 装弹 + 装药
 → 调整仰角
 → 旋转炮塔
 → 准备 Review / Arm
+→ 手动击发或 Auto Fire
 ```
 
-### 5. 查看火控状态
+### 4. 查看左上角状态面板
 
-游戏画面**左上角**会显示 `IronNest 火控系统` 状态面板。这里主要用于查看 FCS 当前在做什么，不需要在这个面板里操作。
+`IronNest 火控系统` 面板会显示：
 
-面板会显示：
+- 左炮 / 右炮当前物理状态或正在执行的 T 任务；
+- 任务进度与已用时间；
+- 方位与距离；
+- 装药与仰角；
+- 游戏 Time-To-Impact 预设可用后显示的**预计炮弹飞行时间**；
+- 射击顺序 / 优先级状态；
+- Auto Fire 与 Max Charge 状态；
+- 等待队列；
+- 本轮成功 / 失败统计和近期任务记录。
 
-- 左炮、右炮当前的物理状态，或者正在执行的 T 任务及其进度；
-- 当前任务的方位、距离、装药、仰角和已用时间；
-- 当前射击顺序 / 优先级状态；
-- **Auto Fire** 和 **Max Charge** 当前是否开启；
-- 等待队列以及队列中的任务；
-- 本轮完成 / 成功 / 失败统计和近期任务记录；失败任务还会显示失败原因。
+预计飞行时间直接读取游戏自己的 Time-To-Impact 表盘。该值会在射击方案准备完成后写入当前 FirePlan，击发后不会跟着倒计时继续减少。
 
-上面的目标标记器截图中，屏幕左上角就是这个状态面板。
+### 5. 击发
 
-### 6. 击发
+- **Auto Fire 开启**：炮和炮塔实际就绪后，Smart 自动完成最终击发。
+- **Auto Fire 关闭**：Smart 完成射击准备后等待玩家手动击发。
 
-- **Auto Fire 开启**：炮管和炮塔实际就绪后，FCS 自动完成最终击发。
-- **Auto Fire 关闭**：等 FCS 把射击准备完成后，由你手动完成最终击发。
+### 6. 用 F9 重新规划
 
-左右炮会独立调度，一门炮恢复后可以马上接下一任务。
+当前目标、队列或射击顺序不满意时，直接按 **F9**，重新放置标记并提交新的 T1～T4。
 
-### 7. 用 F9 重新规划
+需要注意：**F9 重置的是计划，不是物理现实。** 已经被装填系统接受的炮弹 / 药包装填会继续；新计划会读取最后真实存在的炮膛、仰角和炮塔状态。
 
-按 **F9** 清空当前任务、等待队列和射击顺序，然后重新放置红色 1～4 标记器并提交新的 T1～T4 计划。
+## 诊断日志
 
-已经开始执行的实际装弹 / 装药不会被 F9 强制取消。新的任务会读取此时真实的炮膛、仰角和炮塔位置，再从这个状态重新规划。
+正常游戏只写精简的 `problems.log`。
 
----
-
-## F9：重新规划任务
-
-想放弃当前计划并重新安排时，直接按 **F9**。
-
-适合这些情况：
-
-- 目标标记放错了；
-- 提交了错误的 T1～T4；
-- 想改变当前等待队列或射击顺序；
-- 想从当前炮膛和炮塔真实状态重新规划。
-
-F9 后，重新放置需要的红色 1～4 标记器，再提交对应的 T1～T4 即可。
-
-需要注意：**F9 重置的是计划，不是已经发生的物理状态。** 如果某门炮已经开始装弹 / 装药，它会继续完成；新的计划会根据最终真实状态重新安排。
-
----
-
-## 切换 UI 语言
-
-语言配置文件：
-
-```text
-<GameDir>/UserData/IronNestFCS/language.txt
-```
-
-填写：
-
-```text
-zh-CN
-```
-
-或：
-
-```text
-en-US
-```
-
-保存后按 **F9**，或者重启游戏即可切换。
-
----
-
-## 常见问题排查
-
-如果 FCS 没出现或者没有正常绑定：
-
-1. 确认 MelonLoader 已按 IL2CPP 方式安装。
-2. 确认三个 DLL 都在上面写明的准确路径。
-3. 如果更换过 Host / Abstractions DLL，完整重启一次游戏。
-4. 等重炮场景完全加载后，按一次 **F9**。
-5. 查看诊断日志。
-
-日志位置：
-
-```text
-<GameDir>/UserData/IronNestFCS/Logs/
-```
-
-默认只写入精简的 `problems.log`，正常游戏不会再持续生成完整的分类诊断日志。
-
-如果需要复现 Bug 并收集完整日志，打开：
+需要完整排查时，编辑：
 
 ```text
 <GameDir>/UserData/IronNestFCS/diagnostics.txt
 ```
 
-把内容改成：
+改为：
 
 ```text
 on
 ```
 
-保存后按 **F9**。之后会恢复 `all.log`、`dispatch.log`、`ballistic.log`、`reload.log`、`order.log`、`arbitration.log`、`turret.log`、`trigger.log` 和 `problems.log`。排查结束后把 `diagnostics.txt` 改回 `off` 并再次按 F9 即可。
+然后按 **F9**。完整分类日志会写入：
 
-`diagnostics.txt` 如果不存在，Mod 会自动创建，并默认写入 `off`。
+```text
+<GameDir>/UserData/IronNestFCS/Logs/
+```
 
-反馈 Bug 时，最好附上对应那一轮的日志文件夹，并说明出问题时炮塔正在做什么。
+排查结束后把 `diagnostics.txt` 改回 `off`，再按一次 F9。
 
----
+开发阶段用于研究炮弹 Time-To-Impact 的临时轨迹探针不会进入正式版本，也不会再生成单独的 `flight.log`。
 
-## 开发者
+## Smart 架构
 
-源码仍然保留 Stable Host、Shared Abstractions 和可热重载 Logic 的结构。玩家看到的 **F9 重新规划**，实现上是重载 TaskSystem / Logic，而 Host 持有的实际装填继续存在。详细设计记录见 [docs/FSC_MODULARIZATION_PLAN.md](docs/FSC_MODULARIZATION_PLAN.md)。
+Smart 将稳定 Host / 持久物理装填与可热重载的 TaskSystem/Logic 分开。这样 F9 可以放弃并重建任务计划，同时已经被 Host 接受的实际装填仍然继续存在。
 
-仓库内还提供：
+本项目继续基于 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 开发。Smart 的自动化重点是执行既有火控工作流，而不是替玩家选择战术目标。
 
-- `tools/Deploy.ps1`：开发环境构建和部署
-- `tools/Build-ReleasePackages.ps1`：生成中英双语言 Release ZIP
+## 开发者工具
 
----
+- `tools/Deploy.ps1`：构建并部署开发版本；
+- `tools/Build-ReleasePackages.ps1`：生成单一通用发布 ZIP；
+- `tools/Release.ps1`：在 `master` 上完成版本号、构建、tag 和 GitHub Release 发布。
 
-## Credits
+开发说明见 [docs/FSC_MODULARIZATION_PLAN.md](docs/FSC_MODULARIZATION_PLAN.md)。
 
-IronNestFCS Smart 基于 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 继续开发。其中的上游代码及相关贡献归相应作者和贡献者所有。
+## 致谢
 
-## License
+IronNestFCS Smart 基于 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 开发。上游代码版权与贡献归原作者及贡献者所有。
 
-本项目沿用仓库中的 [MIT License](LICENSE)。
+## 许可证
+
+本项目使用仓库中的 [MIT License](LICENSE)。
