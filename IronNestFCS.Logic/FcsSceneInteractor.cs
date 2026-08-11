@@ -18,7 +18,7 @@ public class FcsSceneInteractor
     private const float AmmoLeftZ = -18.4181f;
     private const float RightColumnZ = -18.5881f;
     private const int LeftAmmoCount = 13;
-    private const int RightAmmoStartRow = 7;
+    private const float RightAmmoStartRow = 5.5f;
 
     private readonly FSC _fcs;
     private readonly List<GameObject> _destroyOnShutdown = new();
