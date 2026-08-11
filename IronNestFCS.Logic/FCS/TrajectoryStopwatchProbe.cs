@@ -1,61 +1,41 @@
-using System.Globalization;
-using System.Reflection;
 using MelonLoader;
+using TMPro;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
 namespace IronNestFCS.Logic.FCS;
 
 /// <summary>
-/// Temporary diagnostics-only probe for the game's shell trajectory stopwatch.
-/// It discovers scene objects/components whose names suggest trajectory timing, records compact scalar
-/// baselines, then logs only values that change. This is intentionally read-only and only runs when
-/// detailed diagnostics are enabled by FcsModule.
+/// Temporary diagnostics-only probe for the game's shell time-to-impact display.
+/// Discovery from the first broad probe showed stable scene objects named
+/// .Time To Impact Dials / .ImpactTimeDial_Left / .ImpactTimeDial_Right.
+/// This focused probe reads those exact display objects and their TMP text directly,
+/// avoiding generic Component reflection under IL2CPP.
 /// </summary>
 public static class TrajectoryStopwatchProbe {
-    private const float SampleIntervalSeconds = 0.25f;
-    private const int MaxMembersPerComponent = 80;
+    private const float SampleIntervalSeconds = 0.10f;
+    private const float RotationEpsilonDegrees = 0.05f;
 
-    private static readonly string[] CandidateKeywords = {
-        "stopwatch",
-        "trajectory",
-        "flight",
-        "timer",
-        "clock",
-        "impact",
-    };
-
-    private static readonly string[] HighValueMemberKeywords = {
-        "time",
-        "elapsed",
-        "duration",
-        "remaining",
-        "second",
-        "running",
-        "active",
-        "start",
-        "stop",
-        "value",
-        "number",
-        "text",
-        "display",
-        "current",
-    };
-
-    private static readonly HashSet<string> IgnoredMembers = new(StringComparer.OrdinalIgnoreCase) {
-        "name", "tag", "hideFlags", "enabled", "isActiveAndEnabled",
-        "gameObject", "transform", "m_CachedPtr", "Pointer", "WasCollected", "ObjectClass",
-    };
-
-    private sealed class WatchedMember {
-        public Component Component = null!;
-        public MemberInfo Member = null!;
-        public string Label = "";
-        public string LastValue = "";
+    private sealed class DialState {
+        public string Side = "";
+        public Transform Dial = null!;
+        public TMP_Text? Text;
+        public Transform? Sfx;
+        public bool LastActive;
+        public bool LastSfxActive;
+        public string LastText = "";
+        public Vector3 LastEuler;
     }
 
-    private static readonly List<WatchedMember> Watched = new();
-    private static readonly HashSet<int> SeenComponents = new();
+    private sealed class NeedleState {
+        public string Side = "";
+        public Transform Needle = null!;
+        public bool LastActive;
+        public Vector3 LastEuler;
+    }
+
+    private static readonly List<DialState> Dials = new();
+    private static readonly List<NeedleState> Needles = new();
     private static bool _bound;
     private static float _nextSampleAt;
 
@@ -63,41 +43,22 @@ public static class TrajectoryStopwatchProbe {
         Reset();
 
         try {
-            var objects = Object.FindObjectsOfType<GameObject>(true);
-            var matchedRoots = 0;
+            BindImpactDial("Left", ".ImpactTimeDial_Left", "SFX_Recon_Countdown LEFT");
+            BindImpactDial("Right", ".ImpactTimeDial_Right", "SFX_Recon_Countdown RIGHT");
+            BindStopwatchNeedle("Left", "Left Gun Needle");
+            BindStopwatchNeedle("Right", "Right Gun Needle");
 
-            foreach (var go in objects) {
-                if (go == null)
-                    continue;
-
-                if (ContainsCandidateKeyword(go.name)) {
-                    matchedRoots++;
-                    foreach (var component in go.GetComponentsInChildren<Component>(true))
-                        AddCandidate(component, $"object-name:{go.name}");
-                }
-
-                foreach (var component in go.GetComponents<Component>()) {
-                    if (component == null)
-                        continue;
-                    var typeName = component.GetType().FullName ?? component.GetType().Name;
-                    if (ContainsCandidateKeyword(typeName))
-                        AddCandidate(component, $"component-type:{typeName}");
-                }
-            }
-
-            _bound = SeenComponents.Count > 0;
+            _bound = Dials.Count > 0 || Needles.Count > 0;
             _nextSampleAt = Time.realtimeSinceStartup + SampleIntervalSeconds;
-            MelonLogger.Msg(
-                $"[FCS-FLIGHT-PROBE] discovery complete: matchedRoots={matchedRoots}, " +
-                $"components={SeenComponents.Count}, watchedMembers={Watched.Count}");
 
-            if (!_bound) {
-                MelonLogger.Warning(
-                    "[FCS-FLIGHT-PROBE] no stopwatch/trajectory/flight/timer/clock/impact candidates found");
-            }
+            MelonLogger.Msg(
+                $"[FCS-FLIGHT-PROBE] focused bind complete: dials={Dials.Count}, needles={Needles.Count}");
+
+            if (!_bound)
+                MelonLogger.Warning("[FCS-FLIGHT-PROBE] focused bind found no time-to-impact dials or stopwatch needles");
         }
         catch (Exception ex) {
-            MelonLogger.Warning($"[FCS-FLIGHT-PROBE] discovery failed: {ex.GetType().Name}: {ex.Message}");
+            MelonLogger.Warning($"[FCS-FLIGHT-PROBE] focused bind failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -110,154 +71,164 @@ public static class TrajectoryStopwatchProbe {
             return;
         _nextSampleAt = now + SampleIntervalSeconds;
 
-        foreach (var watched in Watched) {
+        foreach (var dial in Dials) {
             try {
-                if (watched.Component == null)
-                    continue;
-                if (!TryReadValue(watched.Component, watched.Member, out var current))
-                    continue;
-                if (string.Equals(current, watched.LastValue, StringComparison.Ordinal))
+                if (dial.Dial == null)
                     continue;
 
-                MelonLogger.Msg(
-                    $"[FCS-FLIGHT-PROBE] change t={now:F3} | {watched.Label} | " +
-                    $"{watched.LastValue} -> {current}");
-                watched.LastValue = current;
+                var active = dial.Dial.gameObject.activeInHierarchy;
+                var text = SafeText(dial.Text);
+                var euler = NormalizeEuler(dial.Dial.localEulerAngles);
+                var sfxActive = dial.Sfx != null && dial.Sfx.gameObject.activeInHierarchy;
+
+                if (active != dial.LastActive
+                    || sfxActive != dial.LastSfxActive
+                    || !string.Equals(text, dial.LastText, StringComparison.Ordinal)
+                    || EulerChanged(dial.LastEuler, euler)) {
+                    MelonLogger.Msg(
+                        $"[FCS-FLIGHT-PROBE] TTI {dial.Side} t={now:F3} | " +
+                        $"active={active} | text='{text}' | euler={FormatEuler(euler)} | sfx={sfxActive}");
+                    dial.LastActive = active;
+                    dial.LastSfxActive = sfxActive;
+                    dial.LastText = text;
+                    dial.LastEuler = euler;
+                }
             }
             catch {
-                // A destroyed IL2CPP object must never interfere with normal fire-control execution.
+                // Probe must never interfere with fire control.
+            }
+        }
+
+        foreach (var needle in Needles) {
+            try {
+                if (needle.Needle == null)
+                    continue;
+
+                var active = needle.Needle.gameObject.activeInHierarchy;
+                var euler = NormalizeEuler(needle.Needle.localEulerAngles);
+                if (active != needle.LastActive || EulerChanged(needle.LastEuler, euler)) {
+                    MelonLogger.Msg(
+                        $"[FCS-FLIGHT-PROBE] STOPWATCH {needle.Side} t={now:F3} | " +
+                        $"active={active} | euler={FormatEuler(euler)}");
+                    needle.LastActive = active;
+                    needle.LastEuler = euler;
+                }
+            }
+            catch {
             }
         }
     }
 
-    private static void AddCandidate(Component? component, string reason) {
-        if (component == null || component is Transform)
+    private static void BindImpactDial(string side, string exactName, string sfxName) {
+        var transform = FindPreferredTransform(exactName, requireTimeToImpactPath: true);
+        if (transform == null) {
+            MelonLogger.Warning($"[FCS-FLIGHT-PROBE] TTI {side} dial missing: {exactName}");
             return;
+        }
 
-        int instanceId;
-        try { instanceId = component.GetInstanceID(); }
-        catch { return; }
-        if (!SeenComponents.Add(instanceId))
-            return;
-
-        var path = BuildPath(component.transform);
-        var type = component.GetType();
-        var typeName = type.FullName ?? type.Name;
-        MelonLogger.Msg(
-            $"[FCS-FLIGHT-PROBE] candidate | path={path} | component={typeName} | " +
-            $"active={component.gameObject.activeInHierarchy} | reason={reason}");
-
-        IEnumerable<MemberInfo> members;
+        TMP_Text? text = null;
         try {
-            members = type
-                .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
-                .Cast<MemberInfo>()
-                .Concat(type.GetFields(BindingFlags.Public | BindingFlags.Instance))
-                .Where(m => !IgnoredMembers.Contains(m.Name))
-                .Where(m => IsUsefulMemberType(GetMemberType(m)))
-                .OrderByDescending(MemberScore)
-                .ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
-                .Take(MaxMembersPerComponent)
-                .ToArray();
-        }
-        catch (Exception ex) {
-            MelonLogger.Msg(
-                $"[FCS-FLIGHT-PROBE] member-enumeration failed | path={path} | component={typeName} | " +
-                $"{ex.GetType().Name}:{ex.Message}");
-            return;
-        }
-
-        var added = 0;
-        foreach (var member in members) {
-            if (!TryReadValue(component, member, out var value))
-                continue;
-
-            var label = $"{path} | {type.Name}.{member.Name}";
-            Watched.Add(new WatchedMember {
-                Component = component,
-                Member = member,
-                Label = label,
-                LastValue = value,
-            });
-            added++;
-            MelonLogger.Msg($"[FCS-FLIGHT-PROBE] baseline | {label}={value}");
-        }
-
-        if (added == 0)
-            MelonLogger.Msg($"[FCS-FLIGHT-PROBE] no scalar members | path={path} | component={typeName}");
-    }
-
-    private static Type GetMemberType(MemberInfo member) {
-        return member switch {
-            PropertyInfo property => property.PropertyType,
-            FieldInfo field => field.FieldType,
-            _ => typeof(object),
-        };
-    }
-
-    private static bool IsUsefulMemberType(Type type) {
-        var effective = Nullable.GetUnderlyingType(type) ?? type;
-        return effective.IsPrimitive
-               || effective.IsEnum
-               || effective == typeof(string)
-               || effective == typeof(decimal)
-               || effective == typeof(Vector2)
-               || effective == typeof(Vector3)
-               || effective == typeof(Vector4)
-               || effective == typeof(Quaternion);
-    }
-
-    private static int MemberScore(MemberInfo member) {
-        var score = 0;
-        foreach (var keyword in HighValueMemberKeywords) {
-            if (member.Name.Contains(keyword, StringComparison.OrdinalIgnoreCase))
-                score += 10;
-        }
-        return score;
-    }
-
-    private static bool TryReadValue(Component component, MemberInfo member, out string value) {
-        value = "";
-        try {
-            object? raw = member switch {
-                PropertyInfo property => property.GetValue(component),
-                FieldInfo field => field.GetValue(component),
-                _ => null,
-            };
-            value = FormatValue(raw);
-            return true;
+            var texts = transform.GetComponentsInChildren<TMP_Text>(true);
+            if (texts.Length > 0)
+                text = texts[0];
         }
         catch {
-            return false;
         }
-    }
 
-    private static string FormatValue(object? value) {
-        if (value == null)
-            return "null";
+        Transform? sfx = null;
+        try {
+            foreach (var child in transform.GetComponentsInChildren<Transform>(true)) {
+                if (child != null && string.Equals(child.name, sfxName, StringComparison.Ordinal)) {
+                    sfx = child;
+                    break;
+                }
+            }
+        }
+        catch {
+        }
 
-        string text = value switch {
-            float f => f.ToString("0.######", CultureInfo.InvariantCulture),
-            double d => d.ToString("0.########", CultureInfo.InvariantCulture),
-            decimal m => m.ToString(CultureInfo.InvariantCulture),
-            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "",
-            _ => value.ToString() ?? "",
+        var state = new DialState {
+            Side = side,
+            Dial = transform,
+            Text = text,
+            Sfx = sfx,
+            LastActive = transform.gameObject.activeInHierarchy,
+            LastSfxActive = sfx != null && sfx.gameObject.activeInHierarchy,
+            LastText = SafeText(text),
+            LastEuler = NormalizeEuler(transform.localEulerAngles),
         };
+        Dials.Add(state);
 
-        text = text.Replace("\r", " ").Replace("\n", " ").Trim();
-        return text.Length <= 240 ? text : text[..240] + "...";
+        MelonLogger.Msg(
+            $"[FCS-FLIGHT-PROBE] TTI {side} baseline | path={BuildPath(transform)} | " +
+            $"active={state.LastActive} | text='{state.LastText}' | euler={FormatEuler(state.LastEuler)} | " +
+            $"sfx={state.LastSfxActive} | tmp={(text == null ? "missing" : text.GetType().Name)}");
     }
 
-    private static bool ContainsCandidateKeyword(string? value) {
-        if (string.IsNullOrWhiteSpace(value))
-            return false;
-        foreach (var keyword in CandidateKeywords) {
-            if (value.Contains(keyword, StringComparison.OrdinalIgnoreCase))
-                return true;
+    private static void BindStopwatchNeedle(string side, string exactName) {
+        var transform = FindPreferredTransform(exactName, requireTimeToImpactPath: false);
+        if (transform == null)
+            return;
+
+        var path = BuildPath(transform);
+        if (!path.Contains("/StopWatch/", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        var state = new NeedleState {
+            Side = side,
+            Needle = transform,
+            LastActive = transform.gameObject.activeInHierarchy,
+            LastEuler = NormalizeEuler(transform.localEulerAngles),
+        };
+        Needles.Add(state);
+        MelonLogger.Msg(
+            $"[FCS-FLIGHT-PROBE] STOPWATCH {side} baseline | path={path} | " +
+            $"active={state.LastActive} | euler={FormatEuler(state.LastEuler)}");
+    }
+
+    private static Transform? FindPreferredTransform(string exactName, bool requireTimeToImpactPath) {
+        Transform? fallback = null;
+        foreach (var transform in Object.FindObjectsOfType<Transform>(true)) {
+            if (transform == null || !string.Equals(transform.name, exactName, StringComparison.Ordinal))
+                continue;
+
+            var path = BuildPath(transform);
+            if (requireTimeToImpactPath
+                && !path.Contains("Time To Impact Dials", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            // Prefer the always-active Static Gun Watch mirror discovered in the first probe.
+            if (path.Contains("Main Camera/Static Gun Watch Parent", StringComparison.OrdinalIgnoreCase))
+                return transform;
+
+            fallback ??= transform;
         }
-        return false;
+        return fallback;
     }
+
+    private static string SafeText(TMP_Text? text) {
+        try { return text?.text?.Replace("\r", " ").Replace("\n", " ").Trim() ?? "<no-tmp>"; }
+        catch { return "<read-failed>"; }
+    }
+
+    private static bool EulerChanged(Vector3 a, Vector3 b) {
+        return Mathf.Abs(Mathf.DeltaAngle(a.x, b.x)) > RotationEpsilonDegrees
+               || Mathf.Abs(Mathf.DeltaAngle(a.y, b.y)) > RotationEpsilonDegrees
+               || Mathf.Abs(Mathf.DeltaAngle(a.z, b.z)) > RotationEpsilonDegrees;
+    }
+
+    private static Vector3 NormalizeEuler(Vector3 euler) {
+        return new Vector3(NormalizeAngle(euler.x), NormalizeAngle(euler.y), NormalizeAngle(euler.z));
+    }
+
+    private static float NormalizeAngle(float angle) {
+        angle %= 360f;
+        if (angle > 180f) angle -= 360f;
+        if (angle < -180f) angle += 360f;
+        return angle;
+    }
+
+    private static string FormatEuler(Vector3 euler) => $"({euler.x:F1},{euler.y:F1},{euler.z:F1})";
 
     private static string BuildPath(Transform? transform) {
         if (transform == null)
@@ -266,7 +237,7 @@ public static class TrajectoryStopwatchProbe {
         var parts = new List<string>();
         var current = transform;
         var guard = 0;
-        while (current != null && guard++ < 24) {
+        while (current != null && guard++ < 32) {
             parts.Add(current.name);
             current = current.parent;
         }
@@ -275,8 +246,8 @@ public static class TrajectoryStopwatchProbe {
     }
 
     public static void Reset() {
-        Watched.Clear();
-        SeenComponents.Clear();
+        Dials.Clear();
+        Needles.Clear();
         _bound = false;
         _nextSampleAt = 0f;
     }
