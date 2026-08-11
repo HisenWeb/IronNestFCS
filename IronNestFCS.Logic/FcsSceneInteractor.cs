@@ -11,6 +11,15 @@ namespace IronNestFCS.Logic;
 
 public class FcsSceneInteractor
 {
+    private const float UiStartX = 0.70f;
+    private const float UiStartY = -0.65f;
+    private const float UiRowX = 0.05f;
+    private const float UiRowY = 0.0045f;
+    private const float AmmoLeftZ = -18.4181f;
+    private const float RightColumnZ = -18.5881f;
+    private const int LeftAmmoCount = 13;
+    private const int RightAmmoStartRow = 7;
+
     private readonly FSC _fcs;
     private readonly List<GameObject> _destroyOnShutdown = new();
     private readonly ClickRaycaster _clicks = new();
@@ -41,13 +50,19 @@ public class FcsSceneInteractor
 
     private void InitializeBulletTypeButtons()
     {
-        const float z = -18.4181f;
-        var x = 0.8f;
-        var y = -0.65f;
+        var types = (BulletType[])Enum.GetValues(typeof(BulletType));
 
-        foreach (BulletType type in Enum.GetValues(typeof(BulletType)))
+        for (var index = 0; index < types.Length; index++)
         {
+            var type = types[index];
             var captured = type;
+            var row = index < LeftAmmoCount
+                ? index
+                : RightAmmoStartRow + index - LeftAmmoCount;
+            var z = index < LeftAmmoCount ? AmmoLeftZ : RightColumnZ;
+            var x = UiStartX - row * UiRowX;
+            var y = UiStartY - row * UiRowY;
+
             GameObject? button = null;
             button = AddButton(() =>
             {
@@ -64,17 +79,13 @@ public class FcsSceneInteractor
             text.transform.SetParent(button.transform, false);
             text.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
             text.transform.localScale = Vector3.one;
-
-            x -= 0.05f;
-            y -= 0.0045f;
         }
     }
 
     private void InitializeTargetButtons()
     {
-        const float z = -18.5881f;
-        var x = 0.8f;
-        var y = -0.65f;
+        var x = UiStartX;
+        var y = UiStartY;
         var toggleFontSize = FcsLocalization.IsChinese ? 14f : 11f;
 
         TextMeshPro? autoFireLabel = null;
@@ -91,7 +102,7 @@ public class FcsSceneInteractor
                 autoFireLabel.text = AutoFireText(AutoFire);
         }, Color.white);
 
-        autoFireButton.transform.position = new Vector3(x, y, z);
+        autoFireButton.transform.position = new Vector3(x, y, RightColumnZ);
         autoFireButton.transform.localScale = Vector3.one * 0.02f;
         var autoFireText = AddText(AutoFireText(false), toggleFontSize);
         autoFireLabel = autoFireText.GetComponent<TextMeshPro>();
@@ -99,8 +110,8 @@ public class FcsSceneInteractor
         autoFireText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
         autoFireText.transform.localScale = Vector3.one;
 
-        x -= 0.05f;
-        y -= 0.0045f;
+        x -= UiRowX;
+        y -= UiRowY;
 
         TextMeshPro? maxChargeLabel = null;
         GameObject? maxChargeButton = null;
@@ -113,7 +124,7 @@ public class FcsSceneInteractor
                 maxChargeLabel.text = MaxChargeText(maxCharge);
         }, Color.white);
 
-        maxChargeButton.transform.position = new Vector3(x, y, z);
+        maxChargeButton.transform.position = new Vector3(x, y, RightColumnZ);
         maxChargeButton.transform.localScale = Vector3.one * 0.02f;
         var maxChargeText = AddText(MaxChargeText(false), toggleFontSize);
         maxChargeLabel = maxChargeText.GetComponent<TextMeshPro>();
@@ -121,8 +132,8 @@ public class FcsSceneInteractor
         maxChargeText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
         maxChargeText.transform.localScale = Vector3.one;
 
-        x -= 0.05f;
-        y -= 0.0045f;
+        x -= UiRowX;
+        y -= UiRowY;
 
         for (var i = 1; i <= 4; i++)
         {
@@ -140,7 +151,7 @@ public class FcsSceneInteractor
                 _localCoroutines.Add(handle);
             }, Color.red);
 
-            button.transform.position = new Vector3(x, y, z);
+            button.transform.position = new Vector3(x, y, RightColumnZ);
             button.transform.localScale = Vector3.one * 0.02f;
             _targetButtons[targetId] = button;
 
@@ -149,8 +160,8 @@ public class FcsSceneInteractor
             text.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
             text.transform.localScale = Vector3.one;
 
-            x -= 0.05f;
-            y -= 0.0045f;
+            x -= UiRowX;
+            y -= UiRowY;
         }
     }
 
