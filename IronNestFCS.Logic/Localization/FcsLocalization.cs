@@ -209,13 +209,18 @@ internal static class FcsLocalization
             if (!path.Contains("Time To Impact Dials", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            TMP_Text[] texts;
-            try { texts = transform.GetComponentsInChildren<TMP_Text>(true); }
-            catch { continue; }
-            if (texts.Length == 0)
+            TMP_Text? text = null;
+            try
+            {
+                var texts = transform.GetComponentsInChildren<TMP_Text>(true);
+                if (texts.Length > 0)
+                    text = texts[0];
+            }
+            catch
+            {
                 continue;
+            }
 
-            var text = texts[0];
             if (text == null)
                 continue;
 
