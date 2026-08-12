@@ -322,15 +322,20 @@ public class FcsSceneInteractor
         }
     }
 
-    public static IEnumerator WaitAndClick(LookAtTarget? button, float timeoutSeconds = 10f)
+    public static IEnumerator WaitAndClick(
+        LookAtTarget? button,
+        float timeoutSeconds = 10f,
+        Func<bool>? shouldContinue = null)
     {
-        if (button == null)
+        if (button == null || (shouldContinue != null && !shouldContinue()))
             yield break;
 
         var deadline = FcsRuntimeClock.Now + Mathf.Max(0.1f, timeoutSeconds);
         while (true)
         {
             yield return FcsRuntimeClock.WaitUntilFocused();
+            if (shouldContinue != null && !shouldContinue())
+                yield break;
             if (button.isActive && button.nextAllowedClickTime <= Time.realtimeSinceStartup)
                 break;
 
@@ -344,9 +349,18 @@ public class FcsSceneInteractor
 
         yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         yield return FcsRuntimeClock.WaitUntilFocused();
+        if (shouldContinue != null && !shouldContinue())
+            yield break;
+
         BeginPhysicalClick(button);
-        yield return new WaitForSeconds(0.1f);
-        EndPhysicalClick(button);
+        try
+        {
+            yield return new WaitForSeconds(0.1f);
+        }
+        finally
+        {
+            EndPhysicalClick(button);
+        }
     }
 
     public static IEnumerator InvokeDelay(Action action, float delay)

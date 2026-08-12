@@ -12,8 +12,9 @@ using UnityEngine;
 namespace IronNestFCS.Logic.Scheduling;
 
 /// <summary>
-/// One task planning round: capture one state snapshot, solve viable gun candidates, compare them,
-/// and emit one immutable FirePlan. Queueing itself never reads gun state.
+/// Two-stage planner. The pre-match stage reads one immutable gun/loading snapshot and builds side-effect-free
+/// Task x Gun eligibility candidates. Only assignments selected by TaskGunMatcher are materialized through the
+/// physical ballistic calculator, so rejected alternatives never create game-side ballistic stickers.
 /// </summary>
 internal sealed class FirePlanner
 {
@@ -26,84 +27,196 @@ internal sealed class FirePlanner
         _fcs = fcs;
     }
 
-    public IEnumerator BuildPlan(ArtilleryTask task, Action<FirePlan?, string> completed)
+    public FirePlanningSnapshot CaptureSnapshot()
     {
-        task.progress = Progress.Calculating;
-        task.pendingHint = PendingHint.None;
-
         var snapshotAt = FcsRuntimeClock.Now;
         var turretController = GameObject.Find("TurretSystem")?.GetComponent<TurretController>();
         var currentAzimuth = turretController?.CurrentAngle ?? 0f;
 
-        // Exactly one physical/loading snapshot per planning round. Azimuth is also captured once here;
-        // the resulting FirePlan stores only the target azimuth and never continuously re-plans from motion.
-        var leftPhysical = GunPhysicalState.Read("Left");
-        var rightPhysical = GunPhysicalState.Read("Right");
-        var leftLoading = _fcs.Loading.GetSnapshot(GunSide.Left);
-        var rightLoading = _fcs.Loading.GetSnapshot(GunSide.Right);
-        var ballisticCache = new Dictionary<(BulletType Shell, int Charge), BallisticSolveResult>();
+        return new FirePlanningSnapshot(
+            snapshotAt,
+            currentAzimuth,
+            GunPhysicalState.Read("Left"),
+            GunPhysicalState.Read("Right"),
+            _fcs.Loading.GetSnapshot(GunSide.Left),
+            _fcs.Loading.GetSnapshot(GunSide.Right),
+            _fcs.PlanExecutor.GetPlan(LeftRight.Left) == null,
+            _fcs.PlanExecutor.GetPlan(LeftRight.Right) == null);
+    }
+
+    /// <summary>
+    /// Compatibility wrapper for callers that still request one plan directly. Selection remains side-effect free;
+    /// the ballistic calculator is touched only after one gun has been chosen.
+    /// </summary>
+    public IEnumerator BuildPlan(ArtilleryTask task, Action<FirePlan?, string> completed)
+    {
+        var snapshot = CaptureSnapshot();
+        var planning = BuildEligibility(task, snapshot);
+        var matchAt = FcsRuntimeClock.Now;
+        planning.FinalizeTiming(snapshot.SnapshotAt, matchAt);
+
+        var chosen = ChooseCandidate(planning.LeftCandidate, planning.RightCandidate);
+        if (chosen == null)
+        {
+            task.pendingHint = planning.PendingHint;
+            completed(null, planning.ShouldWait ? "WAIT: " + planning.FailureDetail : planning.FailureDetail);
+            yield break;
+        }
+
+        FirePlanCandidate? materialized = null;
+        var materializeReason = "";
+        yield return MaterializeCandidate(
+            task,
+            chosen,
+            snapshot,
+            result => materialized = result,
+            reason => materializeReason = reason);
+
+        if (materialized == null)
+        {
+            completed(null, materializeReason);
+            yield break;
+        }
+
+        var plannedAt = FcsRuntimeClock.Now;
+        materialized.FinalizeTiming(snapshot.SnapshotAt, plannedAt);
+        completed(CreatePlan(planning, materialized, plannedAt), "");
+    }
+
+    /// <summary>
+    /// Build the hard eligibility matrix without operating any physical game console. Shell, charge, current
+    /// loading transaction, range and slot availability are resolved here; ballistic/elevation validation is not.
+    /// </summary>
+    public TaskPlanningResult BuildEligibility(ArtilleryTask task, FirePlanningSnapshot snapshot)
+    {
+        task.progress = Progress.Calculating;
+        task.pendingHint = PendingHint.None;
 
         MelonLogger.Msg(
-            $"[FCS Plan] T{task.targetId}: snapshot currentAz={currentAzimuth:F2}°, " +
-            $"Left={leftLoading.PhysicalState}, Right={rightLoading.PhysicalState}");
+            $"[FCS Match] T{task.targetId}: snapshot currentAz={snapshot.CurrentAzimuth:F2}°, " +
+            $"Left={snapshot.LeftLoading.PhysicalState}, Right={snapshot.RightLoading.PhysicalState}");
 
-        FirePlanCandidate? left = null;
-        FirePlanCandidate? right = null;
+        TaskGunCandidate? left = null;
+        TaskGunCandidate? right = null;
         var leftReason = "";
         var rightReason = "";
         var leftHint = PendingHint.None;
         var rightHint = PendingHint.None;
 
-        if (_fcs.PlanExecutor.GetPlan(LeftRight.Left) == null)
+        if (snapshot.LeftSlotAvailable)
         {
-            yield return BuildCandidate(task, LeftRight.Left, leftPhysical, leftLoading, currentAzimuth,
-                ballisticCache, result => left = result, reason => leftReason = reason, hint => leftHint = hint);
+            left = BuildEligibilityCandidate(
+                task,
+                LeftRight.Left,
+                snapshot.LeftLoading,
+                snapshot.CurrentAzimuth,
+                out leftReason,
+                out leftHint);
         }
         else
         {
             leftReason = "Left slot occupied";
         }
 
-        if (_fcs.PlanExecutor.GetPlan(LeftRight.Right) == null)
+        if (snapshot.RightSlotAvailable)
         {
-            yield return BuildCandidate(task, LeftRight.Right, rightPhysical, rightLoading, currentAzimuth,
-                ballisticCache, result => right = result, reason => rightReason = reason, hint => rightHint = hint);
+            right = BuildEligibilityCandidate(
+                task,
+                LeftRight.Right,
+                snapshot.RightLoading,
+                snapshot.CurrentAzimuth,
+                out rightReason,
+                out rightHint);
         }
         else
         {
             rightReason = "Right slot occupied";
         }
 
-        // Both candidates are finalized against the same decision time. This is important: fresh loading does
-        // not run while the calculator is producing stickers, while an already accepted persistent transaction does.
-        var plannedAt = FcsRuntimeClock.Now;
-        left?.FinalizeTiming(snapshotAt, plannedAt);
-        right?.FinalizeTiming(snapshotAt, plannedAt);
+        var pendingHint = CombinePendingHint(leftHint, rightHint);
+        var detail = $"no eligible gun in match snapshot; Left={leftReason}; Right={rightReason}";
+        var shouldWait = !snapshot.LeftSlotAvailable
+                         || !snapshot.RightSlotAvailable
+                         || IsTransient(snapshot.LeftLoading.PhysicalState)
+                         || IsTransient(snapshot.RightLoading.PhysicalState);
 
-        var chosen = ChooseCandidate(left, right);
-        if (chosen == null)
+        return new TaskPlanningResult(
+            task, left, right, leftReason, rightReason, pendingHint, detail, shouldWait);
+    }
+
+    /// <summary>
+    /// Materialize exactly one already-selected Task x Gun edge. This is the only matching-stage method that is
+    /// allowed to operate the physical ballistic calculator and therefore the only stage that can create a sticker.
+    /// </summary>
+    public IEnumerator MaterializeCandidate(
+        ArtilleryTask task,
+        TaskGunCandidate candidate,
+        FirePlanningSnapshot snapshot,
+        Action<FirePlanCandidate?> completed,
+        Action<string> failed)
+    {
+        completed(null);
+
+        var ballistic = new BallisticSolveResult();
+        yield return SolveBallistic(task, candidate.Shell, candidate.Charge, ballistic);
+        if (!ballistic.Succeeded)
         {
-            task.pendingHint = CombinePendingHint(leftHint, rightHint);
-
-            var leftOccupied = _fcs.PlanExecutor.GetPlan(LeftRight.Left) != null;
-            var rightOccupied = _fcs.PlanExecutor.GetPlan(LeftRight.Right) != null;
-            var transient = leftOccupied || rightOccupied
-                            || IsTransient(leftLoading.PhysicalState)
-                            || IsTransient(rightLoading.PhysicalState);
-
-            var detail = $"no viable gun in planning snapshot; Left={leftReason}; Right={rightReason}";
-            completed(null, transient ? "WAIT: " + detail : detail);
+            failed($"{candidate.Shell.DisplayName()} C{candidate.Charge} ballistic calculation failed");
             yield break;
         }
 
+        var physical = candidate.Side == LeftRight.Left
+            ? snapshot.LeftPhysical
+            : snapshot.RightPhysical;
+        var elevation = ballistic.Elevation;
+        if (!physical.IsElevationWithinPhysicalRange(elevation))
+        {
+            failed($"{candidate.Shell.DisplayName()} C{candidate.Charge} elevation {elevation:F2} outside physical range");
+            yield break;
+        }
+
+        var elevationSeconds = FireReadyEstimator.ElevationSeconds(physical.Elevation, elevation);
+        var alignmentScore = FireReadyEstimator.AlignmentScore(
+            snapshot.CurrentAzimuth,
+            task.angel,
+            physical.Elevation,
+            elevation);
+
+        completed(new FirePlanCandidate(
+            candidate.Side,
+            candidate.Shell,
+            candidate.Charge,
+            elevation,
+            candidate.EtaKnown,
+            candidate.LoadAlreadyRunning,
+            alignmentScore,
+            candidate.LoadSeconds,
+            elevationSeconds,
+            candidate.AzimuthSeconds,
+            candidate.LoadLabel));
+    }
+
+    public FirePlan CreatePlan(TaskPlanningResult planning, FirePlanCandidate chosen, float plannedAt)
+    {
+        var task = planning.Task;
         task.pendingHint = PendingHint.None;
         task.bulletType = chosen.Shell;
         task.chargeCount = chosen.Charge;
         task.elevation = chosen.Elevation;
 
-        var plan = new FirePlan(task, chosen.Side, chosen.Shell, chosen.Charge, chosen.Elevation, task.angel,
-            plannedAt, chosen.EtaKnown, chosen.EstimatedLocalReadyAt, chosen.AzimuthSeconds,
-            chosen.AlignmentScore, _fcs.FirePriority.Generation);
+        var plan = new FirePlan(
+            task,
+            chosen.Side,
+            chosen.Shell,
+            chosen.Charge,
+            chosen.Elevation,
+            task.angel,
+            plannedAt,
+            chosen.EtaKnown,
+            chosen.EstimatedLocalReadyAt,
+            chosen.AzimuthSeconds,
+            chosen.AlignmentScore,
+            _fcs.FirePriority.Generation);
 
         if (TimeToImpactEstimator.TryEstimateSeconds(task.distance, chosen.Charge, out var estimatedTti))
             plan.TrySetEstimatedFlightSeconds(estimatedTti);
@@ -113,97 +226,82 @@ internal sealed class FirePlanner
             $"ETA={(plan.EtaKnown ? Math.Max(0f, plan.EstimatedReadyAt - plannedAt).ToString("F1") : "unknown")}s, " +
             $"load={chosen.LoadLabel}");
 
-        completed(plan, "");
+        return plan;
     }
 
-    private IEnumerator BuildCandidate(
+    private TaskGunCandidate? BuildEligibilityCandidate(
         ArtilleryTask task,
         LeftRight side,
-        GunPhysicalState physical,
         LoadingSnapshot loading,
         float currentAzimuth,
-        Dictionary<(BulletType Shell, int Charge), BallisticSolveResult> ballisticCache,
-        Action<FirePlanCandidate?> setResult,
-        Action<string> setReason,
-        Action<PendingHint> setPendingHint)
+        out string reason,
+        out PendingHint pendingHint)
     {
-        setResult(null);
-        setPendingHint(PendingHint.None);
+        reason = "";
+        pendingHint = PendingHint.None;
 
         if (!loading.IsBound)
         {
-            setReason("persistent loading system unbound");
-            yield break;
+            reason = "persistent loading system unbound";
+            return null;
         }
 
-        if (!TryResolveRound(task, loading, out var shell, out var charge, out var loadKnown,
-                out var loadAlreadyRunning, out var loadSeconds, out var loadLabel, out var resolveReason))
+        if (!TryResolveRound(
+                task,
+                loading,
+                out var shell,
+                out var charge,
+                out var loadKnown,
+                out var loadAlreadyRunning,
+                out var loadSeconds,
+                out var loadLabel,
+                out var resolveReason))
         {
-            setReason(resolveReason);
-            yield break;
+            reason = resolveReason;
+            return null;
         }
 
         if (shell != task.bulletType)
         {
-            setPendingHint(PendingHint.ShellMismatch);
-            setReason($"loaded {shell.DisplayName()} does not match requested {task.bulletType.DisplayName()}");
+            pendingHint = PendingHint.ShellMismatch;
+            reason = $"loaded {shell.DisplayName()} does not match requested {task.bulletType.DisplayName()}";
             MelonLogger.Msg(
-                $"[FCS Plan] T{task.targetId}: quick reject {side}; " +
+                $"[FCS Match] T{task.targetId}: quick reject {side}; " +
                 $"shell={shell.DisplayName()} requested={task.bulletType.DisplayName()}");
-            yield break;
+            return null;
         }
 
         if (charge is < 1 or > 6)
         {
-            setReason($"invalid charge C{charge}");
-            yield break;
+            reason = $"invalid charge C{charge}";
+            return null;
         }
 
         var maxRangeKm = charge * MaxRangePerChargeKm;
         if (task.distance > maxRangeKm)
         {
-            setPendingHint(PendingHint.ChargeRangeInsufficient);
-            setReason($"{shell.DisplayName()} C{charge} max range {maxRangeKm:F2}km < target {task.distance:F2}km");
+            pendingHint = PendingHint.ChargeRangeInsufficient;
+            reason = $"{shell.DisplayName()} C{charge} max range {maxRangeKm:F2}km < target {task.distance:F2}km";
             MelonLogger.Msg(
-                $"[FCS Plan] T{task.targetId}: quick reject {side} {shell.DisplayName()} C{charge}; " +
+                $"[FCS Match] T{task.targetId}: quick reject {side} {shell.DisplayName()} C{charge}; " +
                 $"target={task.distance:F2}km > max={maxRangeKm:F2}km");
-            yield break;
+            return null;
         }
 
-        var key = (shell, charge);
-        if (!ballisticCache.TryGetValue(key, out var ballistic))
-        {
-            ballistic = new BallisticSolveResult();
-            yield return SolveBallistic(task, shell, charge, ballistic);
-            ballisticCache[key] = ballistic;
-        }
-        else
-        {
-            MelonLogger.Msg(
-                $"[FCS BALLISTIC] planning cache hit: T{task.targetId} {shell.DisplayName()} C{charge} " +
-                $"reuses E={(ballistic.Succeeded ? ballistic.Elevation.ToString("F2") : "failed")}");
-        }
-
-        if (!ballistic.Succeeded)
-        {
-            setReason($"{shell.DisplayName()} C{charge} ballistic calculation failed");
-            yield break;
-        }
-
-        var elevation = ballistic.Elevation;
-        if (!physical.IsElevationWithinPhysicalRange(elevation))
-        {
-            setReason($"{shell.DisplayName()} C{charge} elevation {elevation:F2} outside physical range");
-            yield break;
-        }
-
-        var elevationSeconds = FireReadyEstimator.ElevationSeconds(physical.Elevation, elevation);
         var azimuthSeconds = FireReadyEstimator.AzimuthSeconds(currentAzimuth, task.angel);
-        var alignmentScore = FireReadyEstimator.AlignmentScore(currentAzimuth, task.angel, physical.Elevation, elevation);
+        var azimuthScore = Mathf.Abs(Mathf.DeltaAngle(currentAzimuth, task.angel));
+        reason = "eligible";
 
-        setResult(new FirePlanCandidate(side, shell, charge, elevation, loadKnown, loadAlreadyRunning,
-            alignmentScore, loadKnown ? loadSeconds : 0f, elevationSeconds, azimuthSeconds, loadLabel));
-        setReason("viable");
+        return new TaskGunCandidate(
+            side,
+            shell,
+            charge,
+            loadKnown,
+            loadAlreadyRunning,
+            loadKnown ? loadSeconds : 0f,
+            azimuthSeconds,
+            azimuthScore,
+            loadLabel);
     }
 
     private IEnumerator SolveBallistic(
@@ -295,6 +393,7 @@ internal sealed class FirePlanner
                     reason = "loaded physical state missing shell/charge";
                     return false;
                 }
+
                 shell = (BulletType)(int)loading.ActualShell.Value;
                 charge = loading.ActualCharge;
                 loadKnown = true;
@@ -308,6 +407,7 @@ internal sealed class FirePlanner
                     reason = "shell-loaded physical state missing shell type";
                     return false;
                 }
+
                 shell = (BulletType)(int)loading.ActualShell.Value;
                 charge = _fcs.SceneInteractor.maxCharge ? 6 : BallisticCalculator.MinimumCharge(task.distance);
                 loadKnown = false;
@@ -345,7 +445,7 @@ internal sealed class FirePlanner
                || state == LoadingPhysicalState.Unbound;
     }
 
-    private static FirePlanCandidate? ChooseCandidate(FirePlanCandidate? left, FirePlanCandidate? right)
+    private static TaskGunCandidate? ChooseCandidate(TaskGunCandidate? left, TaskGunCandidate? right)
     {
         if (left == null)
             return right;
@@ -360,10 +460,10 @@ internal sealed class FirePlanner
             return delta < 0f ? left : right;
         }
 
-        var alignmentDelta = left.AlignmentScore - right.AlignmentScore;
-        if (Mathf.Abs(alignmentDelta) <= FireReadyEstimator.AlignmentTieTolerance)
+        var azimuthDelta = left.AzimuthScore - right.AzimuthScore;
+        if (Mathf.Abs(azimuthDelta) <= FireReadyEstimator.AlignmentTieTolerance)
             return left;
-        return alignmentDelta < 0f ? left : right;
+        return azimuthDelta < 0f ? left : right;
     }
 
     private sealed class BallisticSolveResult
@@ -371,4 +471,138 @@ internal sealed class FirePlanner
         public bool Succeeded { get; set; }
         public float Elevation { get; set; } = float.NaN;
     }
+}
+
+internal sealed class FirePlanningSnapshot
+{
+    public float SnapshotAt { get; }
+    public float CurrentAzimuth { get; }
+    public GunPhysicalState LeftPhysical { get; }
+    public GunPhysicalState RightPhysical { get; }
+    public LoadingSnapshot LeftLoading { get; }
+    public LoadingSnapshot RightLoading { get; }
+    public bool LeftSlotAvailable { get; }
+    public bool RightSlotAvailable { get; }
+
+    public FirePlanningSnapshot(
+        float snapshotAt,
+        float currentAzimuth,
+        GunPhysicalState leftPhysical,
+        GunPhysicalState rightPhysical,
+        LoadingSnapshot leftLoading,
+        LoadingSnapshot rightLoading,
+        bool leftSlotAvailable,
+        bool rightSlotAvailable)
+    {
+        SnapshotAt = snapshotAt;
+        CurrentAzimuth = currentAzimuth;
+        LeftPhysical = leftPhysical;
+        RightPhysical = rightPhysical;
+        LeftLoading = leftLoading;
+        RightLoading = rightLoading;
+        LeftSlotAvailable = leftSlotAvailable;
+        RightSlotAvailable = rightSlotAvailable;
+    }
+}
+
+/// <summary>
+/// Side-effect-free Task x Gun edge used only for matching. It intentionally has no ballistic elevation.
+/// </summary>
+internal sealed class TaskGunCandidate
+{
+    public LeftRight Side { get; }
+    public BulletType Shell { get; }
+    public int Charge { get; }
+    public bool EtaKnown { get; }
+    public bool LoadAlreadyRunning { get; }
+    public float LoadSeconds { get; }
+    public float AzimuthSeconds { get; }
+    public float AzimuthScore { get; }
+    public string LoadLabel { get; }
+    public float EstimatedLocalReadyAt { get; private set; } = float.NaN;
+    public float EstimatedReadyAt { get; private set; } = float.NaN;
+
+    public TaskGunCandidate(
+        LeftRight side,
+        BulletType shell,
+        int charge,
+        bool etaKnown,
+        bool loadAlreadyRunning,
+        float loadSeconds,
+        float azimuthSeconds,
+        float azimuthScore,
+        string loadLabel)
+    {
+        Side = side;
+        Shell = shell;
+        Charge = charge;
+        EtaKnown = etaKnown;
+        LoadAlreadyRunning = loadAlreadyRunning;
+        LoadSeconds = loadSeconds;
+        AzimuthSeconds = azimuthSeconds;
+        AzimuthScore = azimuthScore;
+        LoadLabel = loadLabel;
+    }
+
+    public void FinalizeTiming(float snapshotAt, float decisionAt)
+    {
+        if (!EtaKnown)
+        {
+            EstimatedLocalReadyAt = float.NaN;
+            EstimatedReadyAt = float.NaN;
+            return;
+        }
+
+        var loadReadyAt = LoadAlreadyRunning
+            ? snapshotAt + LoadSeconds
+            : decisionAt + LoadSeconds;
+
+        // Elevation is intentionally unknown before matching. This estimate is only a soft matching cost;
+        // FirePlanCandidate recomputes the full load + elevation + azimuth timing after materialization.
+        EstimatedLocalReadyAt = Math.Max(decisionAt, loadReadyAt);
+        EstimatedReadyAt = Math.Max(EstimatedLocalReadyAt, decisionAt + AzimuthSeconds);
+    }
+}
+
+internal sealed class TaskPlanningResult
+{
+    public ArtilleryTask Task { get; }
+    public TaskGunCandidate? LeftCandidate { get; }
+    public TaskGunCandidate? RightCandidate { get; }
+    public string LeftReason { get; }
+    public string RightReason { get; }
+    public PendingHint PendingHint { get; }
+    public string FailureDetail { get; }
+    public bool ShouldWait { get; }
+
+    public bool HasCandidate => LeftCandidate != null || RightCandidate != null;
+
+    public TaskPlanningResult(
+        ArtilleryTask task,
+        TaskGunCandidate? leftCandidate,
+        TaskGunCandidate? rightCandidate,
+        string leftReason,
+        string rightReason,
+        PendingHint pendingHint,
+        string failureDetail,
+        bool shouldWait)
+    {
+        Task = task;
+        LeftCandidate = leftCandidate;
+        RightCandidate = rightCandidate;
+        LeftReason = leftReason;
+        RightReason = rightReason;
+        PendingHint = pendingHint;
+        FailureDetail = failureDetail;
+        ShouldWait = shouldWait;
+    }
+
+    public void FinalizeTiming(float snapshotAt, float decisionAt)
+    {
+        LeftCandidate?.FinalizeTiming(snapshotAt, decisionAt);
+        RightCandidate?.FinalizeTiming(snapshotAt, decisionAt);
+    }
+
+    public TaskGunCandidate? CandidateFor(LeftRight side) =>
+        side == LeftRight.Left ? LeftCandidate : RightCandidate;
 }

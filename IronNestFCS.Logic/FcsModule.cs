@@ -19,20 +19,11 @@ public class FcsModule : IFcsModule
         _fcs = new FSC(hostServices);
         _window = new FcsWindow(_fcs);
 
-        PhysicalStateProbe.Reset();
-        TriggerConsoleProbe.Reset();
-
         var bound = _fcs.TryBind();
 
         var leftPhysical = bound ? SafePhysicalSummary("Left") : "unbound";
         var rightPhysical = bound ? SafePhysicalSummary("Right") : "unbound";
         FcsDiagnosticLog.MarkBindResult(bound, _fcs.FirePriority.Generation, leftPhysical, rightPhysical);
-
-        if (bound && FcsDiagnosticLog.DetailedDiagnosticsEnabled)
-        {
-            PhysicalStateProbe.LogCurrentState();
-            TriggerConsoleProbe.BindAndLog();
-        }
 
         return bound;
     }
@@ -44,11 +35,6 @@ public class FcsModule : IFcsModule
             return;
 
         fcs.Update();
-        if (fcs.IsBound && FcsDiagnosticLog.DetailedDiagnosticsEnabled)
-        {
-            PhysicalStateProbe.Tick();
-            TriggerConsoleProbe.Tick();
-        }
     }
 
     public void OnGui() => _window?.OnGui();
@@ -58,8 +44,6 @@ public class FcsModule : IFcsModule
         try
         {
             _fcs?.Dispose();
-            PhysicalStateProbe.Reset();
-            TriggerConsoleProbe.Reset();
             _window = null;
             _fcs = null;
         }

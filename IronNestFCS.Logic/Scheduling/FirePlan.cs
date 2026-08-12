@@ -24,6 +24,8 @@ internal sealed class FirePlan
     public float AlignmentScore { get; }
     public int Generation { get; }
 
+    // Zero while merely planned. ComparePair/CommitSingle assigns one id shared by the committed stack.
+    public int ExecutionBatchId { get; set; }
     public bool Compared { get; set; }
     public bool LocalReady { get; set; }
     public bool AzimuthReady { get; set; }
