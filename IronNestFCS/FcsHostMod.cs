@@ -36,7 +36,7 @@ public class FcsHostMod : MelonMod
         var logicDll = Path.Combine(logicDir, "IronNestFCS.Logic.dll");
 
         MelonLogger.Msg($"IronNestFCS Smart Host Started. Logic path: {logicDll}");
-        MelonLogger.Msg($"Press {ReloadKeyName} to hot reload TaskSystem.");
+        MelonLogger.Msg($"Press {ReloadKeyName} to hot reload TaskSystem. Press F10 to cycle FCS window mode (M/T/F/Off).");
 
         _reloader = new LogicReloader(
             logicDll,

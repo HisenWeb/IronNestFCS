@@ -1,6 +1,7 @@
 using IronNestFCS.Abstractions;
 using IronNestFCS.Logic.FCS;
 using IronNestFCS.Logic.Infrastructure;
+using UnityEngine.InputSystem;
 
 namespace IronNestFCS.Logic;
 
@@ -33,6 +34,10 @@ public class FcsModule : IFcsModule
         var fcs = _fcs;
         if (fcs == null)
             return;
+
+        var kb = Keyboard.current;
+        if (kb != null && kb.f10Key.wasPressedThisFrame)
+            _window?.CycleMode();
 
         fcs.Update();
     }
