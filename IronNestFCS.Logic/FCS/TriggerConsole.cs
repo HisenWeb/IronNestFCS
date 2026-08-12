@@ -14,6 +14,7 @@ public class TriggerConsole {
     private const float ArmPoseTolerance = 4f;
     private const float PoseTransitionTimeoutSeconds = 2f;
     private const float ParallelControlReadyTimeoutSeconds = 10f;
+    private const float ReviewClickHoldSeconds = 0.1f;
 
     private LookAtTarget? _taskCheck;
     private LookAtTarget? _bulletCheck;
@@ -281,9 +282,10 @@ public class TriggerConsole {
     }
 
     /// <summary>
-    /// Normal firing-solution review protocol. All five independent physical switches are reconciled together;
-    /// switches already ON are untouched, the remaining switches are pressed in parallel, and the method does
-    /// not return until every physical pose is confirmed ON or the existing physical timeout is reached.
+    /// Normal firing-solution review protocol. Each physical switch advances independently: an OFF switch is
+    /// clicked as soon as that switch becomes clickable, without waiting for the other four. Click holds and
+    /// physical pose transitions take time, so already-started switches continue settling while newly available
+    /// switches begin. The protocol returns when all five physical poses are ON, or after a genuine progress stall.
     /// </summary>
     public IEnumerator CompleteReviewProtocol() {
         var controls = new List<(LookAtTarget? Control, Transform? Pose, string Name)>
@@ -301,93 +303,142 @@ public class TriggerConsole {
             yield break;
         }
 
-        var poseDeadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+        // 0 = waiting for a stable OFF/clickable state, 1 = click held, 2 = released/waiting for ON pose,
+        // 3 = physically ON, 4 = failed. Keeping this in one tracked parent coroutine makes F9 cleanup safe.
+        var phase = new int[controls.Count];
+        var releaseAtRealtime = new float[controls.Count];
+        var poseDeadline = new float[controls.Count];
+        var readableDeadline = new float[controls.Count];
+        for (var i = 0; i < readableDeadline.Length; i++)
+            readableDeadline[i] = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+
+        // This is a stall timeout, not a requirement that all five controls become clickable together. Any real
+        // progress (a click starts/releases or a physical pose reaches ON) renews the allowance for controls whose
+        // activation is gated by the game's console mechanics.
+        var progressDeadline = FcsRuntimeClock.Now + ParallelControlReadyTimeoutSeconds;
+
         while (true) {
-            yield return FcsRuntimeClock.WaitUntilFocused();
-            var allReadable = true;
-            foreach (var item in controls) {
-                if (TryReadReviewState(item.Pose, out _, out _)) continue;
-                allReadable = false;
-                break;
-            }
+            var progressed = false;
+            var realtimeNow = Time.realtimeSinceStartup;
 
-            if (allReadable)
-                break;
+            // A physical down/up pair must always finish once started, even if focus is lost during the hold.
+            for (var i = 0; i < controls.Count; i++) {
+                if (phase[i] != 1 || realtimeNow < releaseAtRealtime[i])
+                    continue;
 
-            if (FcsRuntimeClock.Now >= poseDeadline) {
-                foreach (var item in controls) {
-                    if (!TryReadReviewState(item.Pose, out _, out var angle))
-                        MelonLogger.Warning($"[FCS] TriggerConsole: {item.Name} physical pose ambiguous at Z={angle:F1}°; not toggling blindly");
+                try {
+                    FcsSceneInteractor.EndPhysicalClick(controls[i].Control!);
                 }
-                yield break;
-            }
-
-            yield return new WaitForSeconds(0.05f);
-        }
-
-        var toToggle = controls
-            .Where(item => TryReadReviewState(item.Pose, out var on, out _) && !on)
-            .Select(item => (Control: item.Control!, item.Pose!, item.Name))
-            .ToList();
-
-        if (toToggle.Count > 0) {
-            var readyDeadline = FcsRuntimeClock.Now + ParallelControlReadyTimeoutSeconds;
-            while (true) {
-                yield return FcsRuntimeClock.WaitUntilFocused();
-                if (toToggle.All(item => item.Control.isActive && item.Control.nextAllowedClickTime <= Time.realtimeSinceStartup))
-                    break;
-
-                if (FcsRuntimeClock.Now >= readyDeadline) {
-                    MelonLogger.Error("[FCS] TriggerConsole: parallel review controls did not become clickable before timeout");
-                    yield break;
+                catch (Exception ex) {
+                    MelonLogger.Warning($"[FCS] TriggerConsole: {controls[i].Name} review click-up failed: {ex.Message}");
+                    phase[i] = 4;
+                    progressed = true;
+                    continue;
                 }
 
-                yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+                phase[i] = 2;
+                poseDeadline[i] = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+                progressed = true;
             }
 
-            yield return FcsRuntimeClock.WaitForSeconds(0.1f);
-            yield return FcsRuntimeClock.WaitUntilFocused();
+            if (!FcsRuntimeClock.IsFocused) {
+                if (progressed)
+                    progressDeadline = FcsRuntimeClock.Now + ParallelControlReadyTimeoutSeconds;
+                yield return null;
+                continue;
+            }
 
-            var held = new List<LookAtTarget>();
-            try {
-                foreach (var item in toToggle) {
-                    FcsSceneInteractor.BeginPhysicalClick(item.Control);
-                    held.Add(item.Control);
+            for (var i = 0; i < controls.Count; i++) {
+                if (phase[i] >= 3 || phase[i] == 1)
+                    continue;
+
+                var item = controls[i];
+                var readable = TryReadReviewState(item.Pose, out var on, out var angle);
+
+                if (phase[i] == 0) {
+                    if (readable && on) {
+                        phase[i] = 3;
+                        progressed = true;
+                        continue;
+                    }
+
+                    if (!readable) {
+                        if (FcsRuntimeClock.Now >= readableDeadline[i]) {
+                            MelonLogger.Warning(
+                                $"[FCS] TriggerConsole: {item.Name} physical pose ambiguous at Z={angle:F1}°; not toggling blindly");
+                            phase[i] = 4;
+                            progressed = true;
+                        }
+                        continue;
+                    }
+
+                    // OFF is stable. Start this switch immediately when IT becomes clickable. Other switches keep
+                    // advancing independently; there is intentionally no all-controls-clickable barrier here.
+                    if (item.Control!.isActive && item.Control.nextAllowedClickTime <= realtimeNow) {
+                        try {
+                            FcsSceneInteractor.BeginPhysicalClick(item.Control);
+                            phase[i] = 1;
+                            releaseAtRealtime[i] = realtimeNow + ReviewClickHoldSeconds;
+                            MelonLogger.Msg($"[FCS] TriggerConsole: {item.Name} review click started independently");
+                            progressed = true;
+                        }
+                        catch (Exception ex) {
+                            MelonLogger.Warning($"[FCS] TriggerConsole: {item.Name} review click-down failed: {ex.Message}");
+                            phase[i] = 4;
+                            progressed = true;
+                        }
+                    }
+
+                    continue;
                 }
-                yield return new WaitForSeconds(0.1f);
-            }
-            finally {
-                foreach (var control in held.ToArray()) {
-                    try { FcsSceneInteractor.EndPhysicalClick(control); }
-                    catch (Exception ex) { MelonLogger.Warning($"[FCS] TriggerConsole: review click-up failed: {ex.Message}"); }
+
+                if (phase[i] == 2) {
+                    if (readable && on) {
+                        phase[i] = 3;
+                        progressed = true;
+                        continue;
+                    }
+
+                    if (FcsRuntimeClock.Now >= poseDeadline[i]) {
+                        MelonLogger.Warning(
+                            $"[FCS] TriggerConsole: {item.Name} did not reach ON physical pose; Z={angle:F1}°");
+                        phase[i] = 4;
+                        progressed = true;
+                    }
                 }
             }
-        }
 
-        var verifyDeadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
-        while (true) {
-            yield return FcsRuntimeClock.WaitUntilFocused();
-            var allOn = true;
-            foreach (var item in controls) {
-                if (TryReadReviewState(item.Pose, out var on, out _) && on) continue;
-                allOn = false;
-                break;
-            }
+            if (progressed)
+                progressDeadline = FcsRuntimeClock.Now + ParallelControlReadyTimeoutSeconds;
 
-            if (allOn) {
+            if (phase.All(value => value == 3)) {
                 LogPhysicalStates("after parallel review");
                 yield break;
             }
 
-            if (FcsRuntimeClock.Now >= verifyDeadline) {
-                foreach (var item in controls) {
-                    if (!TryReadReviewState(item.Pose, out var on, out var angle) || !on)
-                        MelonLogger.Warning($"[FCS] TriggerConsole: {item.Name} did not reach ON physical pose; Z={angle:F1}°");
+            // Failed controls preserve the old fail-open behavior: log the physical failure and return so the
+            // caller does not hang indefinitely. Successfully advancing controls are never undone here.
+            if (phase.Any(value => value == 4))
+                yield break;
+
+            if (FcsRuntimeClock.Now >= progressDeadline) {
+                for (var i = 0; i < controls.Count; i++) {
+                    if (phase[i] != 0)
+                        continue;
+
+                    var item = controls[i];
+                    TryReadReviewState(item.Pose, out var on, out var angle);
+                    var cooldown = item.Control == null
+                        ? float.NaN
+                        : Mathf.Max(0f, item.Control.nextAllowedClickTime - Time.realtimeSinceStartup);
+                    MelonLogger.Error(
+                        $"[FCS] TriggerConsole: {item.Name} review activation stalled; " +
+                        $"isActive={item.Control?.isActive}, cooldown={cooldown:F2}s, pose={(on ? "ON" : "OFF")}({angle:F1}°)");
                 }
                 yield break;
             }
 
-            yield return new WaitForSeconds(0.05f);
+            yield return null;
         }
     }
 
