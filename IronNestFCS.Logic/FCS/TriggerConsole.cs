@@ -13,6 +13,7 @@ public class TriggerConsole {
     private const float ArmOffX = -32f;
     private const float ArmPoseTolerance = 4f;
     private const float PoseTransitionTimeoutSeconds = 2f;
+    private const float ParallelControlReadyTimeoutSeconds = 10f;
 
     private LookAtTarget? _taskCheck;
     private LookAtTarget? _bulletCheck;
@@ -254,7 +255,7 @@ public class TriggerConsole {
         yield return EnsureArmState(_armLeft, _armLeftPose, false, "Left");
         yield return EnsureArmState(_armRight, _armRightPose, false, "Right");
 
-        // Clear the review dependency chain backwards, re-reading the physical pose before every action.
+        // Keep the proven serial reset ordering. Normal review confirmation is parallelized separately below.
         yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire");
         yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck");
         yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck");
@@ -279,16 +280,215 @@ public class TriggerConsole {
         LogPhysicalStates("before fire solution");
     }
 
-    public IEnumerator Arm(LeftRight leftRight) {
-        if (leftRight == LeftRight.Left)
-            yield return EnsureArmState(_armLeft, _armLeftPose, true, "Left");
-        else
-            yield return EnsureArmState(_armRight, _armRightPose, true, "Right");
+    /// <summary>
+    /// Normal firing-solution review protocol. All five independent physical switches are reconciled together;
+    /// switches already ON are untouched, the remaining switches are pressed in parallel, and the method does
+    /// not return until every physical pose is confirmed ON or the existing physical timeout is reached.
+    /// </summary>
+    public IEnumerator CompleteReviewProtocol() {
+        var controls = new List<(LookAtTarget? Control, Transform? Pose, string Name)>
+        {
+            (_taskCheck, _taskPose, "TaskCheck"),
+            (_bulletCheck, _bulletPose, "BulletCheck"),
+            (_rotationCheck, _rotationPose, "RotationCheck"),
+            (_elevationCheck, _elevationPose, "ElevationCheck"),
+            (_readyFire, _readyPose, "ReadyToFire"),
+        };
 
-        yield return FcsRuntimeClock.WaitForSeconds(0.75f);
-        LogPhysicalStates("after arm");
+        if (controls.Any(item => item.Control == null || item.Pose == null)) {
+            foreach (var item in controls.Where(item => item.Control == null || item.Pose == null))
+                MelonLogger.Error($"[FCS] TriggerConsole: missing {item.Name} control/pose");
+            yield break;
+        }
+
+        var poseDeadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            var allReadable = true;
+            foreach (var item in controls) {
+                if (TryReadReviewState(item.Pose, out _, out _)) continue;
+                allReadable = false;
+                break;
+            }
+
+            if (allReadable)
+                break;
+
+            if (FcsRuntimeClock.Now >= poseDeadline) {
+                foreach (var item in controls) {
+                    if (!TryReadReviewState(item.Pose, out _, out var angle))
+                        MelonLogger.Warning($"[FCS] TriggerConsole: {item.Name} physical pose ambiguous at Z={angle:F1}°; not toggling blindly");
+                }
+                yield break;
+            }
+
+            yield return new WaitForSeconds(0.05f);
+        }
+
+        var toToggle = controls
+            .Where(item => TryReadReviewState(item.Pose, out var on, out _) && !on)
+            .Select(item => (Control: item.Control!, item.Pose!, item.Name))
+            .ToList();
+
+        if (toToggle.Count > 0) {
+            var readyDeadline = FcsRuntimeClock.Now + ParallelControlReadyTimeoutSeconds;
+            while (true) {
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                if (toToggle.All(item => item.Control.isActive && item.Control.nextAllowedClickTime <= Time.realtimeSinceStartup))
+                    break;
+
+                if (FcsRuntimeClock.Now >= readyDeadline) {
+                    MelonLogger.Error("[FCS] TriggerConsole: parallel review controls did not become clickable before timeout");
+                    yield break;
+                }
+
+                yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+            }
+
+            yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
+            var held = new List<LookAtTarget>();
+            try {
+                foreach (var item in toToggle) {
+                    FcsSceneInteractor.BeginPhysicalClick(item.Control);
+                    held.Add(item.Control);
+                }
+                yield return new WaitForSeconds(0.1f);
+            }
+            finally {
+                foreach (var control in held.ToArray()) {
+                    try { FcsSceneInteractor.EndPhysicalClick(control); }
+                    catch (Exception ex) { MelonLogger.Warning($"[FCS] TriggerConsole: review click-up failed: {ex.Message}"); }
+                }
+            }
+        }
+
+        var verifyDeadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            var allOn = true;
+            foreach (var item in controls) {
+                if (TryReadReviewState(item.Pose, out var on, out _) && on) continue;
+                allOn = false;
+                break;
+            }
+
+            if (allOn) {
+                LogPhysicalStates("after parallel review");
+                yield break;
+            }
+
+            if (FcsRuntimeClock.Now >= verifyDeadline) {
+                foreach (var item in controls) {
+                    if (!TryReadReviewState(item.Pose, out var on, out var angle) || !on)
+                        MelonLogger.Warning($"[FCS] TriggerConsole: {item.Name} did not reach ON physical pose; Z={angle:F1}°");
+                }
+                yield break;
+            }
+
+            yield return new WaitForSeconds(0.05f);
+        }
     }
 
+    public IEnumerator Arm(LeftRight leftRight) {
+        yield return ArmSelected(leftRight, null);
+    }
+
+    /// <summary>
+    /// Ensure the selected arming lever(s) are ON. This never forces the unselected lever OFF; the player retains
+    /// physical control. When two sides are requested, both lever throws are started together and verified together.
+    /// </summary>
+    public IEnumerator ArmSelected(LeftRight primary, LeftRight? additional) {
+        var requestLeft = primary == LeftRight.Left || additional == LeftRight.Left;
+        var requestRight = primary == LeftRight.Right || additional == LeftRight.Right;
+        var controls = new List<(LookAtTarget? Control, Transform? Pose, string Name)>();
+        if (requestLeft) controls.Add((_armLeft, _armLeftPose, "Left"));
+        if (requestRight) controls.Add((_armRight, _armRightPose, "Right"));
+
+        if (controls.Any(item => item.Control == null || item.Pose == null)) {
+            foreach (var item in controls.Where(item => item.Control == null || item.Pose == null))
+                MelonLogger.Error($"[FCS] TriggerConsole: missing {item.Name} arming control/pose");
+            yield break;
+        }
+
+        var poseDeadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            var allReadable = true;
+            foreach (var item in controls) {
+                if (TryReadArmState(item.Pose, out _, out _)) continue;
+                allReadable = false;
+                break;
+            }
+
+            if (allReadable)
+                break;
+
+            if (FcsRuntimeClock.Now >= poseDeadline) {
+                foreach (var item in controls) {
+                    if (!TryReadArmState(item.Pose, out _, out var angle))
+                        MelonLogger.Warning($"[FCS] TriggerConsole: {item.Name} arm pose ambiguous at X={angle:F1}°; not toggling blindly");
+                }
+                yield break;
+            }
+
+            yield return new WaitForSeconds(0.05f);
+        }
+
+        var toToggle = controls
+            .Where(item => TryReadArmState(item.Pose, out var on, out _) && !on)
+            .Select(item => item.Control!)
+            .ToList();
+
+        if (toToggle.Count > 0) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            var held = new List<LookAtTarget>();
+            try {
+                foreach (var control in toToggle) {
+                    FcsSceneInteractor.BeginPhysicalClick(control);
+                    held.Add(control);
+                }
+                yield return new WaitForSeconds(0.2f);
+            }
+            finally {
+                foreach (var control in held.ToArray()) {
+                    try { FcsSceneInteractor.EndPhysicalClick(control); }
+                    catch (Exception ex) { MelonLogger.Warning($"[FCS] TriggerConsole: arm click-up failed: {ex.Message}"); }
+                }
+            }
+        }
+
+        var verifyDeadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            var allOn = true;
+            foreach (var item in controls) {
+                if (TryReadArmState(item.Pose, out var on, out _) && on) continue;
+                allOn = false;
+                break;
+            }
+
+            if (allOn)
+                break;
+
+            if (FcsRuntimeClock.Now >= verifyDeadline) {
+                foreach (var item in controls) {
+                    if (!TryReadArmState(item.Pose, out var on, out var angle) || !on)
+                        MelonLogger.Warning($"[FCS] TriggerConsole: {item.Name} arm did not reach ON physical pose; X={angle:F1}°");
+                }
+                yield break;
+            }
+
+            yield return new WaitForSeconds(0.05f);
+        }
+
+        // Preserve the proven post-arm settle delay from the original single-side flow.
+        yield return FcsRuntimeClock.WaitForSeconds(0.75f);
+        LogPhysicalStates(additional.HasValue ? "after dual arm" : "after arm");
+    }
+
+    // Legacy individual confirmation entry points remain available for probes/older callers.
     public IEnumerator ConfirmTask() {
         yield return EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck");
     }
