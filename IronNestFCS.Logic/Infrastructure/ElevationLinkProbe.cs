@@ -9,8 +9,8 @@ namespace IronNestFCS.Logic.Infrastructure;
 
 /// <summary>
 /// Temporary, read-only probe for the game's twin-gun elevation linkage mechanism.
-/// Phase 2 deliberately narrows observation to the physical linkage controls so we can
-/// identify an authoritative Linked/Soloed state without inferring from gun angles.
+/// Phase 2 narrows observation to the physical linkage controls so we can identify
+/// an authoritative Linked/Soloed state without inferring it from gun angles.
 /// </summary>
 internal sealed class ElevationLinkProbe
 {
@@ -42,38 +42,35 @@ internal sealed class ElevationLinkProbe
             var baseplate = GameObject.Find(".Elevation Lever Baseplate")?.transform;
             var rightLever = baseplate?.FindChild(".Elevation Lever Right");
             var lockingBolt = rightLever?.FindChild(".Elevation Lever Locking Bolt");
-            var linked = lockingBolt?.FindChild("LINKED");
-            var soloed = lockingBolt?.FindChild("SOLOED");
             var turretRoot = GameObject.Find("TurretSystem")?.transform;
-            var linkingButton = turretRoot?.FindChild("Elevation Linking Button");
 
-            AddTarget("TurretSystem/Elevation Linking Button", linkingButton);
+            AddTarget("TurretSystem/Elevation Linking Button", turretRoot?.FindChild("Elevation Linking Button"));
             AddTarget(
                 ".Elevation Lever Baseplate/.Elevation Lever Right/.Elevation Lever Locking Bolt",
                 lockingBolt);
             AddTarget(
                 ".Elevation Lever Baseplate/.Elevation Lever Right/.Elevation Lever Locking Bolt/LINKED",
-                linked);
+                lockingBolt?.FindChild("LINKED"));
             AddTarget(
                 ".Elevation Lever Baseplate/.Elevation Lever Right/.Elevation Lever Locking Bolt/SOLOED",
-                soloed);
+                lockingBolt?.FindChild("SOLOED"));
 
             _bound = _targets.Count == 4;
             _nextSampleAt = 0f;
 
-            var bindSummary = $"targets={_targets.Count}/4";
+            var summary = $"targets={_targets.Count}/4";
             if (!_bound)
             {
-                if (!string.Equals(_lastBindSummary, bindSummary, StringComparison.Ordinal))
+                if (!string.Equals(_lastBindSummary, summary, StringComparison.Ordinal))
                 {
-                    _lastBindSummary = bindSummary;
-                    MelonLogger.Warning($"[FCS ElevationLinkProbe] phase2 bind partial; {bindSummary}");
+                    _lastBindSummary = summary;
+                    MelonLogger.Warning($"[FCS ElevationLinkProbe] phase2 bind partial; {summary}");
                 }
                 return;
             }
 
-            _lastBindSummary = bindSummary;
-            MelonLogger.Msg($"[FCS ElevationLinkProbe] phase2 bind success; {bindSummary}");
+            _lastBindSummary = summary;
+            MelonLogger.Msg($"[FCS ElevationLinkProbe] phase2 bind success; {summary}");
 
             foreach (var target in _targets)
             {
@@ -83,7 +80,7 @@ internal sealed class ElevationLinkProbe
 
             MelonLogger.Msg(
                 $"[FCS ElevationLinkProbe] phase2 watching primitive state fields={_observedFields.Count}; " +
-                "arbitrary property getters are not invoked");
+                "property getters are metadata-only and are never invoked");
         }
         catch (Exception ex)
         {
@@ -146,35 +143,32 @@ internal sealed class ElevationLinkProbe
         MelonLogger.Msg(
             $"[FCS ElevationLinkProbe] target path={target.Path} activeSelf={target.Transform.gameObject.activeSelf}");
 
-        Component[] components;
         try
         {
-            components = target.Transform.gameObject.GetComponents<Component>();
+            var components = target.Transform.gameObject.GetComponents<Component>();
+            for (var componentIndex = 0; componentIndex < components.Length; componentIndex++)
+            {
+                var component = components[componentIndex];
+                if (component == null)
+                    continue;
+
+                try
+                {
+                    DumpComponentMetadata(target, componentIndex, component);
+                }
+                catch (Exception ex)
+                {
+                    MelonLogger.Warning(
+                        $"[FCS ElevationLinkProbe] component probe failed path={target.Path} index={componentIndex}: " +
+                        $"{ex.GetType().Name}: {ex.Message}");
+                }
+            }
         }
         catch (Exception ex)
         {
             MelonLogger.Warning(
                 $"[FCS ElevationLinkProbe] components read failed path={target.Path}: " +
                 $"{ex.GetType().Name}: {ex.Message}");
-            return;
-        }
-
-        for (var componentIndex = 0; componentIndex < components.Length; componentIndex++)
-        {
-            var component = components[componentIndex];
-            if (component == null)
-                continue;
-
-            try
-            {
-                DumpComponentMetadata(target, componentIndex, component);
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Warning(
-                    $"[FCS ElevationLinkProbe] component probe failed path={target.Path} index={componentIndex}: " +
-                    $"{ex.GetType().Name}: {ex.Message}");
-            }
         }
     }
 
@@ -194,8 +188,7 @@ internal sealed class ElevationLinkProbe
             $"il2cpp={runtimeClassName} managed={component.GetType().FullName ?? component.GetType().Name}");
 
         var currentClass = runtimeClass;
-        var depth = 0;
-        while (currentClass != IntPtr.Zero && depth < 6)
+        for (var depth = 0; currentClass != IntPtr.Zero && depth < 6; depth++)
         {
             var classNamespace = IL2CPP.il2cpp_class_get_namespace_(currentClass) ?? "";
             var className = FullClassName(currentClass);
@@ -205,9 +198,7 @@ internal sealed class ElevationLinkProbe
             DumpClassFields(target, componentIndex, component, currentClass, className);
             DumpClassProperties(target, componentIndex, currentClass, className);
             DumpInterestingMethods(target, componentIndex, currentClass, className);
-
             currentClass = IL2CPP.il2cpp_class_get_parent(currentClass);
-            depth++;
         }
     }
 
@@ -234,24 +225,17 @@ internal sealed class ElevationLinkProbe
             var isStatic = (flags & FieldAttributeStatic) != 0;
             var isEnum = IsEnum(fieldType);
             var readable = !isStatic && IsReadablePrimitive(typeName, isEnum);
-            var watchChanges = readable && ShouldWatchChanges(fieldName, typeName, isEnum);
-
-            string value;
-            if (!readable)
-            {
-                value = isStatic ? "<static-not-read>" : "<metadata-only>";
-            }
-            else
-            {
-                value = ReadFieldValue(component, field, fieldType, typeName, isEnum);
-            }
+            var watch = readable && ShouldWatchChanges(fieldName, typeName, isEnum);
+            var value = readable
+                ? ReadFieldValue(component, field, fieldType, typeName, isEnum)
+                : isStatic ? "<static-not-read>" : "<metadata-only>";
 
             var key = BuildFieldKey(target.Path, componentIndex, className, fieldName);
             MelonLogger.Msg(
                 $"[FCS ElevationLinkProbe] field path={target.Path} component={componentIndex}:{className} " +
-                $"name={fieldName} type={typeName} enum={isEnum} watch={watchChanges} value={value}");
+                $"name={fieldName} type={typeName} enum={isEnum} watch={watch} value={value}");
 
-            if (!watchChanges)
+            if (!watch)
                 continue;
 
             _lastFieldValues[key] = value;
@@ -282,15 +266,14 @@ internal sealed class ElevationLinkProbe
         while (count++ < MaxMetadataMembersPerClass
                && (property = IL2CPP.il2cpp_class_get_properties(klass, ref iter)) != IntPtr.Zero)
         {
-            var propertyName = IL2CPP.il2cpp_property_get_name_(property) ?? "?";
-            if (!NameLooksStateRelevant(propertyName))
+            var name = IL2CPP.il2cpp_property_get_name_(property) ?? "?";
+            if (!NameLooksStateRelevant(name))
                 continue;
 
-            var getter = IL2CPP.il2cpp_property_get_get_method(property);
-            var setter = IL2CPP.il2cpp_property_get_set_method(property);
             MelonLogger.Msg(
                 $"[FCS ElevationLinkProbe] property path={target.Path} component={componentIndex}:{className} " +
-                $"name={propertyName} getter={(getter != IntPtr.Zero)} setter={(setter != IntPtr.Zero)} metadataOnly=true");
+                $"name={name} getter={(IL2CPP.il2cpp_property_get_get_method(property) != IntPtr.Zero)} " +
+                $"setter={(IL2CPP.il2cpp_property_get_set_method(property) != IntPtr.Zero)} metadataOnly=true");
         }
     }
 
@@ -307,13 +290,13 @@ internal sealed class ElevationLinkProbe
         while (count++ < MaxMetadataMembersPerClass
                && (method = IL2CPP.il2cpp_class_get_methods(klass, ref iter)) != IntPtr.Zero)
         {
-            var methodName = IL2CPP.il2cpp_method_get_name_(method) ?? "?";
-            if (!NameLooksActionRelevant(methodName))
+            var name = IL2CPP.il2cpp_method_get_name_(method) ?? "?";
+            if (!NameLooksActionRelevant(name))
                 continue;
 
             MelonLogger.Msg(
                 $"[FCS ElevationLinkProbe] method path={target.Path} component={componentIndex}:{className} " +
-                $"name={methodName} argc={IL2CPP.il2cpp_method_get_param_count(method)} metadataOnly=true");
+                $"name={name} argc={IL2CPP.il2cpp_method_get_param_count(method)} metadataOnly=true");
         }
     }
 
@@ -324,20 +307,12 @@ internal sealed class ElevationLinkProbe
             if (observed.Component == null)
                 continue;
 
-            string current;
-            try
-            {
-                current = ReadFieldValue(
-                    observed.Component,
-                    observed.Field,
-                    observed.FieldType,
-                    observed.TypeName,
-                    observed.IsEnum);
-            }
-            catch (Exception ex)
-            {
-                current = $"<read-failed:{ex.GetType().Name}>";
-            }
+            var current = ReadFieldValue(
+                observed.Component,
+                observed.Field,
+                observed.FieldType,
+                observed.TypeName,
+                observed.IsEnum);
 
             if (!_lastFieldValues.TryGetValue(observed.Key, out var previous))
             {
@@ -413,7 +388,9 @@ internal sealed class ElevationLinkProbe
             if (isEnum)
             {
                 var enumClass = IL2CPP.il2cpp_class_from_il2cpp_type(fieldType);
-                var baseType = enumClass == IntPtr.Zero ? IntPtr.Zero : IL2CPP.il2cpp_class_enum_basetype(enumClass);
+                var baseType = enumClass == IntPtr.Zero
+                    ? IntPtr.Zero
+                    : IL2CPP.il2cpp_class_enum_basetype(enumClass);
                 scalarType = baseType == IntPtr.Zero
                     ? "System.Int32"
                     : IL2CPP.il2cpp_type_get_name_(baseType) ?? "System.Int32";
@@ -489,22 +466,17 @@ internal sealed class ElevationLinkProbe
     {
         if (isEnum || string.Equals(typeName, "System.Boolean", StringComparison.Ordinal))
             return true;
-
         return NameLooksStateRelevant(fieldName);
     }
 
-    private static bool NameLooksStateRelevant(string value)
-    {
-        return ContainsAny(value,
-            "link", "solo", "lock", "state", "mode", "active", "enable", "value",
-            "target", "current", "toggle", "press", "interact", "coupl", "sync", "associate");
-    }
+    private static bool NameLooksStateRelevant(string value) => ContainsAny(
+        value,
+        "link", "solo", "lock", "state", "mode", "active", "enable", "value",
+        "target", "current", "toggle", "press", "interact", "coupl", "sync", "associate");
 
-    private static bool NameLooksActionRelevant(string value)
-    {
-        return ContainsAny(value,
-            "link", "solo", "lock", "toggle", "press", "click", "interact", "coupl", "sync", "associate");
-    }
+    private static bool NameLooksActionRelevant(string value) => ContainsAny(
+        value,
+        "link", "solo", "lock", "toggle", "press", "click", "interact", "coupl", "sync", "associate");
 
     private static bool IsFrameworkClass(string classNamespace, string fullClassName)
     {
@@ -519,9 +491,9 @@ internal sealed class ElevationLinkProbe
 
     private static string FullClassName(IntPtr klass)
     {
-        var className = IL2CPP.il2cpp_class_get_name_(klass) ?? "?";
-        var classNamespace = IL2CPP.il2cpp_class_get_namespace_(klass) ?? "";
-        return string.IsNullOrEmpty(classNamespace) ? className : classNamespace + "." + className;
+        var name = IL2CPP.il2cpp_class_get_name_(klass) ?? "?";
+        var ns = IL2CPP.il2cpp_class_get_namespace_(klass) ?? "";
+        return string.IsNullOrEmpty(ns) ? name : ns + "." + name;
     }
 
     private static string BuildFieldKey(string path, int componentIndex, string className, string fieldName) =>
