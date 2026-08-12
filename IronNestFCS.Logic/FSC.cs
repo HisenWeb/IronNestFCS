@@ -122,6 +122,7 @@ public class FSC
         {
             SceneInteractor.Initialize();
             TrackCoroutine(SharedResources.ResetFireControlsAfterBind());
+            TrackCoroutine(TriggerConsole.ReviewStateLoop());
             TrackCoroutine(SharedResources.ReplenishPowderLoop());
         }
 
@@ -187,9 +188,11 @@ public class FSC
         _harmony = null;
     }
 
-    internal void TrackCoroutine(IEnumerator routine)
+    internal object TrackCoroutine(IEnumerator routine)
     {
-        _runningCoroutines.Add(MelonCoroutines.Start(routine));
+        var handle = MelonCoroutines.Start(routine);
+        _runningCoroutines.Add(handle);
+        return handle;
     }
 
     public void EnqueueTask(ArtilleryTask task) => Dispatcher.EnqueueTask(task);

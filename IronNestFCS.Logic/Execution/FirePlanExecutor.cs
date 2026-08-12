@@ -7,13 +7,14 @@ using IronNestFCS.Abstractions;
 using IronNestFCS.Logic.FCS;
 using IronNestFCS.Logic.Scheduling;
 using MelonLoader;
+using UnityEngine;
 
 namespace IronNestFCS.Logic.Execution;
 
 /// <summary>
-/// Capacity-two FirePlan executor. Per-gun preparation runs independently; shared azimuth/fire execution
-/// follows the committed one-shot order. A freed gun slot may be refilled immediately, but a compared plan
-/// is never compared again.
+/// Capacity-two FirePlan executor. Per-gun preparation runs independently; current/next determine the automation
+/// order and arming suggestion, while actual physical gun state determines which FirePlan was really executed.
+/// A FirePlan ends at observed fire; post-shot mechanical recovery remains owned by the physical loading runtime.
 /// </summary>
 internal sealed class FirePlanExecutor
 {
@@ -21,16 +22,25 @@ internal sealed class FirePlanExecutor
     private const float LoadingObservationTimeoutSeconds = 90f;
     private const float AutoFireTimeoutSeconds = 25f;
     private const float ManualFireTimeoutSeconds = 300f;
+    private const float SameAzimuthToleranceDegrees = 0.01f;
+    private const int FireSettlementBufferFrames = 3;
+    private const float ReviewLeadTimeBeforeArmSeconds = 1.2f;
 
     private readonly FSC _fcs;
+    private readonly Dictionary<FirePlan, object> _prepareCoroutines = new();
 
     private FirePlan? _leftPlan;
     private FirePlan? _rightPlan;
     private FirePlan? _current;
     private FirePlan? _next;
 
-    private FirePlan? _armedWaitingPlan;
-    private int _armedWaitingGeneration = -1;
+    // This identifies one shared physical-fire wait, not the gun that must fire. Left/right result mapping is
+    // performed from physical observations after the shared trigger event.
+    private FirePlan? _fireWaitOwner;
+    private int _fireWaitGeneration = -1;
+    private int _fireWaitSerial;
+    private int _activeFireWaitSerial;
+    private bool _autoFireIssuedForWait;
 
     public FirePlanExecutor(FSC fcs)
     {
@@ -39,6 +49,9 @@ internal sealed class FirePlanExecutor
 
     public ArtilleryTask? LeftTask => _leftPlan?.Task;
     public ArtilleryTask? RightTask => _rightPlan?.Task;
+
+    // "Free" means a FirePlan slot is free. FirePlanner remains authoritative for whether the underlying gun's
+    // current loading/recovery snapshot is physically plannable.
     public bool HasFreeGun => _leftPlan == null || _rightPlan == null;
 
     public FirePlan? GetPlan(LeftRight side) => side == LeftRight.Left ? _leftPlan : _rightPlan;
@@ -49,8 +62,9 @@ internal sealed class FirePlanExecutor
         _rightPlan = null;
         _current = null;
         _next = null;
-        _armedWaitingPlan = null;
-        _armedWaitingGeneration = -1;
+        _prepareCoroutines.Clear();
+        _fcs.TriggerConsole.ResetGunReadyInputs();
+        ClearAllFireWait();
     }
 
     public bool AddPlan(FirePlan plan, out string reason)
@@ -77,7 +91,7 @@ internal sealed class FirePlanExecutor
             _next = plan;
 
         MelonLogger.Msg($"[FCS Plan] executor accepted {plan.Label}");
-        _fcs.TrackCoroutine(PrepareLocal(plan));
+        _prepareCoroutines[plan] = _fcs.TrackCoroutine(PrepareLocal(plan));
         EvaluateScheduling();
         return true;
     }
@@ -86,29 +100,27 @@ internal sealed class FirePlanExecutor
 
     public void OnAutoFireEnabled()
     {
-        var plan = _armedWaitingPlan;
-        if (plan == null)
+        var plan = _fireWaitOwner;
+        if (plan == null || _autoFireIssuedForWait)
             return;
 
-        if (_armedWaitingGeneration != _fcs.FirePriority.Generation
+        if (_fireWaitGeneration != _fcs.FirePriority.Generation
             || !ReferenceEquals(_current, plan)
-            || plan.Failed
+            || !IsActive(plan)
             || plan.Task.progress != Progress.WaitingForFire)
         {
-            _armedWaitingPlan = null;
-            _armedWaitingGeneration = -1;
+            ClearAllFireWait();
             return;
         }
 
-        _armedWaitingPlan = null;
-        _armedWaitingGeneration = -1;
-        MelonLogger.Msg($"[FCS] AutoFire enabled while T{plan.Task.targetId} is armed; firing committed plan");
+        _autoFireIssuedForWait = true;
+        MelonLogger.Msg($"[FCS] AutoFire enabled while T{plan.Task.targetId} is awaiting the shared trigger; firing physical trigger");
         _fcs.TriggerConsole.Fire();
     }
 
     /// <summary>
-    /// Two unpaired plans compare once. A compared Second is promoted without re-comparison. One unpaired
-    /// plan waits only while the task queue can still provide a partner; otherwise it single-commits.
+    /// Two unpaired plans compare once. A compared plan is promoted without re-comparison. One unpaired plan
+    /// waits only while an active planning round can still provide a partner; otherwise it single-commits.
     /// </summary>
     public void EvaluateScheduling()
     {
@@ -173,6 +185,7 @@ internal sealed class FirePlanExecutor
             _fcs.FirePriority.PromoteCommitted(plan);
 
         // Azimuth has no loading dependency. Start immediately after order commit.
+        // Review-button dispatch is intentionally independent and is requested later by RunShared.
         _fcs.TrackCoroutine(RunShared(plan));
     }
 
@@ -282,6 +295,12 @@ internal sealed class FirePlanExecutor
         // Left/right elevation are independent. Start immediately at physical LoadedReady.
         plan.Task.progress = Progress.Aiming;
         yield return gun.SetElevation(plan.Elevation, ElevationTimeoutSeconds);
+
+        // A different gun may have been physically fired while this plan was still preparing. If the physical
+        // settlement consumed this plan, do not turn cancellation into a false elevation failure.
+        if (!IsActive(plan))
+            yield break;
+
         if (!gun.LastElevationSucceeded)
         {
             FailPlan(plan, $"elevation did not reach {plan.Elevation:F1}°");
@@ -291,6 +310,10 @@ internal sealed class FirePlanExecutor
         plan.LocalReady = true;
         plan.Task.progress = Progress.WaitingForFire;
         MelonLogger.Msg($"[FCS Plan] {plan.Label}: local ready (LoadedReady + elevation)");
+
+        // Do not wait for a volley partner. A non-current gun that becomes ready gets one immediate chance to
+        // arm itself if the current plan is already physically waiting on the exact same shared azimuth.
+        _fcs.TrackCoroutine(TryArmReadyPeerDuringCurrentWait(plan));
     }
 
     private IEnumerator RunShared(FirePlan plan)
@@ -326,7 +349,11 @@ internal sealed class FirePlanExecutor
             yield return null;
         }
 
+        var fireWaitToken = 0;
         var autoFireIssued = false;
+        PhysicalFireWatch? leftWatch = null;
+        PhysicalFireWatch? rightWatch = null;
+
         try
         {
             yield return _fcs.SharedResources.Trigger.Acquire();
@@ -335,17 +362,63 @@ internal sealed class FirePlanExecutor
                 if (!ReferenceEquals(_current, plan) || !IsActive(plan) || plan.Failed)
                     yield break;
 
+                // The firing lever is shared and the player may already have manipulated either safety. Capture
+                // both baselines before touching any review/arming controls so a player-triggered shot during the
+                // console protocol is still reconciled from physical reality.
+                leftWatch = BeginFireWatch(_fcs.LeftGun, "Left");
+                rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
+
                 yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);
-                yield return _fcs.TriggerConsole.ConfirmTask();
-                yield return _fcs.TriggerConsole.ConfirmBullet();
-                yield return _fcs.TriggerConsole.ConfirmRotation();
-                yield return _fcs.TriggerConsole.ConfirmElevation();
-                yield return _fcs.TriggerConsole.ReadyToFire();
-                yield return _fcs.TriggerConsole.Arm(plan.Side);
+
+                // Once this gun is physically ready for the shared fire stage, publish only that fact to the
+                // independent review-button controller. The controller owns physical switch convergence; the
+                // executor preserves the 1.2 s visual lead before arming without waiting for button completion.
+                _fcs.TriggerConsole.SetGunReady(plan.Side, true);
+                yield return FcsRuntimeClock.WaitForSeconds(ReviewLeadTimeBeforeArmSeconds);
+
+                PollFireWatch(leftWatch);
+                PollFireWatch(rightWatch);
+                if (leftWatch.Observed || rightWatch.Observed)
+                {
+                    yield return CompleteSettlementWindow(leftWatch, rightWatch);
+                    if (SettleObservedShots(leftWatch.Observed, rightWatch.Observed) > 0)
+                        yield break;
+
+                    leftWatch = BeginFireWatch(_fcs.LeftGun, "Left");
+                    rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
+                }
+
+                // Each gun owns only its own safety. The current gun never arms its peer; a ready peer
+                // gets its own non-blocking same-azimuth arm attempt through TryArmReadyPeerDuringCurrentWait.
+                yield return _fcs.TriggerConsole.ArmSelected(plan.Side, null);
+
+                // If the player fired during the physical arming operation, settle that reality before issuing an
+                // automatic trigger pull. This preserves player authority and prevents an accidental second shot.
+                PollFireWatch(leftWatch);
+                PollFireWatch(rightWatch);
+                if (leftWatch.Observed || rightWatch.Observed)
+                {
+                    yield return CompleteSettlementWindow(leftWatch, rightWatch);
+                    if (SettleObservedShots(leftWatch.Observed, rightWatch.Observed) > 0)
+                        yield break;
+
+                    leftWatch = BeginFireWatch(_fcs.LeftGun, "Left");
+                    rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
+                }
+
+                fireWaitToken = BeginFireWait(plan);
+
+                // If the peer was already LocalReady before this plan entered the shared fire wait, give that
+                // peer one fresh chance to arm ITSELF. This is not a wait and never lets the current plan operate
+                // the peer safety directly.
+                var readyPeer = plan.Side == LeftRight.Left ? _rightPlan : _leftPlan;
+                if (readyPeer != null && !ReferenceEquals(readyPeer, plan) && readyPeer.LocalReady)
+                    _fcs.TrackCoroutine(TryArmReadyPeerDuringCurrentWait(readyPeer));
 
                 if (_fcs.SceneInteractor.AutoFire)
                 {
                     yield return FcsRuntimeClock.WaitUntilFocused();
+                    _autoFireIssuedForWait = true;
                     _fcs.TriggerConsole.Fire();
                     autoFireIssued = true;
                 }
@@ -355,76 +428,271 @@ internal sealed class FirePlanExecutor
                 _fcs.SharedResources.Trigger.Release();
             }
 
-            if (!autoFireIssued)
-            {
-                _armedWaitingPlan = plan;
-                _armedWaitingGeneration = plan.Generation;
-            }
+            if (leftWatch == null || rightWatch == null)
+                yield break;
 
-            var gun = plan.Side == LeftRight.Left ? _fcs.LeftGun : _fcs.RightGun;
             var fireTimeout = autoFireIssued || _fcs.SceneInteractor.AutoFire
                 ? AutoFireTimeoutSeconds
                 : ManualFireTimeoutSeconds;
+            var deadline = FcsRuntimeClock.Now + fireTimeout;
+            var resumeGeneration = FcsRuntimeClock.ResumeGeneration;
 
-            yield return gun.WaitFire(fireTimeout);
-
-            if (ReferenceEquals(_armedWaitingPlan, plan))
+            while (true)
             {
-                _armedWaitingPlan = null;
-                _armedWaitingGeneration = -1;
+                yield return FcsRuntimeClock.WaitUntilFocused();
+                if (!ReferenceEquals(_current, plan) || !IsActive(plan) || plan.Failed)
+                    yield break;
+
+                if (resumeGeneration != FcsRuntimeClock.ResumeGeneration)
+                {
+                    resumeGeneration = FcsRuntimeClock.ResumeGeneration;
+                    MelonLogger.Msg(
+                        $"[FCS Fire] reconciled after focus restore; Left={GunPhysicalState.Read("Left").Summary()}, " +
+                        $"Right={GunPhysicalState.Read("Right").Summary()}");
+                }
+
+                PollFireWatch(leftWatch);
+                PollFireWatch(rightWatch);
+
+                if (leftWatch.Observed || rightWatch.Observed)
+                {
+                    yield return CompleteSettlementWindow(leftWatch, rightWatch);
+                    var consumed = SettleObservedShots(leftWatch.Observed, rightWatch.Observed);
+                    if (consumed > 0)
+                        yield break;
+
+                    // A gun with no active FirePlan may still have been fired manually. That physical event is real
+                    // but must not fail/consume the current plan. Re-baseline both sides and keep waiting.
+                    MelonLogger.Msg("[FCS Fire] observed physical fire without a matching active FirePlan; continuing current wait");
+                    leftWatch = BeginFireWatch(_fcs.LeftGun, "Left");
+                    rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
+                }
+
+                if (FcsRuntimeClock.Now >= deadline)
+                {
+                    FailPlan(plan, _autoFireIssuedForWait || _fcs.SceneInteractor.AutoFire
+                        ? "automatic fire was not observed"
+                        : "manual fire wait timed out");
+                    yield break;
+                }
+
+                yield return FcsRuntimeClock.WaitForSeconds(0.1f);
             }
-
-            if (!gun.LastFireObserved)
-            {
-                FailPlan(plan, autoFireIssued || _fcs.SceneInteractor.AutoFire
-                    ? "automatic fire was not observed"
-                    : "manual fire wait timed out");
-                yield break;
-            }
-
-            plan.ShotObserved = true;
-            _fcs.FirePriority.MarkShot(plan);
-
-            // Advance shared order immediately after the shot; fired gun remains occupied until EmptyReady.
-            ReleaseSharedAfterShot(plan);
-
-            plan.Task.progress = Progress.BackToIdle;
-            yield return gun.WaitBackToIdle();
-            yield return FcsRuntimeClock.WaitUntilFocused();
-
-            if (plan.Failed)
-                yield break;
-
-            plan.Task.progress = Progress.Finished;
-            _fcs.Dispatcher.RecordTaskResult(plan.Task);
-            ReleaseGunSlot(plan);
         }
         finally
         {
-            if (ReferenceEquals(_armedWaitingPlan, plan))
-            {
-                _armedWaitingPlan = null;
-                _armedWaitingGeneration = -1;
-            }
+            ClearFireWait(plan, fireWaitToken);
         }
     }
 
-    private void ReleaseSharedAfterShot(FirePlan plan)
+    private IEnumerator TryArmReadyPeerDuringCurrentWait(FirePlan readyPlan)
     {
-        if (!ReferenceEquals(_current, plan))
+        yield return FcsRuntimeClock.WaitUntilFocused();
+
+        if (!IsActive(readyPlan) || !readyPlan.LocalReady)
+            yield break;
+
+        var current = _current;
+        if (current == null
+            || ReferenceEquals(current, readyPlan)
+            || !IsActive(current)
+            || !current.LocalReady
+            || !current.AzimuthReady)
+        {
+            yield break;
+        }
+
+        var delta = Mathf.Abs(Mathf.DeltaAngle(current.Azimuth, readyPlan.Azimuth));
+        if (delta > SameAzimuthToleranceDegrees)
+            yield break;
+
+        // Do not wait for readiness and do not create a watcher. Serialize only the physical console operation.
+        // By the time this lane is free, the current plan must still be in a manual shared-fire wait; AutoFire
+        // already issued means the opportunity has passed and the physical shot must remain authoritative.
+        yield return _fcs.SharedResources.Trigger.Acquire();
+        try
+        {
+            current = _current;
+            if (current == null
+                || ReferenceEquals(current, readyPlan)
+                || !IsActive(current)
+                || !IsActive(readyPlan)
+                || !current.LocalReady
+                || !current.AzimuthReady
+                || !readyPlan.LocalReady
+                || !ReferenceEquals(_fireWaitOwner, current)
+                || _fireWaitGeneration != current.Generation
+                || _autoFireIssuedForWait)
+            {
+                yield break;
+            }
+
+            delta = Mathf.Abs(Mathf.DeltaAngle(current.Azimuth, readyPlan.Azimuth));
+            if (delta > SameAzimuthToleranceDegrees)
+                yield break;
+
+            MelonLogger.Msg(
+                $"[FCS Plan] ready peer arms without waiting: {readyPlan.Label}; current={current.Label}; " +
+                $"azimuth delta={delta:F3}°");
+            yield return _fcs.TriggerConsole.ArmSelected(readyPlan.Side, null);
+        }
+        finally
+        {
+            _fcs.SharedResources.Trigger.Release();
+        }
+    }
+
+    private PhysicalFireWatch BeginFireWatch(GunSystem gun, string sideName)
+    {
+        var physical = GunPhysicalState.Read(sideName);
+        var watch = new PhysicalFireWatch(
+            gun,
+            sideName,
+            gun.BulletInChamber(),
+            physical.PendingReload);
+
+        MelonLogger.Msg(
+            $"[FCS Fire] {sideName} baseline: chamber={watch.ChamberAtStart ?? "empty"}, " +
+            $"pendingReload={watch.PendingReloadAtStart}, physical={physical.Summary()}");
+        return watch;
+    }
+
+    private static void PollFireWatch(PhysicalFireWatch watch)
+    {
+        if (watch.Observed)
             return;
 
-        _current = null;
+        var physical = GunPhysicalState.Read(watch.SideName);
+        var chamberNow = watch.Gun.BulletInChamber();
 
-        if (_next != null && _next.Compared && IsActive(_next))
+        // Observe a transition from the baseline, not merely a state that was already true when the shared wait
+        // began. This matters because the other gun may legitimately still be recovering from an older shot.
+        var pendingReloadTransition = !watch.PendingReloadAtStart && physical.PendingReload;
+        var chamberTransition = watch.ChamberAtStart != null && chamberNow == null;
+        if (pendingReloadTransition || chamberTransition)
         {
-            var promoted = _next;
-            _next = null;
-            SetCurrent(promoted, promote: true);
+            watch.Observed = true;
+            MelonLogger.Msg(
+                $"[FCS Fire] {watch.SideName} shot observed; baseline={watch.ChamberAtStart ?? "empty"}, " +
+                $"now={chamberNow ?? "empty"}, pendingReload={physical.PendingReload}, physical={physical.Summary()}");
+        }
+    }
+
+    private IEnumerator CompleteSettlementWindow(PhysicalFireWatch leftWatch, PhysicalFireWatch rightWatch)
+    {
+        for (var i = 0; i < FireSettlementBufferFrames; i++)
+            yield return null;
+
+        yield return FcsRuntimeClock.WaitUntilFocused();
+        PollFireWatch(leftWatch);
+        PollFireWatch(rightWatch);
+    }
+
+    /// <summary>
+    /// Consume every active FirePlan whose gun actually fired in this physical event. current/next are discarded as
+    /// execution pointers and rebuilt from the remaining plans afterward; they never dictate the physical result.
+    /// </summary>
+    private int SettleObservedShots(bool leftFired, bool rightFired)
+    {
+        var left = leftFired && _leftPlan != null && IsActive(_leftPlan) ? _leftPlan : null;
+        var right = rightFired && _rightPlan != null && IsActive(_rightPlan) ? _rightPlan : null;
+        if (left == null && right == null)
+            return 0;
+
+        var consumed = 0;
+        _current = null;
+        _next = null;
+        ClearAllFireWait();
+
+        if (left != null)
+        {
+            CompletePlanFromObservedShot(left);
+            consumed++;
+        }
+
+        if (right != null && !ReferenceEquals(right, left))
+        {
+            CompletePlanFromObservedShot(right);
+            consumed++;
+        }
+
+        MelonLogger.Msg(
+            $"[FCS Fire] physical settlement complete: Left={(left != null ? $"T{left.Task.targetId}" : "-")}, " +
+            $"Right={(right != null ? $"T{right.Task.targetId}" : "-")}; rebuilding scheduling from reality");
+
+        // Batch first, then trigger planning/scheduling once. FirePlanner will re-read physical/loading state; a
+        // just-fired gun therefore remains Pending/recovery-gated even though its FirePlan slot is already free.
+        _fcs.Dispatcher.TryDispatch();
+        EvaluateScheduling();
+        return consumed;
+    }
+
+    private void CompletePlanFromObservedShot(FirePlan plan)
+    {
+        if (plan.CompletionHandled)
+            return;
+
+        // A player may physically fire a non-current plan while its preparation coroutine is still running.
+        // Stop that old intent so it cannot continue driving elevation after the physical round is already gone.
+        if (!plan.LocalReady)
+            CancelPreparation(plan);
+
+        plan.ShotObserved = true;
+        _fcs.FirePriority.MarkShot(plan);
+        plan.Task.progress = Progress.Finished;
+        plan.Task.failureReason = "";
+        _fcs.Dispatcher.RecordTaskResult(plan.Task);
+        ReleaseGunSlot(plan, notify: false);
+    }
+
+    private void CancelPreparation(FirePlan plan)
+    {
+        if (!_prepareCoroutines.TryGetValue(plan, out var handle))
+            return;
+
+        try
+        {
+            MelonCoroutines.Stop(handle);
+            MelonLogger.Msg($"[FCS Plan] stopped obsolete preparation after physical fire: {plan.Label}");
+        }
+        catch (Exception ex)
+        {
+            MelonLogger.Warning($"[FCS Plan] failed to stop obsolete preparation for {plan.Label}: {ex.Message}");
+        }
+        finally
+        {
+            _prepareCoroutines.Remove(plan);
+        }
+    }
+
+    private int BeginFireWait(FirePlan plan)
+    {
+        var token = ++_fireWaitSerial;
+        _activeFireWaitSerial = token;
+        _fireWaitOwner = plan;
+        _fireWaitGeneration = plan.Generation;
+        _autoFireIssuedForWait = false;
+        return token;
+    }
+
+    private void ClearFireWait(FirePlan plan, int token)
+    {
+        if (token == 0
+            || token != _activeFireWaitSerial
+            || !ReferenceEquals(_fireWaitOwner, plan))
+        {
             return;
         }
 
-        EvaluateScheduling();
+        ClearAllFireWait();
+    }
+
+    private void ClearAllFireWait()
+    {
+        _fireWaitOwner = null;
+        _fireWaitGeneration = -1;
+        _activeFireWaitSerial = 0;
+        _autoFireIssuedForWait = false;
     }
 
     private void FailPlan(FirePlan plan, string reason)
@@ -438,37 +706,40 @@ internal sealed class FirePlanExecutor
         plan.Task.failureReason = reason;
         MelonLogger.Error($"[FCS Plan] {plan.Label} failed: {reason}");
 
-        if (ReferenceEquals(_armedWaitingPlan, plan))
-        {
-            _armedWaitingPlan = null;
-            _armedWaitingGeneration = -1;
-        }
-
+        if (ReferenceEquals(_fireWaitOwner, plan))
+            ClearAllFireWait();
         if (ReferenceEquals(_current, plan))
             _current = null;
         if (ReferenceEquals(_next, plan))
             _next = null;
 
         _fcs.Dispatcher.RecordTaskResult(plan.Task);
-        ReleaseGunSlot(plan);
-        EvaluateScheduling();
+        ReleaseGunSlot(plan, notify: true);
     }
 
-    private void ReleaseGunSlot(FirePlan plan)
+    private void ReleaseGunSlot(FirePlan plan, bool notify)
     {
         if (plan.CompletionHandled)
             return;
 
         plan.CompletionHandled = true;
+        _prepareCoroutines.Remove(plan);
+
         var gun = plan.Side == LeftRight.Left ? _fcs.LeftGun : _fcs.RightGun;
         gun.ReleaseElevationOverride();
+        _fcs.TriggerConsole.SetGunReady(plan.Side, false);
 
         if (plan.Side == LeftRight.Left && ReferenceEquals(_leftPlan, plan))
             _leftPlan = null;
         if (plan.Side == LeftRight.Right && ReferenceEquals(_rightPlan, plan))
             _rightPlan = null;
+        if (ReferenceEquals(_current, plan))
+            _current = null;
         if (ReferenceEquals(_next, plan))
             _next = null;
+
+        if (!notify)
+            return;
 
         _fcs.Dispatcher.TryDispatch();
         EvaluateScheduling();
@@ -479,5 +750,26 @@ internal sealed class FirePlanExecutor
         return plan.Generation == _fcs.FirePriority.Generation
                && ReferenceEquals(GetPlan(plan.Side), plan)
                && !plan.CompletionHandled;
+    }
+
+    private sealed class PhysicalFireWatch
+    {
+        public GunSystem Gun { get; }
+        public string SideName { get; }
+        public string? ChamberAtStart { get; }
+        public bool PendingReloadAtStart { get; }
+        public bool Observed { get; set; }
+
+        public PhysicalFireWatch(
+            GunSystem gun,
+            string sideName,
+            string? chamberAtStart,
+            bool pendingReloadAtStart)
+        {
+            Gun = gun;
+            SideName = sideName;
+            ChamberAtStart = chamberAtStart;
+            PendingReloadAtStart = pendingReloadAtStart;
+        }
     }
 }
