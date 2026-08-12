@@ -475,10 +475,16 @@ internal sealed class FirePlanExecutor
 
     private PhysicalFireWatch BeginFireWatch(GunSystem gun, string sideName)
     {
-        var watch = new PhysicalFireWatch(gun, sideName, gun.BulletInChamber());
+        var physical = GunPhysicalState.Read(sideName);
+        var watch = new PhysicalFireWatch(
+            gun,
+            sideName,
+            gun.BulletInChamber(),
+            physical.PendingReload);
+
         MelonLogger.Msg(
             $"[FCS Fire] {sideName} baseline: chamber={watch.ChamberAtStart ?? "empty"}, " +
-            $"physical={GunPhysicalState.Read(sideName).Summary()}");
+            $"pendingReload={watch.PendingReloadAtStart}, physical={physical.Summary()}");
         return watch;
     }
 
@@ -489,13 +495,17 @@ internal sealed class FirePlanExecutor
 
         var physical = GunPhysicalState.Read(watch.SideName);
         var chamberNow = watch.Gun.BulletInChamber();
-        if (physical.PendingReload
-            || (watch.ChamberAtStart != null && chamberNow == null))
+
+        // Observe a transition from the baseline, not merely a state that was already true when the shared wait
+        // began. This matters because the other gun may legitimately still be recovering from an older shot.
+        var pendingReloadTransition = !watch.PendingReloadAtStart && physical.PendingReload;
+        var chamberTransition = watch.ChamberAtStart != null && chamberNow == null;
+        if (pendingReloadTransition || chamberTransition)
         {
             watch.Observed = true;
             MelonLogger.Msg(
                 $"[FCS Fire] {watch.SideName} shot observed; baseline={watch.ChamberAtStart ?? "empty"}, " +
-                $"now={chamberNow ?? "empty"}, physical={physical.Summary()}");
+                $"now={chamberNow ?? "empty"}, pendingReload={physical.PendingReload}, physical={physical.Summary()}");
         }
     }
 
@@ -677,13 +687,19 @@ internal sealed class FirePlanExecutor
         public GunSystem Gun { get; }
         public string SideName { get; }
         public string? ChamberAtStart { get; }
+        public bool PendingReloadAtStart { get; }
         public bool Observed { get; set; }
 
-        public PhysicalFireWatch(GunSystem gun, string sideName, string? chamberAtStart)
+        public PhysicalFireWatch(
+            GunSystem gun,
+            string sideName,
+            string? chamberAtStart,
+            bool pendingReloadAtStart)
         {
             Gun = gun;
             SideName = sideName;
             ChamberAtStart = chamberAtStart;
+            PendingReloadAtStart = pendingReloadAtStart;
         }
     }
 }
