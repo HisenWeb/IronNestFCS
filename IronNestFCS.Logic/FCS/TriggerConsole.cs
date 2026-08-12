@@ -142,16 +142,26 @@ public class TriggerConsole {
         return Mathf.Min(onDistance, offDistance) <= ArmPoseTolerance;
     }
 
-    private static IEnumerator EnsureReviewState(LookAtTarget? control, Transform? pose, bool desiredOn, string name) {
+    private static IEnumerator EnsureReviewState(
+        LookAtTarget? control,
+        Transform? pose,
+        bool desiredOn,
+        string name,
+        Func<bool>? shouldContinue = null) {
         if (control == null || pose == null) {
             MelonLogger.Error($"[FCS] TriggerConsole: missing {name} control/pose");
             yield break;
         }
 
+        if (shouldContinue != null && !shouldContinue())
+            yield break;
+
         var deadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
         bool current;
         float angle;
         while (!TryReadReviewState(pose, out current, out angle)) {
+            if (shouldContinue != null && !shouldContinue())
+                yield break;
             if (FcsRuntimeClock.Now >= deadline) {
                 MelonLogger.Warning($"[FCS] TriggerConsole: {name} physical pose ambiguous at Z={angle:F1}°; not toggling blindly");
                 yield break;
@@ -163,11 +173,24 @@ public class TriggerConsole {
         if (current == desiredOn)
             yield break;
 
-        yield return FcsSceneInteractor.WaitAndClick(control);
+        Func<bool>? clickGuard = null;
+        if (shouldContinue != null)
+        {
+            clickGuard = () =>
+                shouldContinue()
+                && TryReadReviewState(pose, out var stillOn, out _)
+                && stillOn != desiredOn;
+        }
+
+        yield return FcsSceneInteractor.WaitAndClick(control, 10f, clickGuard);
+        if (shouldContinue != null && !shouldContinue())
+            yield break;
 
         deadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;
         while (true) {
             yield return FcsRuntimeClock.WaitUntilFocused();
+            if (shouldContinue != null && !shouldContinue())
+                yield break;
             if (TryReadReviewState(pose, out var after, out angle) && after == desiredOn)
                 yield break;
             if (FcsRuntimeClock.Now >= deadline) {
@@ -246,22 +269,22 @@ public class TriggerConsole {
             $"Ready={ReviewStateText(_readyPose)} ArmL={ArmStateText(_armLeftPose)} ArmR={ArmStateText(_armRightPose)}");
     }
 
-    private IEnumerator ResetPhysicalFireControlsAfterBind() {
-        LogPhysicalStates("before F9 reset");
+    public IEnumerator ResetPhysicalFireControls(string reason) {
+        LogPhysicalStates($"before {reason} reset");
 
         // Arming is independent of the FCS task object and survives Logic hot reload. Clear only controls that
         // are physically ON; never infer state from LookAtTarget.GetActive()/isClicked.
         yield return EnsureArmState(_armLeft, _armLeftPose, false, "Left");
         yield return EnsureArmState(_armRight, _armRightPose, false, "Right");
 
-        // Keep the proven serial reset ordering. Normal review confirmation is parallelized separately below.
+        // Keep the proven serial reset ordering for both F9/startup and committed-stack teardown.
         yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire");
         yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck");
         yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck");
         yield return EnsureReviewState(_bulletCheck, _bulletPose, false, "BulletCheck");
         yield return EnsureReviewState(_taskCheck, _taskPose, false, "TaskCheck");
 
-        LogPhysicalStates("after F9 reset");
+        LogPhysicalStates($"after {reason} reset");
     }
 
     /// <summary>
@@ -272,7 +295,7 @@ public class TriggerConsole {
     public IEnumerator PrepareForNewFireSolution(LeftRight leftRight) {
         if (_resetPendingAfterBind) {
             _resetPendingAfterBind = false;
-            yield return ResetPhysicalFireControlsAfterBind();
+            yield return ResetPhysicalFireControls("F9/startup");
             yield break;
         }
 
@@ -377,23 +400,23 @@ public class TriggerConsole {
     }
 
     // Legacy individual confirmation entry points remain available for probes/older callers.
-    public IEnumerator ConfirmTask() {
-        yield return EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck");
+    public IEnumerator ConfirmTask(Func<bool>? shouldContinue = null) {
+        yield return EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck", shouldContinue);
     }
 
-    public IEnumerator ConfirmBullet() {
-        yield return EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck");
+    public IEnumerator ConfirmBullet(Func<bool>? shouldContinue = null) {
+        yield return EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck", shouldContinue);
     }
 
-    public IEnumerator ConfirmRotation() {
-        yield return EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck");
+    public IEnumerator ConfirmRotation(Func<bool>? shouldContinue = null) {
+        yield return EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck", shouldContinue);
     }
 
-    public IEnumerator ConfirmElevation() {
-        yield return EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck");
+    public IEnumerator ConfirmElevation(Func<bool>? shouldContinue = null) {
+        yield return EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck", shouldContinue);
     }
 
-    public IEnumerator ReadyToFire() {
-        yield return EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire");
+    public IEnumerator ReadyToFire(Func<bool>? shouldContinue = null) {
+        yield return EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire", shouldContinue);
     }
 }
