@@ -309,6 +309,11 @@ internal sealed class FirePlanExecutor
 
         plan.LocalReady = true;
         plan.Task.progress = Progress.WaitingForFire;
+
+        // Review controls follow real per-gun LocalReady state, not current/next execution ownership. This lets a
+        // ready next gun keep the desired review state ON across the previous gun's shot, so the controller can
+        // re-assert all five switches after the game physically resets them.
+        _fcs.TriggerConsole.SetGunReady(plan.Side, true);
         MelonLogger.Msg($"[FCS Plan] {plan.Label}: local ready (LoadedReady + elevation)");
     }
 
@@ -366,10 +371,8 @@ internal sealed class FirePlanExecutor
 
                 yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);
 
-                // Once this gun is physically ready for the shared fire stage, publish only that fact to the
-                // independent review-button controller. The controller owns physical switch convergence; the
-                // executor preserves the 1.2 s visual lead before arming without waiting for button completion.
-                _fcs.TriggerConsole.SetGunReady(plan.Side, true);
+                // LocalReady was already published by PrepareLocal. Keep only the visual lead here; review
+                // reconciliation remains independent and may already be restoring switches for a ready next gun.
                 yield return FcsRuntimeClock.WaitForSeconds(ReviewLeadTimeBeforeArmSeconds);
 
                 PollFireWatch(leftWatch);
@@ -393,6 +396,16 @@ internal sealed class FirePlanExecutor
                 }
 
                 yield return _fcs.TriggerConsole.ArmSelected(plan.Side, armPartner?.Side);
+
+                // If a same-azimuth partner exists but was not LocalReady at the first arming instant, keep watching
+                // while the current gun remains physically waiting. When the partner later becomes ready, add its
+                // safety without delaying or re-running the current gun's firing flow.
+                if (armPartner == null)
+                {
+                    var latePartner = FindSameAzimuthPartner(plan);
+                    if (latePartner != null)
+                        _fcs.TrackCoroutine(ArmSameAzimuthPartnerWhenReady(plan, latePartner));
+                }
 
                 // If the player fired during the physical arming operation, settle that reality before issuing an
                 // automatic trigger pull. This preserves player authority and prevents an accidental second shot.
@@ -479,19 +492,78 @@ internal sealed class FirePlanExecutor
         }
     }
 
-    private FirePlan? FindDualArmPartner(FirePlan current)
+    private FirePlan? FindSameAzimuthPartner(FirePlan current)
     {
         var partner = _next;
         if (partner == null
             || ReferenceEquals(partner, current)
-            || !IsActive(partner)
-            || !partner.LocalReady)
+            || !IsActive(partner))
         {
             return null;
         }
 
         var delta = Mathf.Abs(Mathf.DeltaAngle(current.Azimuth, partner.Azimuth));
         return delta <= SameAzimuthToleranceDegrees ? partner : null;
+    }
+
+    private FirePlan? FindDualArmPartner(FirePlan current)
+    {
+        var partner = FindSameAzimuthPartner(current);
+        return partner != null && partner.LocalReady ? partner : null;
+    }
+
+    private IEnumerator ArmSameAzimuthPartnerWhenReady(FirePlan current, FirePlan partner)
+    {
+        while (true)
+        {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
+            if (!ReferenceEquals(_current, current)
+                || !ReferenceEquals(_next, partner)
+                || !IsActive(current)
+                || !IsActive(partner)
+                || current.Failed
+                || partner.Failed)
+            {
+                yield break;
+            }
+
+            var delta = Mathf.Abs(Mathf.DeltaAngle(current.Azimuth, partner.Azimuth));
+            if (delta > SameAzimuthToleranceDegrees)
+                yield break;
+
+            if (partner.LocalReady)
+                break;
+
+            yield return null;
+        }
+
+        yield return _fcs.SharedResources.Trigger.Acquire();
+        try
+        {
+            if (!ReferenceEquals(_current, current)
+                || !ReferenceEquals(_next, partner)
+                || !IsActive(current)
+                || !IsActive(partner)
+                || !current.LocalReady
+                || !partner.LocalReady)
+            {
+                yield break;
+            }
+
+            var delta = Mathf.Abs(Mathf.DeltaAngle(current.Azimuth, partner.Azimuth));
+            if (delta > SameAzimuthToleranceDegrees)
+                yield break;
+
+            MelonLogger.Msg(
+                $"[FCS Plan] late same-azimuth arming: {current.Label} + {partner.Label}; " +
+                $"azimuth delta={delta:F3}°");
+            yield return _fcs.TriggerConsole.ArmSelected(current.Side, partner.Side);
+        }
+        finally
+        {
+            _fcs.SharedResources.Trigger.Release();
+        }
     }
 
     private PhysicalFireWatch BeginFireWatch(GunSystem gun, string sideName)
