@@ -122,8 +122,8 @@ internal sealed class FirePriorityCoordinator
     public void MarkShot(FirePlan plan)
     {
         _statusText = FcsLocalization.T(
-            $"射击顺序：T{plan.Task.targetId} 已击发，推进既定顺序",
-            $"Firing order: T{plan.Task.targetId} fired, advancing committed order");
+            $"射击状态：T{plan.Task.targetId} 已物理击发，重新读取剩余计划",
+            $"Fire state: T{plan.Task.targetId} physically fired; reconciling remaining plans");
     }
 
     private void UpdateDetails(FirePlan? a, FirePlan? b)
