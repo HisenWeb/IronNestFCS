@@ -24,7 +24,7 @@ internal sealed class FirePlanExecutor
     private const float ManualFireTimeoutSeconds = 300f;
     private const float SameAzimuthToleranceDegrees = 0.01f;
     private const int FireSettlementBufferFrames = 3;
-    private const float ReviewLeadTimeBeforeArmSeconds = 1.2f;
+    private const float ReviewLeadTimeBeforeArmSeconds = 1.5f;
 
     private readonly FSC _fcs;
     private readonly Dictionary<FirePlan, object> _prepareCoroutines = new();
@@ -372,7 +372,7 @@ internal sealed class FirePlanExecutor
 
                 // Once this gun is physically ready for the shared fire stage, publish only that fact to the
                 // independent review-button controller. The controller owns physical switch convergence; the
-                // executor preserves the 1.2 s visual lead before arming without waiting for button completion.
+                // executor preserves the 1.5 s visual lead before arming without waiting for button completion.
                 _fcs.TriggerConsole.SetGunReady(plan.Side, true);
                 yield return FcsRuntimeClock.WaitForSeconds(ReviewLeadTimeBeforeArmSeconds);
 
