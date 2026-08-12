@@ -11,6 +11,7 @@ public class FcsModule : IFcsModule
 {
     private FSC? _fcs;
     private FcsWindow? _window;
+    private readonly ElevationLinkProbe _elevationLinkProbe = new();
 
     public bool Initialize(IFcsHostServices hostServices)
     {
@@ -20,6 +21,10 @@ public class FcsModule : IFcsModule
         _window = new FcsWindow(_fcs);
 
         var bound = _fcs.TryBind();
+        if (bound)
+            _elevationLinkProbe.TryBind();
+        else
+            _elevationLinkProbe.Reset();
 
         var leftPhysical = bound ? SafePhysicalSummary("Left") : "unbound";
         var rightPhysical = bound ? SafePhysicalSummary("Right") : "unbound";
@@ -35,6 +40,7 @@ public class FcsModule : IFcsModule
             return;
 
         fcs.Update();
+        _elevationLinkProbe.Tick();
     }
 
     public void OnGui() => _window?.OnGui();
@@ -43,6 +49,7 @@ public class FcsModule : IFcsModule
     {
         try
         {
+            _elevationLinkProbe.Reset();
             _fcs?.Dispose();
             _window = null;
             _fcs = null;
