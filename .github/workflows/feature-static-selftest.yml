@@ -1,0 +1,57 @@
+name: Feature static self-test
+
+on:
+  push:
+    branches:
+      - feature/physical-fire-settlement
+
+jobs:
+  syntax-and-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Parse all C# sources with Roslyn
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/fcs-syntax
+          dotnet new console -n FcsSyntax -o /tmp/fcs-syntax --framework net8.0 >/dev/null
+          cd /tmp/fcs-syntax
+          dotnet add package Microsoft.CodeAnalysis.CSharp --version 4.11.0 >/dev/null
+          cat > Program.cs <<'CS'
+          using Microsoft.CodeAnalysis;
+          using Microsoft.CodeAnalysis.CSharp;
+          var root = Environment.GetEnvironmentVariable("GITHUB_WORKSPACE") ?? throw new InvalidOperationException("GITHUB_WORKSPACE missing");
+          var files = Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)
+              .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}")
+                          && !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}"))
+              .OrderBy(path => path).ToArray();
+          var failed = false;
+          foreach (var file in files)
+          {
+              var tree = CSharpSyntaxTree.ParseText(File.ReadAllText(file), new CSharpParseOptions(LanguageVersion.Latest), file);
+              foreach (var error in tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error))
+              {
+                  failed = true;
+                  Console.Error.WriteLine(error);
+              }
+          }
+          Console.WriteLine($"Parsed {files.Length} C# source files.");
+          if (failed) Environment.Exit(1);
+          CS
+          dotnet run --no-restore
+      - name: Check review protocol invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          TRIGGER=IronNestFCS.Logic/FCS/TriggerConsole.cs
+          grep -q 'ReviewClickHoldSeconds = 0.1f' "$TRIGGER"
+          grep -q 'review click started independently' "$TRIGGER"
+          grep -q 'review activation stalled' "$TRIGGER"
+          grep -q 'if (item.Control!.isActive && item.Control.nextAllowedClickTime <= realtimeNow)' "$TRIGGER"
+          ! grep -q 'toToggle.All(item => item.Control.isActive' "$TRIGGER"
+          grep -q 'LogPhysicalStates("after parallel review")' "$TRIGGER"
+          echo 'Independent review-control invariants present.'
