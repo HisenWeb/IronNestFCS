@@ -1,0 +1,322 @@
+from pathlib import Path
+
+
+def replace_once(text, old, new, label):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f'{label}: expected exactly one match, found {count}')
+    return text.replace(old, new, 1)
+
+
+# FirePlanExecutor: execution-stack state only defines dispatch/all-off boundaries.
+p = Path('IronNestFCS.Logic/Execution/FirePlanExecutor.cs')
+text = p.read_text(encoding='utf-8-sig')
+
+old = '''        // Compared=false -> this call just created a committed execution stack. A promoted plan is
+        // already part of that same stack and must not re-dispatch the shared review protocol.
+        var reviewStack = promote
+            ? null
+            : ActivePlans().Where(candidate => candidate.Compared).ToArray();
+
+        // Azimuth has no loading dependency. Start immediately after order commit.
+        _fcs.TrackCoroutine(RunShared(plan, reviewStack));
+'''
+new = '''        // Azimuth has no loading dependency. Start immediately after order commit.
+        // Review-button dispatch is intentionally independent and is requested later by RunShared.
+        _fcs.TrackCoroutine(RunShared(plan));
+'''
+text = replace_once(text, old, new, 'remove review stack coupling from SetCurrent')
+
+old = '''    private void DispatchReviewProtocolForStack(FirePlan[] stack)
+    {
+        if (stack.Length == 0)
+            return;
+
+        // The existing Compared flag already defines this committed execution stack. Capture those exact plan
+        // objects so stale review coroutines cannot become valid again if a later stack is committed immediately.
+        Func<bool> stackStillActive = () => stack.Any(IsActive);
+        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmTask(stackStillActive));
+        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmBullet(stackStillActive));
+        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmRotation(stackStillActive));
+        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmElevation(stackStillActive));
+        _fcs.TrackCoroutine(_fcs.TriggerConsole.ReadyToFire(stackStillActive));
+        MelonLogger.Msg(
+            $"[FCS] TriggerConsole: dispatched review once for committed stack [{string.Join(", ", stack.Select(p => $"T{p.Task.targetId}"))}]");
+    }
+
+    private IEnumerator RunShared(FirePlan plan, FirePlan[]? reviewStack)
+'''
+new = '''    private bool DispatchReviewProtocolAsync()
+    {
+        var operations = _fcs.TriggerConsole.BeginReviewAsync();
+        if (operations.Count == 0)
+            return false;
+
+        foreach (var operation in operations)
+            _fcs.TrackCoroutine(operation);
+
+        MelonLogger.Msg("[FCS] TriggerConsole: dispatched independent asynchronous review-button operations");
+        return true;
+    }
+
+    private IEnumerator RunShared(FirePlan plan)
+'''
+text = replace_once(text, old, new, 'replace stack-aware review dispatch')
+
+old = '''                yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);
+                if (reviewStack != null && reviewStack.Length > 0)
+                {
+                    DispatchReviewProtocolForStack(reviewStack);
+                    // Review controls are visual/protocol actions, not a hard firing gate. Give the
+                    // physical switches a short visible lead before arming, then continue regardless.
+                    yield return FcsRuntimeClock.WaitForSeconds(ReviewLeadTimeBeforeArmSeconds);
+                }
+'''
+new = '''                yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);
+                if (DispatchReviewProtocolAsync())
+                {
+                    // Dispatch and the 1.2 s visual lead start at the same point. Review buttons continue
+                    // independently; their completion never gates arming or physical firing.
+                    yield return FcsRuntimeClock.WaitForSeconds(ReviewLeadTimeBeforeArmSeconds);
+                }
+'''
+text = replace_once(text, old, new, 'parallel review dispatch and 1.2s lead')
+
+old = '''        // Compared is the existing committed-stack label. Only the removal of the LAST compared
+        // plan ends that stack and permits a full shared-console reset. Unpaired plans do not keep
+        // the old stack alive and will form a new stack after the reset lane is queued.
+        if (plan.Compared && !HasRemainingComparedPlan())
+        {
+            MelonLogger.Msg("[FCS Plan] committed stack drained; scheduling full trigger-console reset");
+            _fcs.TrackCoroutine(_fcs.SharedResources.ResetFireControlsAfterCommittedStack());
+        }
+'''
+new = '''        // Compared is the existing committed execution-stack label. When the LAST compared plan
+        // leaves, only the independent review-button module is reset. Arming remains owned by the physical
+        // firing path and is intentionally not coupled to the review-button lifecycle.
+        if (plan.Compared && !HasRemainingComparedPlan())
+        {
+            MelonLogger.Msg("[FCS Plan] committed stack drained; scheduling review buttons all-off");
+            _fcs.TrackCoroutine(_fcs.SharedResources.ResetReviewControlsAfterCommittedStack());
+        }
+'''
+text = replace_once(text, old, new, 'review-only stack drain reset')
+p.write_text(text, encoding='utf-8')
+
+
+# TriggerConsole: own the async review batch internally; no Plan/current/next knowledge leaks in.
+p = Path('IronNestFCS.Logic/FCS/TriggerConsole.cs')
+text = p.read_text(encoding='utf-8-sig')
+
+text = replace_once(
+    text,
+    '    private bool _resetPendingAfterBind;\n',
+    '    private bool _resetPendingAfterBind;\n'
+    '    private bool _reviewBatchActive;\n'
+    '    private int _reviewOperationGeneration;\n',
+    'add review module lifecycle fields')
+
+text = replace_once(
+    text,
+    '''        if (ok) {
+            _resetPendingAfterBind = true;
+            LogPhysicalStates("bind");
+        }
+''',
+    '''        if (ok) {
+            _resetPendingAfterBind = true;
+            _reviewBatchActive = false;
+            _reviewOperationGeneration++;
+            LogPhysicalStates("bind");
+        }
+''',
+    'reset review module on bind')
+
+marker = '''    public IEnumerator ResetPhysicalFireControls(string reason) {
+'''
+insert = '''    /// <summary>
+    /// Start one independent asynchronous ON operation for each review button. The batch remains active until
+    /// ReviewAllOff is called; callers do not pass Plan/current/next state into these operations.
+    /// </summary>
+    public IReadOnlyList<IEnumerator> BeginReviewAsync() {
+        if (_reviewBatchActive)
+            return Array.Empty<IEnumerator>();
+
+        _reviewBatchActive = true;
+        var generation = ++_reviewOperationGeneration;
+        Func<bool> stillCurrent = () => _reviewBatchActive && generation == _reviewOperationGeneration;
+
+        return new IEnumerator[] {
+            EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck", stillCurrent),
+            EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck", stillCurrent),
+            EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck", stillCurrent),
+            EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck", stillCurrent),
+            EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire", stillCurrent),
+        };
+    }
+
+    /// <summary>
+    /// End the current review-button batch and drive only the five review controls OFF. This is the normal
+    /// execution-stack teardown path and intentionally does not touch either arming lever.
+    /// </summary>
+    public IEnumerator ReviewAllOff(string reason) {
+        _reviewBatchActive = false;
+        _reviewOperationGeneration++;
+
+        LogPhysicalStates($"before {reason} review all-off");
+        yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire");
+        yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck");
+        yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck");
+        yield return EnsureReviewState(_bulletCheck, _bulletPose, false, "BulletCheck");
+        yield return EnsureReviewState(_taskCheck, _taskPose, false, "TaskCheck");
+        LogPhysicalStates($"after {reason} review all-off");
+    }
+
+'''
+text = replace_once(text, marker, insert + marker, 'insert independent review module API')
+
+old = '''    public IEnumerator ResetPhysicalFireControls(string reason) {
+        LogPhysicalStates($"before {reason} reset");
+
+        // Arming is independent of the FCS task object and survives Logic hot reload. Clear only controls that
+        // are physically ON; never infer state from LookAtTarget.GetActive()/isClicked.
+        yield return EnsureArmState(_armLeft, _armLeftPose, false, "Left");
+        yield return EnsureArmState(_armRight, _armRightPose, false, "Right");
+
+        // Keep the proven serial reset ordering for both F9/startup and committed-stack teardown.
+        yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire");
+        yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck");
+        yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck");
+        yield return EnsureReviewState(_bulletCheck, _bulletPose, false, "BulletCheck");
+        yield return EnsureReviewState(_taskCheck, _taskPose, false, "TaskCheck");
+
+        LogPhysicalStates($"after {reason} reset");
+    }
+'''
+new = '''    public IEnumerator ResetPhysicalFireControls(string reason) {
+        LogPhysicalStates($"before {reason} full reset");
+
+        // F9/startup clears the whole TaskSystem execution stack, so it resets both independent physical groups.
+        // Normal execution-stack teardown calls ReviewAllOff and never reaches these arming levers.
+        yield return EnsureArmState(_armLeft, _armLeftPose, false, "Left");
+        yield return EnsureArmState(_armRight, _armRightPose, false, "Right");
+        yield return ReviewAllOff(reason);
+
+        LogPhysicalStates($"after {reason} full reset");
+    }
+'''
+text = replace_once(text, old, new, 'split F9 full reset from review all-off')
+
+old = '''    // Legacy individual confirmation entry points remain available for probes/older callers.
+    public IEnumerator ConfirmTask(Func<bool>? shouldContinue = null) {
+        yield return EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck", shouldContinue);
+    }
+
+    public IEnumerator ConfirmBullet(Func<bool>? shouldContinue = null) {
+        yield return EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck", shouldContinue);
+    }
+
+    public IEnumerator ConfirmRotation(Func<bool>? shouldContinue = null) {
+        yield return EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck", shouldContinue);
+    }
+
+    public IEnumerator ConfirmElevation(Func<bool>? shouldContinue = null) {
+        yield return EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck", shouldContinue);
+    }
+
+    public IEnumerator ReadyToFire(Func<bool>? shouldContinue = null) {
+        yield return EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire", shouldContinue);
+    }
+'''
+new = '''    // Legacy individual confirmation entry points remain available for probes/older callers.
+    public IEnumerator ConfirmTask() {
+        yield return EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck");
+    }
+
+    public IEnumerator ConfirmBullet() {
+        yield return EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck");
+    }
+
+    public IEnumerator ConfirmRotation() {
+        yield return EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck");
+    }
+
+    public IEnumerator ConfirmElevation() {
+        yield return EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck");
+    }
+
+    public IEnumerator ReadyToFire() {
+        yield return EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire");
+    }
+'''
+text = replace_once(text, old, new, 'remove external cancellation API from legacy review methods')
+p.write_text(text, encoding='utf-8')
+
+
+# SharedConsoleCoordinator: committed-stack teardown owns only review buttons.
+p = Path('IronNestFCS.Logic/Infrastructure/SharedConsoleCoordinator.cs')
+text = p.read_text(encoding='utf-8-sig')
+old = '''    /// <summary>
+    /// A normal committed FirePlan stack resets the shared review/arming console only after its last Compared
+    /// plan leaves the executor. This reset is serialized ahead of the next stack's trigger-console work.
+    /// </summary>
+    public IEnumerator ResetFireControlsAfterCommittedStack() {
+        yield return FcsRuntimeClock.WaitUntilFocused();
+        yield return Trigger.Acquire();
+        try {
+            yield return _fcs.TriggerConsole.ResetPhysicalFireControls("committed stack drained");
+        }
+        finally {
+            Trigger.Release();
+        }
+    }
+'''
+new = '''    /// <summary>
+    /// A normal committed FirePlan stack turns only the five independent review buttons OFF after its last
+    /// Compared plan leaves the executor. Arming remains owned by the physical firing path.
+    /// </summary>
+    public IEnumerator ResetReviewControlsAfterCommittedStack() {
+        yield return FcsRuntimeClock.WaitUntilFocused();
+        yield return Trigger.Acquire();
+        try {
+            yield return _fcs.TriggerConsole.ReviewAllOff("committed stack drained");
+        }
+        finally {
+            Trigger.Release();
+        }
+    }
+'''
+text = replace_once(text, old, new, 'review-only committed stack coordinator')
+p.write_text(text, encoding='utf-8')
+
+
+# Static architecture invariants.
+executor = Path('IronNestFCS.Logic/Execution/FirePlanExecutor.cs').read_text(encoding='utf-8')
+trigger = Path('IronNestFCS.Logic/FCS/TriggerConsole.cs').read_text(encoding='utf-8')
+shared = Path('IronNestFCS.Logic/Infrastructure/SharedConsoleCoordinator.cs').read_text(encoding='utf-8')
+
+required = [
+    (executor, 'DispatchReviewProtocolAsync()'),
+    (executor, 'yield return FcsRuntimeClock.WaitForSeconds(ReviewLeadTimeBeforeArmSeconds);'),
+    (executor, 'ResetReviewControlsAfterCommittedStack()'),
+    (trigger, 'public IReadOnlyList<IEnumerator> BeginReviewAsync()'),
+    (trigger, 'public IEnumerator ReviewAllOff(string reason)'),
+    (trigger, 'yield return ReviewAllOff(reason);'),
+    (shared, 'ResetReviewControlsAfterCommittedStack()'),
+    (shared, 'TriggerConsole.ReviewAllOff("committed stack drained")'),
+]
+for haystack, needle in required:
+    if needle not in haystack:
+        raise SystemExit(f'missing invariant: {needle}')
+
+forbidden = [
+    (executor, 'stackStillActive'),
+    (executor, 'reviewStack'),
+    (executor, 'ResetFireControlsAfterCommittedStack'),
+    (shared, 'ResetPhysicalFireControls("committed stack drained")'),
+]
+for haystack, needle in forbidden:
+    if needle in haystack:
+        raise SystemExit(f'stale coupling remains: {needle}')
+
+print('review async decoupling patch applied')
