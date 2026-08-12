@@ -355,13 +355,26 @@ internal sealed class FirePlanExecutor
                 if (!ReferenceEquals(_current, plan) || !IsActive(plan) || plan.Failed)
                     yield break;
 
+                // The firing lever is shared and the player may already have manipulated either safety. Capture
+                // both baselines before touching any review/arming controls so a player-triggered shot during the
+                // console protocol is still reconciled from physical reality.
+                leftWatch = BeginFireWatch(_fcs.LeftGun, "Left");
+                rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
+
                 yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);
                 yield return _fcs.TriggerConsole.CompleteReviewProtocol();
 
-                // The firing lever is shared, so establish BOTH gun baselines before opening either selected
-                // safety. Physical reality, not current/next, will decide which FirePlan is consumed afterward.
-                leftWatch = BeginFireWatch(_fcs.LeftGun, "Left");
-                rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
+                PollFireWatch(leftWatch);
+                PollFireWatch(rightWatch);
+                if (leftWatch.Observed || rightWatch.Observed)
+                {
+                    yield return CompleteSettlementWindow(leftWatch, rightWatch);
+                    if (SettleObservedShots(leftWatch.Observed, rightWatch.Observed) > 0)
+                        yield break;
+
+                    leftWatch = BeginFireWatch(_fcs.LeftGun, "Left");
+                    rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
+                }
 
                 var armPartner = FindDualArmPartner(plan);
                 if (armPartner != null)
