@@ -1,4 +1,6 @@
-using Il2Cpp;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using Il2CppInterop.Runtime;
 using IronNestFCS.Logic.FCS;
 using MelonLoader;
 using UnityEngine;
@@ -6,77 +8,88 @@ using UnityEngine;
 namespace IronNestFCS.Logic.Infrastructure;
 
 /// <summary>
-/// Temporary diagnostic probe for the game's twin-gun elevation linkage device.
-/// Read-only by design: it never writes controller, slider, or transform state.
-/// Remove after the physical linkage contract has been identified and verified.
+/// Temporary, read-only probe for the game's twin-gun elevation linkage mechanism.
+/// Phase 2 deliberately narrows observation to the physical linkage controls so we can
+/// identify an authoritative Linked/Soloed state without inferring from gun angles.
 /// </summary>
 internal sealed class ElevationLinkProbe
 {
     private const float SampleIntervalSeconds = 0.10f;
-    private const float ElevationChangeTolerance = 0.02f;
-    private const float TransformPositionTolerance = 0.001f;
-    private const float TransformAngleTolerance = 0.05f;
-    private const float TransformScaleTolerance = 0.001f;
+    private const float TransformPositionTolerance = 0.0005f;
+    private const float TransformAngleTolerance = 0.02f;
+    private const int FieldAttributeStatic = 0x10;
+    private const int MaxMetadataMembersPerClass = 96;
 
-    private TurretController? _turretController;
-    private GunController? _leftGun;
-    private GunController? _rightGun;
-    private LinearSliderInteractable? _leftSlider;
-    private LinearSliderInteractable? _rightSlider;
-
-    private readonly Dictionary<string, Transform> _trackedTransforms = new(StringComparer.Ordinal);
+    private readonly List<ProbeTarget> _targets = new();
+    private readonly List<ObservedField> _observedFields = new();
+    private readonly Dictionary<string, string> _lastFieldValues = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransformState> _lastTransformStates = new(StringComparer.Ordinal);
 
-    private ElevationState? _lastElevationState;
     private float _nextSampleAt;
     private float _nextBindAttemptAt;
     private bool _bound;
+    private string _lastBindSummary = "";
 
     public void TryBind()
     {
         try
         {
-            _turretController = GameObject.Find("TurretSystem")?.GetComponent<TurretController>();
-            _leftGun = GameObject.Find("GunLeft")?.GetComponent<GunController>();
-            _rightGun = GameObject.Find("GunRight")?.GetComponent<GunController>();
-
-            var baseplate = GameObject.Find(".Elevation Lever Baseplate")?.transform;
-            _leftSlider = baseplate?.FindChild(".Elevation Lever Left")?.GetComponent<LinearSliderInteractable>();
-            _rightSlider = baseplate?.FindChild(".Elevation Lever Right")?.GetComponent<LinearSliderInteractable>();
-
-            _bound = _turretController != null
-                     && _leftGun != null
-                     && _rightGun != null
-                     && _leftSlider != null
-                     && _rightSlider != null;
-
-            _trackedTransforms.Clear();
+            _targets.Clear();
+            _observedFields.Clear();
+            _lastFieldValues.Clear();
             _lastTransformStates.Clear();
 
-            if (baseplate != null)
-                CollectTransforms(baseplate, baseplate.name, includeAllDescendants: true);
-
+            var baseplate = GameObject.Find(".Elevation Lever Baseplate")?.transform;
+            var rightLever = baseplate?.FindChild(".Elevation Lever Right");
+            var lockingBolt = rightLever?.FindChild(".Elevation Lever Locking Bolt");
+            var linked = lockingBolt?.FindChild("LINKED");
+            var soloed = lockingBolt?.FindChild("SOLOED");
             var turretRoot = GameObject.Find("TurretSystem")?.transform;
-            if (turretRoot != null)
-                CollectTransforms(turretRoot, turretRoot.name, includeAllDescendants: false);
+            var linkingButton = turretRoot?.FindChild("Elevation Linking Button");
 
-            _lastElevationState = null;
+            AddTarget("TurretSystem/Elevation Linking Button", linkingButton);
+            AddTarget(
+                ".Elevation Lever Baseplate/.Elevation Lever Right/.Elevation Lever Locking Bolt",
+                lockingBolt);
+            AddTarget(
+                ".Elevation Lever Baseplate/.Elevation Lever Right/.Elevation Lever Locking Bolt/LINKED",
+                linked);
+            AddTarget(
+                ".Elevation Lever Baseplate/.Elevation Lever Right/.Elevation Lever Locking Bolt/SOLOED",
+                soloed);
+
+            _bound = _targets.Count == 4;
             _nextSampleAt = 0f;
 
-            MelonLogger.Msg(
-                $"[FCS ElevationLinkProbe] bind {(_bound ? "success" : "partial")}; " +
-                $"turret={(_turretController != null)}, leftGun={(_leftGun != null)}, rightGun={(_rightGun != null)}, " +
-                $"leftSlider={(_leftSlider != null)}, rightSlider={(_rightSlider != null)}, " +
-                $"trackedTransforms={_trackedTransforms.Count}");
+            var bindSummary = $"targets={_targets.Count}/4";
+            if (!_bound)
+            {
+                if (!string.Equals(_lastBindSummary, bindSummary, StringComparison.Ordinal))
+                {
+                    _lastBindSummary = bindSummary;
+                    MelonLogger.Warning($"[FCS ElevationLinkProbe] phase2 bind partial; {bindSummary}");
+                }
+                return;
+            }
 
-            DumpTrackedHierarchy();
-            EmitElevationState(force: true);
-            CaptureTransformBaselines();
+            _lastBindSummary = bindSummary;
+            MelonLogger.Msg($"[FCS ElevationLinkProbe] phase2 bind success; {bindSummary}");
+
+            foreach (var target in _targets)
+            {
+                DumpTargetMetadata(target);
+                _lastTransformStates[target.Path] = TransformState.Read(target.Transform);
+            }
+
+            MelonLogger.Msg(
+                $"[FCS ElevationLinkProbe] phase2 watching primitive state fields={_observedFields.Count}; " +
+                "arbitrary property getters are not invoked");
         }
         catch (Exception ex)
         {
             _bound = false;
-            MelonLogger.Warning($"[FCS ElevationLinkProbe] bind failed: {ex.GetType().Name}: {ex.Message}");
+            MelonLogger.Warning(
+                $"[FCS ElevationLinkProbe] phase2 bind failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -99,165 +112,432 @@ internal sealed class ElevationLinkProbe
 
         try
         {
-            EmitElevationState(force: false);
-            EmitTransformChanges();
+            EmitFieldChanges();
+            EmitTargetTransformChanges();
         }
         catch (Exception ex)
         {
             _bound = false;
-            MelonLogger.Warning($"[FCS ElevationLinkProbe] sample failed; rebinding: {ex.GetType().Name}: {ex.Message}");
+            MelonLogger.Warning(
+                $"[FCS ElevationLinkProbe] phase2 sample failed; rebinding: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
     public void Reset()
     {
-        _turretController = null;
-        _leftGun = null;
-        _rightGun = null;
-        _leftSlider = null;
-        _rightSlider = null;
-        _trackedTransforms.Clear();
+        _targets.Clear();
+        _observedFields.Clear();
+        _lastFieldValues.Clear();
         _lastTransformStates.Clear();
-        _lastElevationState = null;
         _nextSampleAt = 0f;
         _nextBindAttemptAt = 0f;
         _bound = false;
+        _lastBindSummary = "";
     }
 
-    private void EmitElevationState(bool force)
+    private void AddTarget(string path, Transform? transform)
     {
-        if (_turretController == null || _leftGun == null || _rightGun == null
-            || _leftSlider == null || _rightSlider == null)
-        {
-            _bound = false;
-            return;
-        }
+        if (transform != null)
+            _targets.Add(new ProbeTarget(path, transform));
+    }
 
-        var current = new ElevationState(
-            _turretController.driveGunElevationsFromController,
-            _leftSlider.Value,
-            _leftGun.CurrentElevation,
-            _leftGun.DesiredElevationAngle,
-            _leftGun.elevationChangeVelocity,
-            _rightSlider.Value,
-            _rightGun.CurrentElevation,
-            _rightGun.DesiredElevationAngle,
-            _rightGun.elevationChangeVelocity);
-
-        if (!force && _lastElevationState.HasValue && !current.HasMeaningfulChangeFrom(_lastElevationState.Value))
-            return;
-
-        _lastElevationState = current;
+    private void DumpTargetMetadata(ProbeTarget target)
+    {
         MelonLogger.Msg(
-            $"[FCS ElevationLinkProbe] state " +
-            $"driveFromController={current.DriveFromController} | " +
-            $"L slider={current.LeftSlider:F3} current={current.LeftCurrent:F3} desired={current.LeftDesired:F3} vel={current.LeftVelocity:F3} | " +
-            $"R slider={current.RightSlider:F3} current={current.RightCurrent:F3} desired={current.RightDesired:F3} vel={current.RightVelocity:F3} | " +
-            $"delta current={Mathf.DeltaAngle(current.LeftCurrent, current.RightCurrent):F3} desired={Mathf.DeltaAngle(current.LeftDesired, current.RightDesired):F3}");
-    }
+            $"[FCS ElevationLinkProbe] target path={target.Path} activeSelf={target.Transform.gameObject.activeSelf}");
 
-    private void CollectTransforms(Transform root, string path, bool includeAllDescendants)
-    {
-        var shouldTrack = includeAllDescendants || NameLooksRelevant(root.name);
-        if (shouldTrack && !_trackedTransforms.ContainsKey(path))
-            _trackedTransforms[path] = root;
-
-        for (var i = 0; i < root.childCount; i++)
-        {
-            var child = root.GetChild(i);
-            CollectTransforms(child, path + "/" + child.name, includeAllDescendants);
-        }
-    }
-
-    private static bool NameLooksRelevant(string? name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            return false;
-
-        return ContainsAny(name,
-            "elev", "lever", "link", "coupl", "sync", "connect", "lock", "associate", "pair");
-    }
-
-    private void DumpTrackedHierarchy()
-    {
-        foreach (var pair in _trackedTransforms.OrderBy(pair => pair.Key, StringComparer.Ordinal))
-        {
-            var transform = pair.Value;
-            if (transform == null)
-                continue;
-
-            MelonLogger.Msg(
-                $"[FCS ElevationLinkProbe] object path={pair.Key} active={transform.gameObject.activeSelf} " +
-                $"components={DescribeComponents(transform.gameObject)}");
-        }
-    }
-
-    private static string DescribeComponents(GameObject gameObject)
-    {
+        Component[] components;
         try
         {
-            var components = gameObject.GetComponents<Component>();
-            if (components == null || components.Length == 0)
-                return "-";
-
-            var names = new List<string>(components.Length);
-            foreach (var component in components)
-            {
-                if (component == null)
-                    continue;
-                names.Add(component.GetType().Name);
-            }
-            return names.Count == 0 ? "-" : string.Join(",", names);
+            components = target.Transform.gameObject.GetComponents<Component>();
         }
         catch (Exception ex)
         {
-            return "read-failed:" + ex.GetType().Name;
+            MelonLogger.Warning(
+                $"[FCS ElevationLinkProbe] components read failed path={target.Path}: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+            return;
         }
-    }
 
-    private void CaptureTransformBaselines()
-    {
-        foreach (var pair in _trackedTransforms)
+        for (var componentIndex = 0; componentIndex < components.Length; componentIndex++)
         {
-            var transform = pair.Value;
-            if (transform == null)
-                continue;
-            _lastTransformStates[pair.Key] = TransformState.Read(transform);
-        }
-    }
-
-    private void EmitTransformChanges()
-    {
-        foreach (var pair in _trackedTransforms)
-        {
-            var transform = pair.Value;
-            if (transform == null)
+            var component = components[componentIndex];
+            if (component == null)
                 continue;
 
-            var current = TransformState.Read(transform);
-            if (!_lastTransformStates.TryGetValue(pair.Key, out var previous))
+            try
             {
-                _lastTransformStates[pair.Key] = current;
+                DumpComponentMetadata(target, componentIndex, component);
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning(
+                    $"[FCS ElevationLinkProbe] component probe failed path={target.Path} index={componentIndex}: " +
+                    $"{ex.GetType().Name}: {ex.Message}");
+            }
+        }
+    }
+
+    private void DumpComponentMetadata(ProbeTarget target, int componentIndex, Component component)
+    {
+        var objectPtr = IL2CPP.Il2CppObjectBaseToPtr(component);
+        if (objectPtr == IntPtr.Zero)
+            return;
+
+        var runtimeClass = IL2CPP.il2cpp_object_get_class(objectPtr);
+        if (runtimeClass == IntPtr.Zero)
+            return;
+
+        var runtimeClassName = FullClassName(runtimeClass);
+        MelonLogger.Msg(
+            $"[FCS ElevationLinkProbe] component path={target.Path} index={componentIndex} " +
+            $"il2cpp={runtimeClassName} managed={component.GetType().FullName ?? component.GetType().Name}");
+
+        var currentClass = runtimeClass;
+        var depth = 0;
+        while (currentClass != IntPtr.Zero && depth < 6)
+        {
+            var classNamespace = IL2CPP.il2cpp_class_get_namespace_(currentClass) ?? "";
+            var className = FullClassName(currentClass);
+            if (IsFrameworkClass(classNamespace, className))
+                break;
+
+            DumpClassFields(target, componentIndex, component, currentClass, className);
+            DumpClassProperties(target, componentIndex, currentClass, className);
+            DumpInterestingMethods(target, componentIndex, currentClass, className);
+
+            currentClass = IL2CPP.il2cpp_class_get_parent(currentClass);
+            depth++;
+        }
+    }
+
+    private void DumpClassFields(
+        ProbeTarget target,
+        int componentIndex,
+        Component component,
+        IntPtr klass,
+        string className)
+    {
+        var iter = IntPtr.Zero;
+        var count = 0;
+        IntPtr field;
+
+        while (count++ < MaxMetadataMembersPerClass
+               && (field = IL2CPP.il2cpp_class_get_fields(klass, ref iter)) != IntPtr.Zero)
+        {
+            var fieldName = IL2CPP.il2cpp_field_get_name_(field) ?? "?";
+            var fieldType = IL2CPP.il2cpp_field_get_type(field);
+            var typeName = fieldType == IntPtr.Zero
+                ? "?"
+                : IL2CPP.il2cpp_type_get_name_(fieldType) ?? "?";
+            var flags = IL2CPP.il2cpp_field_get_flags(field);
+            var isStatic = (flags & FieldAttributeStatic) != 0;
+            var isEnum = IsEnum(fieldType);
+            var readable = !isStatic && IsReadablePrimitive(typeName, isEnum);
+            var watchChanges = readable && ShouldWatchChanges(fieldName, typeName, isEnum);
+
+            string value;
+            if (!readable)
+            {
+                value = isStatic ? "<static-not-read>" : "<metadata-only>";
+            }
+            else
+            {
+                value = ReadFieldValue(component, field, fieldType, typeName, isEnum);
+            }
+
+            var key = BuildFieldKey(target.Path, componentIndex, className, fieldName);
+            MelonLogger.Msg(
+                $"[FCS ElevationLinkProbe] field path={target.Path} component={componentIndex}:{className} " +
+                $"name={fieldName} type={typeName} enum={isEnum} watch={watchChanges} value={value}");
+
+            if (!watchChanges)
+                continue;
+
+            _lastFieldValues[key] = value;
+            _observedFields.Add(new ObservedField(
+                key,
+                target.Path,
+                componentIndex,
+                className,
+                fieldName,
+                typeName,
+                component,
+                field,
+                fieldType,
+                isEnum));
+        }
+    }
+
+    private static void DumpClassProperties(
+        ProbeTarget target,
+        int componentIndex,
+        IntPtr klass,
+        string className)
+    {
+        var iter = IntPtr.Zero;
+        var count = 0;
+        IntPtr property;
+
+        while (count++ < MaxMetadataMembersPerClass
+               && (property = IL2CPP.il2cpp_class_get_properties(klass, ref iter)) != IntPtr.Zero)
+        {
+            var propertyName = IL2CPP.il2cpp_property_get_name_(property) ?? "?";
+            if (!NameLooksStateRelevant(propertyName))
+                continue;
+
+            var getter = IL2CPP.il2cpp_property_get_get_method(property);
+            var setter = IL2CPP.il2cpp_property_get_set_method(property);
+            MelonLogger.Msg(
+                $"[FCS ElevationLinkProbe] property path={target.Path} component={componentIndex}:{className} " +
+                $"name={propertyName} getter={(getter != IntPtr.Zero)} setter={(setter != IntPtr.Zero)} metadataOnly=true");
+        }
+    }
+
+    private static void DumpInterestingMethods(
+        ProbeTarget target,
+        int componentIndex,
+        IntPtr klass,
+        string className)
+    {
+        var iter = IntPtr.Zero;
+        var count = 0;
+        IntPtr method;
+
+        while (count++ < MaxMetadataMembersPerClass
+               && (method = IL2CPP.il2cpp_class_get_methods(klass, ref iter)) != IntPtr.Zero)
+        {
+            var methodName = IL2CPP.il2cpp_method_get_name_(method) ?? "?";
+            if (!NameLooksActionRelevant(methodName))
+                continue;
+
+            MelonLogger.Msg(
+                $"[FCS ElevationLinkProbe] method path={target.Path} component={componentIndex}:{className} " +
+                $"name={methodName} argc={IL2CPP.il2cpp_method_get_param_count(method)} metadataOnly=true");
+        }
+    }
+
+    private void EmitFieldChanges()
+    {
+        foreach (var observed in _observedFields)
+        {
+            if (observed.Component == null)
+                continue;
+
+            string current;
+            try
+            {
+                current = ReadFieldValue(
+                    observed.Component,
+                    observed.Field,
+                    observed.FieldType,
+                    observed.TypeName,
+                    observed.IsEnum);
+            }
+            catch (Exception ex)
+            {
+                current = $"<read-failed:{ex.GetType().Name}>";
+            }
+
+            if (!_lastFieldValues.TryGetValue(observed.Key, out var previous))
+            {
+                _lastFieldValues[observed.Key] = current;
+                continue;
+            }
+
+            if (string.Equals(previous, current, StringComparison.Ordinal))
+                continue;
+
+            _lastFieldValues[observed.Key] = current;
+            MelonLogger.Msg(
+                $"[FCS ElevationLinkProbe] FIELD CHANGE path={observed.Path} " +
+                $"component={observed.ComponentIndex}:{observed.ClassName} name={observed.FieldName} " +
+                $"type={observed.TypeName} {previous}->{current}");
+        }
+    }
+
+    private void EmitTargetTransformChanges()
+    {
+        foreach (var target in _targets)
+        {
+            if (target.Transform == null)
+                continue;
+
+            var current = TransformState.Read(target.Transform);
+            if (!_lastTransformStates.TryGetValue(target.Path, out var previous))
+            {
+                _lastTransformStates[target.Path] = current;
                 continue;
             }
 
             if (!current.HasMeaningfulChangeFrom(previous))
                 continue;
 
-            _lastTransformStates[pair.Key] = current;
+            _lastTransformStates[target.Path] = current;
             MelonLogger.Msg(
-                $"[FCS ElevationLinkProbe] transform path={pair.Key} " +
-                $"active={previous.Active}->{current.Active} " +
+                $"[FCS ElevationLinkProbe] TARGET CHANGE path={target.Path} " +
+                $"active={previous.ActiveSelf}->{current.ActiveSelf} " +
                 $"pos={Format(previous.Position)}->{Format(current.Position)} " +
-                $"rot={Format(previous.EulerAngles)}->{Format(current.EulerAngles)} " +
-                $"scale={Format(previous.Scale)}->{Format(current.Scale)}");
+                $"rot={Format(previous.EulerAngles)}->{Format(current.EulerAngles)}");
         }
     }
 
-    private static string Format(Vector3 value) => $"({value.x:F3},{value.y:F3},{value.z:F3})";
+    private static string ReadFieldValue(
+        Component component,
+        IntPtr field,
+        IntPtr fieldType,
+        string typeName,
+        bool isEnum)
+    {
+        try
+        {
+            var componentPtr = IL2CPP.Il2CppObjectBaseToPtr(component);
+            if (componentPtr == IntPtr.Zero)
+                return "<null-component>";
+
+            var boxed = IL2CPP.il2cpp_field_get_value_object(field, componentPtr);
+            if (boxed == IntPtr.Zero)
+                return "null";
+
+            if (string.Equals(typeName, "System.String", StringComparison.Ordinal))
+            {
+                var text = IL2CPP.Il2CppStringToManaged(boxed);
+                return text == null ? "null" : $"\"{NormalizeInline(text)}\"";
+            }
+
+            var data = IL2CPP.il2cpp_object_unbox(boxed);
+            if (data == IntPtr.Zero)
+                return "<unbox-null>";
+
+            var scalarType = typeName;
+            if (isEnum)
+            {
+                var enumClass = IL2CPP.il2cpp_class_from_il2cpp_type(fieldType);
+                var baseType = enumClass == IntPtr.Zero ? IntPtr.Zero : IL2CPP.il2cpp_class_enum_basetype(enumClass);
+                scalarType = baseType == IntPtr.Zero
+                    ? "System.Int32"
+                    : IL2CPP.il2cpp_type_get_name_(baseType) ?? "System.Int32";
+            }
+
+            var scalar = ReadScalar(data, scalarType);
+            return isEnum ? $"{typeName}({scalar})" : scalar;
+        }
+        catch (Exception ex)
+        {
+            return $"<read-failed:{ex.GetType().Name}>";
+        }
+    }
+
+    private static string ReadScalar(IntPtr data, string typeName)
+    {
+        return typeName switch
+        {
+            "System.Boolean" => (Marshal.ReadByte(data) != 0).ToString(),
+            "System.SByte" => unchecked((sbyte)Marshal.ReadByte(data)).ToString(CultureInfo.InvariantCulture),
+            "System.Byte" => Marshal.ReadByte(data).ToString(CultureInfo.InvariantCulture),
+            "System.Int16" => Marshal.ReadInt16(data).ToString(CultureInfo.InvariantCulture),
+            "System.UInt16" => unchecked((ushort)Marshal.ReadInt16(data)).ToString(CultureInfo.InvariantCulture),
+            "System.Int32" => Marshal.ReadInt32(data).ToString(CultureInfo.InvariantCulture),
+            "System.UInt32" => unchecked((uint)Marshal.ReadInt32(data)).ToString(CultureInfo.InvariantCulture),
+            "System.Int64" => Marshal.ReadInt64(data).ToString(CultureInfo.InvariantCulture),
+            "System.UInt64" => unchecked((ulong)Marshal.ReadInt64(data)).ToString(CultureInfo.InvariantCulture),
+            "System.Single" => BitConverter.Int32BitsToSingle(Marshal.ReadInt32(data)).ToString("R", CultureInfo.InvariantCulture),
+            "System.Double" => BitConverter.Int64BitsToDouble(Marshal.ReadInt64(data)).ToString("R", CultureInfo.InvariantCulture),
+            "System.Char" => ((char)unchecked((ushort)Marshal.ReadInt16(data))).ToString(),
+            _ => "<unsupported-scalar>",
+        };
+    }
+
+    private static bool IsReadablePrimitive(string typeName, bool isEnum)
+    {
+        if (isEnum)
+            return true;
+
+        return typeName is
+            "System.Boolean" or
+            "System.SByte" or
+            "System.Byte" or
+            "System.Int16" or
+            "System.UInt16" or
+            "System.Int32" or
+            "System.UInt32" or
+            "System.Int64" or
+            "System.UInt64" or
+            "System.Single" or
+            "System.Double" or
+            "System.Char" or
+            "System.String";
+    }
+
+    private static bool IsEnum(IntPtr fieldType)
+    {
+        if (fieldType == IntPtr.Zero)
+            return false;
+
+        try
+        {
+            var klass = IL2CPP.il2cpp_class_from_il2cpp_type(fieldType);
+            return klass != IntPtr.Zero && IL2CPP.il2cpp_class_is_enum(klass);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool ShouldWatchChanges(string fieldName, string typeName, bool isEnum)
+    {
+        if (isEnum || string.Equals(typeName, "System.Boolean", StringComparison.Ordinal))
+            return true;
+
+        return NameLooksStateRelevant(fieldName);
+    }
+
+    private static bool NameLooksStateRelevant(string value)
+    {
+        return ContainsAny(value,
+            "link", "solo", "lock", "state", "mode", "active", "enable", "value",
+            "target", "current", "toggle", "press", "interact", "coupl", "sync", "associate");
+    }
+
+    private static bool NameLooksActionRelevant(string value)
+    {
+        return ContainsAny(value,
+            "link", "solo", "lock", "toggle", "press", "click", "interact", "coupl", "sync", "associate");
+    }
+
+    private static bool IsFrameworkClass(string classNamespace, string fullClassName)
+    {
+        return classNamespace.StartsWith("UnityEngine", StringComparison.Ordinal)
+               || classNamespace.StartsWith("System", StringComparison.Ordinal)
+               || classNamespace.StartsWith("Il2CppSystem", StringComparison.Ordinal)
+               || classNamespace.StartsWith("TMPro", StringComparison.Ordinal)
+               || classNamespace.StartsWith("FMOD", StringComparison.Ordinal)
+               || fullClassName.StartsWith("UnityEngine.", StringComparison.Ordinal)
+               || fullClassName.StartsWith("System.", StringComparison.Ordinal);
+    }
+
+    private static string FullClassName(IntPtr klass)
+    {
+        var className = IL2CPP.il2cpp_class_get_name_(klass) ?? "?";
+        var classNamespace = IL2CPP.il2cpp_class_get_namespace_(klass) ?? "";
+        return string.IsNullOrEmpty(classNamespace) ? className : classNamespace + "." + className;
+    }
+
+    private static string BuildFieldKey(string path, int componentIndex, string className, string fieldName) =>
+        $"{path}|{componentIndex}|{className}|{fieldName}";
+
+    private static string NormalizeInline(string value) =>
+        value.Replace("\r", "\\r").Replace("\n", "\\n");
+
+    private static string Format(Vector3 value) =>
+        $"({value.x:F3},{value.y:F3},{value.z:F3})";
 
     private static bool ContainsAny(string value, params string[] needles)
     {
+        if (string.IsNullOrEmpty(value))
+            return false;
+
         foreach (var needle in needles)
         {
             if (value.Contains(needle, StringComparison.OrdinalIgnoreCase))
@@ -266,54 +546,37 @@ internal sealed class ElevationLinkProbe
         return false;
     }
 
-    private readonly record struct ElevationState(
-        bool DriveFromController,
-        float LeftSlider,
-        float LeftCurrent,
-        float LeftDesired,
-        float LeftVelocity,
-        float RightSlider,
-        float RightCurrent,
-        float RightDesired,
-        float RightVelocity)
-    {
-        public bool HasMeaningfulChangeFrom(ElevationState previous)
-        {
-            return DriveFromController != previous.DriveFromController
-                   || Changed(LeftSlider, previous.LeftSlider)
-                   || Changed(LeftCurrent, previous.LeftCurrent)
-                   || Changed(LeftDesired, previous.LeftDesired)
-                   || Changed(LeftVelocity, previous.LeftVelocity)
-                   || Changed(RightSlider, previous.RightSlider)
-                   || Changed(RightCurrent, previous.RightCurrent)
-                   || Changed(RightDesired, previous.RightDesired)
-                   || Changed(RightVelocity, previous.RightVelocity);
-        }
+    private sealed record ProbeTarget(string Path, Transform Transform);
 
-        private static bool Changed(float value, float previous) =>
-            Mathf.Abs(value - previous) >= ElevationChangeTolerance;
-    }
+    private sealed record ObservedField(
+        string Key,
+        string Path,
+        int ComponentIndex,
+        string ClassName,
+        string FieldName,
+        string TypeName,
+        Component Component,
+        IntPtr Field,
+        IntPtr FieldType,
+        bool IsEnum);
 
     private readonly record struct TransformState(
-        bool Active,
+        bool ActiveSelf,
         Vector3 Position,
-        Vector3 EulerAngles,
-        Vector3 Scale)
+        Vector3 EulerAngles)
     {
         public static TransformState Read(Transform transform) => new(
             transform.gameObject.activeSelf,
             transform.localPosition,
-            transform.localEulerAngles,
-            transform.localScale);
+            transform.localEulerAngles);
 
         public bool HasMeaningfulChangeFrom(TransformState previous)
         {
-            return Active != previous.Active
+            return ActiveSelf != previous.ActiveSelf
                    || Vector3.Distance(Position, previous.Position) >= TransformPositionTolerance
                    || Mathf.Abs(Mathf.DeltaAngle(EulerAngles.x, previous.EulerAngles.x)) >= TransformAngleTolerance
                    || Mathf.Abs(Mathf.DeltaAngle(EulerAngles.y, previous.EulerAngles.y)) >= TransformAngleTolerance
-                   || Mathf.Abs(Mathf.DeltaAngle(EulerAngles.z, previous.EulerAngles.z)) >= TransformAngleTolerance
-                   || Vector3.Distance(Scale, previous.Scale) >= TransformScaleTolerance;
+                   || Mathf.Abs(Mathf.DeltaAngle(EulerAngles.z, previous.EulerAngles.z)) >= TransformAngleTolerance;
         }
     }
 }
