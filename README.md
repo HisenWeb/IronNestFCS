@@ -102,8 +102,9 @@ A normal mission flows through:
 ```text
 read target
 → read current physical state
-→ solve ballistics
-→ choose a gun
+→ build Task × Gun eligibility
+→ match the task to a gun
+→ materialize the selected ballistic solution
 → buy missing ammunition if needed
 → load shell + powder
 → set elevation
@@ -169,7 +170,51 @@ Temporary probes used to verify TTI timing, mechanical-dial behavior, and charge
 
 ## Smart architecture
 
-Smart keeps the stable Host and persistent physical loading separate from the hot-reloadable TaskSystem/Logic layer. F9 can therefore discard and rebuild mission planning while a physical load already accepted by the Host continues to exist.
+Smart separates the persistent physical Host from the hot-reloadable TaskSystem / Logic layer. Planning first builds side-effect-free Task × Gun eligibility, matches legal assignments across both guns, and only then drives the game's ballistic calculator for the selected assignment. Execution order is a plan; observed physical state and the gun that actually fires remain authoritative.
+
+```mermaid
+flowchart TB
+    PLAYER["Player / Tactical Map<br/>targets · ammunition · T1-T4"]
+
+    subgraph HOST["Stable Host · survives F9"]
+        LOADING["PersistentLoadingSystem<br/>accepted physical loading"]
+    end
+
+    subgraph LOGIC["Reloadable TaskSystem / Logic"]
+        DISPATCH["TaskDispatcher<br/>Pending · wakeups · admission"]
+        PLANNER["FirePlanner<br/>snapshot · eligibility"]
+        MATCHER["TaskGunMatcher<br/>stateless matching"]
+        MATERIALIZE["Selected-only materialization<br/>game ballistic calculator"]
+        PLAN["FirePlan"]
+        PRIORITY["FirePriorityCoordinator<br/>one-shot order"]
+        EXECUTOR["FirePlanExecutor<br/>left/right slots · current/next"]
+        CONTROLS["SharedConsoleCoordinator / TriggerConsole<br/>Review · Arm · Fire"]
+    end
+
+    subgraph REALITY["Game physical reality · authoritative"]
+        GUNS["Chamber / reload mechanism / guns"]
+        TURRET["Physical turret"]
+        CONSOLES["Physical consoles"]
+    end
+
+    PLAYER --> DISPATCH
+    DISPATCH --> PLANNER
+    PLANNER -->|side-effect-free edges| MATCHER
+    MATCHER -->|selected Task×Gun| MATERIALIZE
+    MATERIALIZE --> PLAN
+    PLAN --> EXECUTOR
+    EXECUTOR <--> PRIORITY
+    EXECUTOR --> CONTROLS
+
+    EXECUTOR -->|accepted load work| LOADING
+    LOADING --> GUNS
+    GUNS -->|physical state / observed shot| EXECUTOR
+    EXECUTOR --> TURRET
+    CONTROLS --> CONSOLES
+    EXECUTOR -. freed slot / recovery retry .-> DISPATCH
+```
+
+This diagram is intentionally high-level. The maintained architecture source is [docs/context/PROJECT_CONTEXT.md](docs/context/PROJECT_CONTEXT.md), with detailed planning and execution notes in [ARCHITECTURE_PLANNING.md](docs/context/ARCHITECTURE_PLANNING.md) and [ARCHITECTURE_EXECUTION.md](docs/context/ARCHITECTURE_EXECUTION.md).
 
 The project continues from [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS). Smart intentionally keeps its additional automation focused on operating the existing fire-control workflow rather than choosing tactical targets for the player.
 
@@ -181,7 +226,7 @@ Useful scripts:
 - `tools/Build-ReleasePackages.ps1` — build the single universal release ZIP;
 - `tools/Release.ps1` — version, build, tag and publish a release from `master`.
 
-Development notes are available in [docs/FSC_MODULARIZATION_PLAN.md](docs/FSC_MODULARIZATION_PLAN.md).
+Detailed project context and current architecture are maintained under [docs/context/](docs/context/). Empirical Time-To-Impact measurements are documented in [docs/research/TTI_ESTIMATION.md](docs/research/TTI_ESTIMATION.md).
 
 ## Credits
 
