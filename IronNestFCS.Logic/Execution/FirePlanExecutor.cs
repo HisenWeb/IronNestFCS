@@ -311,16 +311,16 @@ internal sealed class FirePlanExecutor
         MelonLogger.Msg($"[FCS Plan] {plan.Label}: local ready (LoadedReady + elevation)");
     }
 
-    private bool DispatchReviewProtocolAsync()
+    private bool DispatchReviewProtocolAsync(int executionBatchId)
     {
-        var operations = _fcs.TriggerConsole.BeginReviewAsync();
+        var operations = _fcs.TriggerConsole.BeginReviewAsync(executionBatchId);
         if (operations.Count == 0)
             return false;
 
         foreach (var operation in operations)
             _fcs.TrackCoroutine(operation);
 
-        MelonLogger.Msg("[FCS] TriggerConsole: dispatched independent asynchronous review-button operations");
+        MelonLogger.Msg($"[FCS] TriggerConsole: dispatched async review buttons for batch {executionBatchId}");
         return true;
     }
 
@@ -377,7 +377,7 @@ internal sealed class FirePlanExecutor
                 rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
 
                 yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);
-                if (DispatchReviewProtocolAsync())
+                if (DispatchReviewProtocolAsync(plan.ExecutionBatchId))
                 {
                     // Dispatch and the 1.2 s visual lead start at the same point. Review buttons continue
                     // independently; their completion never gates arming or physical firing.
@@ -701,13 +701,17 @@ internal sealed class FirePlanExecutor
         if (ReferenceEquals(_next, plan))
             _next = null;
 
-        // Compared is the existing committed execution-stack label. When the LAST compared plan
-        // leaves, only the independent review-button module is reset. Arming remains owned by the physical
-        // firing path and is intentionally not coupled to the review-button lifecycle.
-        if (plan.Compared && !HasRemainingComparedPlan())
+        // Compared marks committed execution membership; ExecutionBatchId identifies the exact stack. End the
+        // review batch synchronously when its LAST plan leaves, then queue physical AllOff. A newer batch id can
+        // supersede that queued AllOff without being touched by stale work.
+        var executionBatchId = plan.ExecutionBatchId;
+        if (plan.Compared
+            && executionBatchId > 0
+            && !HasRemainingExecutionBatch(executionBatchId)
+            && _fcs.TriggerConsole.EndReviewBatch(executionBatchId))
         {
-            MelonLogger.Msg("[FCS Plan] committed stack drained; scheduling review buttons all-off");
-            _fcs.TrackCoroutine(_fcs.SharedResources.ResetReviewControlsAfterCommittedStack());
+            MelonLogger.Msg($"[FCS Plan] batch {executionBatchId} drained; scheduling review buttons all-off");
+            _fcs.TrackCoroutine(_fcs.SharedResources.ResetReviewControlsAfterCommittedStack(executionBatchId));
         }
 
         if (!notify)
@@ -717,10 +721,16 @@ internal sealed class FirePlanExecutor
         EvaluateScheduling();
     }
 
-    private bool HasRemainingComparedPlan()
+    private bool HasRemainingExecutionBatch(int executionBatchId)
     {
-        return (_leftPlan != null && _leftPlan.Compared && !_leftPlan.CompletionHandled)
-               || (_rightPlan != null && _rightPlan.Compared && !_rightPlan.CompletionHandled);
+        return (_leftPlan != null
+                && _leftPlan.Compared
+                && _leftPlan.ExecutionBatchId == executionBatchId
+                && !_leftPlan.CompletionHandled)
+               || (_rightPlan != null
+                   && _rightPlan.Compared
+                   && _rightPlan.ExecutionBatchId == executionBatchId
+                   && !_rightPlan.CompletionHandled);
     }
 
     private bool IsActive(FirePlan plan)

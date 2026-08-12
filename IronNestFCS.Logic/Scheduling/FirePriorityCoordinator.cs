@@ -12,6 +12,7 @@ namespace IronNestFCS.Logic.Scheduling;
 internal sealed class FirePriorityCoordinator
 {
     private int _generation;
+    private int _nextExecutionBatchId;
     private string _statusText = FcsLocalization.T("射击顺序：未提交", "Firing order: not committed");
     private string _leftDetail = "";
     private string _rightDetail = "";
@@ -20,6 +21,8 @@ internal sealed class FirePriorityCoordinator
     public string StatusText => _statusText;
     public string LeftDetail => _leftDetail;
     public string RightDetail => _rightDetail;
+
+    private int NextExecutionBatchId() => ++_nextExecutionBatchId;
 
     public void Reset()
     {
@@ -77,18 +80,24 @@ internal sealed class FirePriorityCoordinator
             }
         }
 
+        var executionBatchId = NextExecutionBatchId();
+        a.ExecutionBatchId = executionBatchId;
+        b.ExecutionBatchId = executionBatchId;
         a.Compared = true;
         b.Compared = true;
         UpdateDetails(a, b);
         _statusText = FcsLocalization.T(
             $"射击顺序：T{first.Task.targetId} → T{second.Task.targetId}（一次性比对）",
             $"Firing order: T{first.Task.targetId} → T{second.Task.targetId} (compared once)");
-        MelonLogger.Msg($"[FCS Order] paired once: {first.Label} first, {second.Label} second; {reason}");
+        MelonLogger.Msg($"[FCS Order] batch {executionBatchId} paired once: {first.Label} first, {second.Label} second; {reason}");
         return first;
     }
 
     public void CommitSingle(FirePlan plan, string reason)
     {
+        if (plan.ExecutionBatchId == 0)
+            plan.ExecutionBatchId = NextExecutionBatchId();
+
         if (!plan.Compared)
             plan.Compared = true;
 
@@ -100,7 +109,7 @@ internal sealed class FirePriorityCoordinator
         _statusText = FcsLocalization.T(
             $"射击顺序：T{plan.Task.targetId} 单独执行（{uiReason}）",
             $"Firing order: T{plan.Task.targetId} single commit ({uiReason})");
-        MelonLogger.Msg($"[FCS Order] single committed: {plan.Label}; {FcsLocalization.LogReason(reason)}");
+        MelonLogger.Msg($"[FCS Order] batch {plan.ExecutionBatchId} single committed: {plan.Label}; {FcsLocalization.LogReason(reason)}");
     }
 
     public void PromoteCommitted(FirePlan plan)
@@ -108,7 +117,7 @@ internal sealed class FirePriorityCoordinator
         _statusText = FcsLocalization.T(
             $"射击顺序：T{plan.Task.targetId} 按既定顺序执行",
             $"Firing order: T{plan.Task.targetId} promoted in committed order");
-        MelonLogger.Msg($"[FCS Order] promoting previously compared plan without re-compare: {plan.Label}");
+        MelonLogger.Msg($"[FCS Order] promoting batch {plan.ExecutionBatchId} plan without re-compare: {plan.Label}");
     }
 
     public void MarkWaitingForPair(FirePlan plan)

@@ -39,7 +39,7 @@ public class TriggerConsole {
     // that first call is the hot-reload reset hook. Later calls belong to normal tasks and only reconcile ON state.
     private bool _resetPendingAfterBind;
     private bool _reviewBatchActive;
-    private int _reviewOperationGeneration;
+    private int _reviewBatchId;
 
     public bool TryBind() {
         var consoleObject = GameObject.Find(".Review Console Parent");
@@ -90,7 +90,7 @@ public class TriggerConsole {
         if (ok) {
             _resetPendingAfterBind = true;
             _reviewBatchActive = false;
-            _reviewOperationGeneration++;
+            _reviewBatchId = 0;
             LogPhysicalStates("bind");
         }
         return ok;
@@ -274,16 +274,22 @@ public class TriggerConsole {
     }
 
     /// <summary>
-    /// Start one independent asynchronous ON operation for each review button. The batch remains active until
-    /// ReviewAllOff is called; callers do not pass Plan/current/next state into these operations.
+    /// Start one independent asynchronous ON operation for each review button in the committed execution batch.
+    /// The caller supplies the batch identity; this module never reads Plan/current/next state.
     /// </summary>
-    public IReadOnlyList<IEnumerator> BeginReviewAsync() {
-        if (_reviewBatchActive)
+    public IReadOnlyList<IEnumerator> BeginReviewAsync(int executionBatchId) {
+        if (executionBatchId <= 0) {
+            MelonLogger.Error($"[FCS] TriggerConsole: invalid review batch id {executionBatchId}");
+            return Array.Empty<IEnumerator>();
+        }
+
+        // Promotion inside the same committed stack must not re-dispatch review controls or re-run the 1.2s lead.
+        if (_reviewBatchActive && _reviewBatchId == executionBatchId)
             return Array.Empty<IEnumerator>();
 
+        _reviewBatchId = executionBatchId;
         _reviewBatchActive = true;
-        var generation = ++_reviewOperationGeneration;
-        Func<bool> stillCurrent = () => _reviewBatchActive && generation == _reviewOperationGeneration;
+        Func<bool> stillCurrent = () => _reviewBatchActive && _reviewBatchId == executionBatchId;
 
         return new IEnumerator[] {
             EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck", stillCurrent),
@@ -295,30 +301,56 @@ public class TriggerConsole {
     }
 
     /// <summary>
-    /// End the current review-button batch and drive only the five review controls OFF. This is the normal
-    /// execution-stack teardown path and intentionally does not touch either arming lever.
+    /// Synchronously close one review batch before its asynchronous physical AllOff is queued. This immediately
+    /// invalidates unfinished ON operations and lets a following committed stack start with its own batch id.
     /// </summary>
-    public IEnumerator ReviewAllOff(string reason) {
-        _reviewBatchActive = false;
-        _reviewOperationGeneration++;
+    public bool EndReviewBatch(int executionBatchId) {
+        if (!_reviewBatchActive || _reviewBatchId != executionBatchId)
+            return false;
 
-        LogPhysicalStates($"before {reason} review all-off");
+        _reviewBatchActive = false;
+        return true;
+    }
+
+    /// <summary>
+    /// Drive only the five review controls OFF for the ended batch. If a newer batch starts before this coroutine
+    /// acquires the physical trigger-console lane, the old AllOff becomes stale and exits without touching it.
+    /// </summary>
+    public IEnumerator ReviewAllOff(int executionBatchId, string reason) {
+        Func<bool> stillEndedBatch = () => !_reviewBatchActive && _reviewBatchId == executionBatchId;
+        if (!stillEndedBatch())
+            yield break;
+
+        LogPhysicalStates($"before {reason} review all-off batch {executionBatchId}");
+        yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire", stillEndedBatch);
+        yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck", stillEndedBatch);
+        yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck", stillEndedBatch);
+        yield return EnsureReviewState(_bulletCheck, _bulletPose, false, "BulletCheck", stillEndedBatch);
+        yield return EnsureReviewState(_taskCheck, _taskPose, false, "TaskCheck", stillEndedBatch);
+        if (stillEndedBatch())
+            LogPhysicalStates($"after {reason} review all-off batch {executionBatchId}");
+    }
+
+    private IEnumerator ForceReviewAllOff(string reason) {
+        // F9/startup destroys the whole TaskSystem execution stack, so no old batch remains valid afterward.
+        _reviewBatchActive = false;
+        _reviewBatchId = 0;
+
         yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire");
         yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck");
         yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck");
         yield return EnsureReviewState(_bulletCheck, _bulletPose, false, "BulletCheck");
         yield return EnsureReviewState(_taskCheck, _taskPose, false, "TaskCheck");
-        LogPhysicalStates($"after {reason} review all-off");
     }
 
     public IEnumerator ResetPhysicalFireControls(string reason) {
         LogPhysicalStates($"before {reason} full reset");
 
         // F9/startup clears the whole TaskSystem execution stack, so it resets both independent physical groups.
-        // Normal execution-stack teardown calls ReviewAllOff and never reaches these arming levers.
+        // Normal execution-stack teardown uses the batch-aware ReviewAllOff path and never touches arming levers.
         yield return EnsureArmState(_armLeft, _armLeftPose, false, "Left");
         yield return EnsureArmState(_armRight, _armRightPose, false, "Right");
-        yield return ReviewAllOff(reason);
+        yield return ForceReviewAllOff(reason);
 
         LogPhysicalStates($"after {reason} full reset");
     }

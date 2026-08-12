@@ -44,14 +44,14 @@ internal sealed class SharedConsoleCoordinator {
     }
 
     /// <summary>
-    /// A normal committed FirePlan stack turns only the five independent review buttons OFF after its last
-    /// Compared plan leaves the executor. Arming remains owned by the physical firing path.
+    /// Serialize physical AllOff for one ended execution batch. TriggerConsole rechecks that exact batch id after
+    /// the lock is acquired, so a newer committed stack cannot be affected by stale teardown work.
     /// </summary>
-    public IEnumerator ResetReviewControlsAfterCommittedStack() {
+    public IEnumerator ResetReviewControlsAfterCommittedStack(int executionBatchId) {
         yield return FcsRuntimeClock.WaitUntilFocused();
         yield return Trigger.Acquire();
         try {
-            yield return _fcs.TriggerConsole.ReviewAllOff("committed stack drained");
+            yield return _fcs.TriggerConsole.ReviewAllOff(executionBatchId, "committed stack drained");
         }
         finally {
             Trigger.Release();
