@@ -1,0 +1,86 @@
+name: Run compared stack console patch
+
+on:
+  push:
+    branches:
+      - feature/physical-fire-settlement
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/physical-fire-settlement
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Extract and run source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          src = Path('.github/workflows/apply-compared-stack-console.yml').read_text(encoding='utf-8')
+          marker = '      - name: Apply compared-stack console lifecycle\n        shell: python\n        run: |\n'
+          start = src.index(marker) + len(marker)
+          end = src.index('\n      - name: Parse all C# sources with Roslyn', start)
+          block = src[start:end]
+          lines = []
+          for line in block.splitlines():
+              if line.startswith('          '):
+                  line = line[10:]
+              lines.append(line)
+          Path('/tmp/apply_patch.py').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+          python3 /tmp/apply_patch.py
+
+      - name: Parse all C# sources with Roslyn
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/roslyncheck
+          mkdir -p /tmp/roslyncheck
+          cd /tmp/roslyncheck
+          dotnet new console --framework net8.0 --force >/dev/null
+          dotnet add package Microsoft.CodeAnalysis.CSharp --version 4.11.0 >/dev/null
+          cat > Program.cs <<'CS'
+          using Microsoft.CodeAnalysis;
+          using Microsoft.CodeAnalysis.CSharp;
+
+          var root = Environment.GetEnvironmentVariable("REPO_ROOT")!;
+          var errors = new List<string>();
+          foreach (var file in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
+          {
+              var text = File.ReadAllText(file);
+              var tree = CSharpSyntaxTree.ParseText(text, new CSharpParseOptions(LanguageVersion.Latest), file);
+              foreach (var diagnostic in tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error))
+                  errors.Add(diagnostic.ToString());
+          }
+          if (errors.Count > 0)
+          {
+              foreach (var error in errors) Console.Error.WriteLine(error);
+              Environment.Exit(1);
+          }
+          Console.WriteLine("Roslyn syntax parse passed for all C# sources.");
+          CS
+          REPO_ROOT="$GITHUB_WORKSPACE" dotnet run --no-restore
+
+      - name: Commit production change and clean temporary workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "HisenWeb"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/apply-compared-stack-console.yml .github/workflows/run-compared-stack-patch.yml
+          git add IronNestFCS.Logic/Execution/FirePlanExecutor.cs \
+                  IronNestFCS.Logic/FCS/TriggerConsole.cs \
+                  IronNestFCS.Logic/FcsSceneInteractor.cs \
+                  IronNestFCS.Logic/Infrastructure/SharedConsoleCoordinator.cs
+          git commit -m "fix: bind trigger console lifecycle to compared plans"
+          git push origin HEAD:feature/physical-fire-settlement
