@@ -1,42 +1,48 @@
+using IronNestFCS.Abstractions;
 using IronNestFCS.Logic.FCS;
 
 namespace IronNestFCS.Logic.Scheduling;
 
 /// <summary>
-/// Stateless task-to-gun matcher. Eligibility is decided by FirePlanner; this class only chooses the
-/// best non-conflicting assignment from already-eligible Task x Gun candidates.
+/// Stateless task-to-gun matcher. FirePlanner supplies only side-effect-free eligibility edges; this class
+/// chooses the best non-conflicting assignment and never touches the physical ballistic calculator.
 /// </summary>
 internal static class TaskGunMatcher
 {
-    public static IReadOnlyList<TaskGunAssignment> Match(IReadOnlyList<TaskPlanningResult> tasks)
+    public static IReadOnlyList<TaskGunAssignment> Match(
+        IReadOnlyList<TaskPlanningResult> tasks,
+        ISet<(ArtilleryTask Task, LeftRight Side)>? excludedEdges = null)
     {
         List<TaskGunAssignment>? best = null;
 
         foreach (var task in tasks)
         {
-            if (task.LeftCandidate != null)
-                Consider(new List<TaskGunAssignment> { new(task, task.LeftCandidate) }, ref best);
-            if (task.RightCandidate != null)
-                Consider(new List<TaskGunAssignment> { new(task, task.RightCandidate) }, ref best);
+            if (IsAllowed(task, task.LeftCandidate, excludedEdges))
+                Consider(new List<TaskGunAssignment> { new(task, task.LeftCandidate!) }, ref best);
+            if (IsAllowed(task, task.RightCandidate, excludedEdges))
+                Consider(new List<TaskGunAssignment> { new(task, task.RightCandidate!) }, ref best);
         }
 
         // Two guns are the architectural maximum. Enumerate only the two possible side slots while
         // requiring distinct tasks; eligibility has already removed impossible Task x Gun edges.
         foreach (var leftTask in tasks)
         {
-            if (leftTask.LeftCandidate == null)
+            if (!IsAllowed(leftTask, leftTask.LeftCandidate, excludedEdges))
                 continue;
 
             foreach (var rightTask in tasks)
             {
-                if (ReferenceEquals(leftTask.Task, rightTask.Task) || rightTask.RightCandidate == null)
+                if (ReferenceEquals(leftTask.Task, rightTask.Task)
+                    || !IsAllowed(rightTask, rightTask.RightCandidate, excludedEdges))
+                {
                     continue;
+                }
 
                 Consider(
                     new List<TaskGunAssignment>
                     {
-                        new(leftTask, leftTask.LeftCandidate),
-                        new(rightTask, rightTask.RightCandidate),
+                        new(leftTask, leftTask.LeftCandidate!),
+                        new(rightTask, rightTask.RightCandidate!),
                     },
                     ref best);
             }
@@ -45,6 +51,15 @@ internal static class TaskGunMatcher
         if (best != null)
             return best;
         return Array.Empty<TaskGunAssignment>();
+    }
+
+    private static bool IsAllowed(
+        TaskPlanningResult planning,
+        TaskGunCandidate? candidate,
+        ISet<(ArtilleryTask Task, LeftRight Side)>? excludedEdges)
+    {
+        return candidate != null
+               && (excludedEdges == null || !excludedEdges.Contains((planning.Task, candidate.Side)));
     }
 
     private static void Consider(List<TaskGunAssignment> candidate, ref List<TaskGunAssignment>? best)
@@ -60,8 +75,8 @@ internal static class TaskGunMatcher
         if (a.Count != b.Count)
             return b.Count.CompareTo(a.Count);
 
-        // Charge fit is deliberately ahead of ETA/alignment. A higher charge that is not required by the
-        // target is a scarcer range resource and should be preserved when another complete assignment can.
+        // Charge fit stays ahead of soft timing costs: preserve scarce range capability whenever the same
+        // number of tasks can be covered with a tighter charge-to-range fit.
         var aMaxChargeExcess = a.Max(ChargeExcess);
         var bMaxChargeExcess = b.Max(ChargeExcess);
         if (aMaxChargeExcess != bMaxChargeExcess)
@@ -72,6 +87,8 @@ internal static class TaskGunMatcher
         if (aTotalChargeExcess != bTotalChargeExcess)
             return aTotalChargeExcess.CompareTo(bTotalChargeExcess);
 
+        // Pre-match ETA contains loading + shared azimuth only. Elevation is deliberately absent because
+        // obtaining it would invoke the physical calculator and create a sticker before the match is final.
         var aAllEtaKnown = a.All(x => x.Candidate.EtaKnown);
         var bAllEtaKnown = b.All(x => x.Candidate.EtaKnown);
         if (aAllEtaKnown && bAllEtaKnown)
@@ -87,11 +104,10 @@ internal static class TaskGunMatcher
                 return aTotalReady.CompareTo(bTotalReady);
         }
 
-        // Keep the existing planner philosophy for unknown ETA: use current alignment as the fallback cost.
-        var aAlignment = a.Sum(x => x.Candidate.AlignmentScore);
-        var bAlignment = b.Sum(x => x.Candidate.AlignmentScore);
-        if (Math.Abs(aAlignment - bAlignment) > FireReadyEstimator.AlignmentTieTolerance)
-            return aAlignment.CompareTo(bAlignment);
+        var aAzimuth = a.Sum(x => x.Candidate.AzimuthScore);
+        var bAzimuth = b.Sum(x => x.Candidate.AzimuthScore);
+        if (Math.Abs(aAzimuth - bAzimuth) > FireReadyEstimator.AlignmentTieTolerance)
+            return aAzimuth.CompareTo(bAzimuth);
 
         return 0;
     }
@@ -106,9 +122,9 @@ internal static class TaskGunMatcher
 internal sealed class TaskGunAssignment
 {
     public TaskPlanningResult Planning { get; }
-    public FirePlanCandidate Candidate { get; }
+    public TaskGunCandidate Candidate { get; }
 
-    public TaskGunAssignment(TaskPlanningResult planning, FirePlanCandidate candidate)
+    public TaskGunAssignment(TaskPlanningResult planning, TaskGunCandidate candidate)
     {
         Planning = planning;
         Candidate = candidate;

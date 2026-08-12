@@ -10,13 +10,15 @@ using MelonLoader;
 namespace IronNestFCS.Logic.Scheduling;
 
 /// <summary>
-/// Owns task queue/history and serial admission into planning rounds. A planning round now evaluates all
-/// currently pending tasks against one gun/loading snapshot, then admits the best non-conflicting match.
+/// Owns task queue/history and serial admission into planning rounds. Each round first builds a side-effect-free
+/// eligibility matrix, then materializes only the Task x Gun edges selected by TaskGunMatcher before admission.
 /// </summary>
 internal sealed class TaskDispatcher
 {
     private const int RecentTaskLimit = 20;
     private const float PhysicalRetryPollSeconds = 0.25f;
+    private const float MatchCoalesceWindowSeconds = 1.0f;
+    private const float MatchCoalescePollSeconds = 0.05f;
     private const int LeftPhysicalRetryBit = 1;
     private const int RightPhysicalRetryBit = 2;
 
@@ -77,7 +79,6 @@ internal sealed class TaskDispatcher
     public void TryDispatch()
     {
         // Planning is serialized, but a trigger that arrives while a round is running must not be lost.
-        // Remember only the edge; the current round will also pick up newly queued tasks while it is scanning.
         if (_planning)
         {
             _dispatchRequested = true;
@@ -95,19 +96,24 @@ internal sealed class TaskDispatcher
     }
 
     /// <summary>
-    /// One match round captures gun/loading state once, evaluates every pending task against that same snapshot,
-    /// then chooses a maximum-cardinality assignment. Charge fit is resolved before ETA/alignment soft costs.
+    /// One match round coalesces a manually adjacent second task when both gun slots are free, captures one
+    /// gun/loading snapshot, computes hard eligibility without game-console side effects, then materializes only
+    /// the selected assignments. No FirePlan is admitted until every assignment in the chosen set materializes.
     /// </summary>
     private IEnumerator PlanPendingTasks()
     {
+        yield return WaitForMatchCoalesceWindow();
+
+        // Any enqueue observed during the coalescing window is now represented in _taskQueue and will be scanned
+        // below. Clear only that consumed edge; a later enqueue during materialization will set it again.
+        _dispatchRequested = false;
+
         var snapshot = _fcs.Planner.CaptureSnapshot();
         var attempted = new HashSet<ArtilleryTask>();
         var planningResults = new List<TaskPlanningResult>();
         var deferredPhysicalMask = 0;
         var admittedAny = false;
 
-        // Do not remove tasks while building the matrix. A task queued during this coroutine is naturally picked
-        // up by FindNextUnattempted and joins the same planning window if it arrives before the scan closes.
         while (true)
         {
             var task = FindNextUnattempted(attempted);
@@ -115,17 +121,7 @@ internal sealed class TaskDispatcher
                 break;
 
             attempted.Add(task);
-
-            TaskPlanningResult? result = null;
-            yield return _fcs.Planner.BuildCandidates(task, snapshot, value => result = value);
-            if (result == null)
-            {
-                task.progress = Progress.Pending;
-                task.failureReason = "";
-                MelonLogger.Warning($"[FCS Dispatch] T{task.targetId}: planner returned no candidate result");
-                continue;
-            }
-
+            var result = _fcs.Planner.BuildEligibility(task, snapshot);
             planningResults.Add(result);
 
             if (!result.HasCandidate)
@@ -142,47 +138,105 @@ internal sealed class TaskDispatcher
             }
         }
 
-        var decisionAt = FcsRuntimeClock.Now;
+        var matchAt = FcsRuntimeClock.Now;
         foreach (var result in planningResults)
-            result.FinalizeTiming(snapshot.SnapshotAt, decisionAt);
+            result.FinalizeTiming(snapshot.SnapshotAt, matchAt);
 
         LogEligibilityMatrix(planningResults);
 
-        var assignments = TaskGunMatcher.Match(planningResults);
-        var selectedTasks = new HashSet<ArtilleryTask>();
+        // Materialization can reveal a ballistic/elevation failure that cannot be known without invoking the game
+        // calculator. Exclude only that edge and rematch. Successful materializations are cached so a fallback
+        // rematch never creates a second sticker for the same Task x Gun edge.
+        var excludedEdges = new HashSet<(ArtilleryTask Task, LeftRight Side)>();
+        var materializationCache = new Dictionary<(ArtilleryTask Task, LeftRight Side), FirePlanCandidate>();
+        var materialized = new List<MaterializedAssignment>();
 
-        if (assignments.Count > 0)
+        while (true)
         {
+            var assignments = TaskGunMatcher.Match(planningResults, excludedEdges);
+            if (assignments.Count == 0)
+                break;
+
             MelonLogger.Msg(
                 $"[FCS Match] selected {assignments.Count} assignment(s): " +
                 string.Join(", ", assignments.Select(DescribeAssignment)));
-        }
 
-        foreach (var assignment in assignments)
-        {
-            var task = assignment.Planning.Task;
-            var plan = _fcs.Planner.CreatePlan(assignment.Planning, assignment.Candidate, decisionAt);
+            materialized.Clear();
+            var rematchRequired = false;
 
-            if (!_fcs.PlanExecutor.AddPlan(plan, out var addReason))
+            foreach (var assignment in assignments)
             {
-                task.progress = Progress.Pending;
-                task.pendingHint = PendingHint.None;
-                task.failureReason = "";
-                MelonLogger.Warning(
-                    $"[FCS Dispatch] T{task.targetId} matched FirePlan was not admitted and remains pending: {addReason}");
-                continue;
+                var key = (assignment.Planning.Task, assignment.Candidate.Side);
+                if (!materializationCache.TryGetValue(key, out var realized))
+                {
+                    FirePlanCandidate? resolved = null;
+                    var failureReason = "";
+                    yield return _fcs.Planner.MaterializeCandidate(
+                        assignment.Planning.Task,
+                        assignment.Candidate,
+                        snapshot,
+                        result => resolved = result,
+                        reason => failureReason = reason);
+
+                    if (resolved == null)
+                    {
+                        excludedEdges.Add(key);
+                        rematchRequired = true;
+                        MelonLogger.Warning(
+                            $"[FCS Match] materialization rejected T{assignment.Planning.Task.targetId}" +
+                            $"->{assignment.Candidate.Side} {assignment.Candidate.Shell.DisplayName()} " +
+                            $"C{assignment.Candidate.Charge}: {failureReason}; rematching remaining edges");
+                        break;
+                    }
+
+                    realized = resolved;
+                    materializationCache[key] = realized;
+                }
+
+                materialized.Add(new MaterializedAssignment(assignment, realized));
             }
 
-            if (!RemovePendingTask(task))
-                MelonLogger.Warning($"[FCS Dispatch] admitted T{task.targetId} was no longer present in pending queue");
-
-            selectedTasks.Add(task);
-            admittedAny = true;
-            MelonLogger.Msg($"[FCS Dispatch] admitted T{task.targetId}; pending={_taskQueue.Count}");
+            if (!rematchRequired)
+                break;
         }
 
-        // Every evaluated but unselected task remains pending. A valid candidate can lose only because the current
-        // free slots were consumed by a higher-quality complete match; that is not a failure and needs no hint.
+        var selectedTasks = new HashSet<ArtilleryTask>();
+
+        if (materialized.Count > 0)
+        {
+            // Use one common commit time for all successfully materialized plans. Fresh loading/elevation cannot
+            // consume time while the physical calculator is producing stickers; an already-running load can.
+            var commitAt = FcsRuntimeClock.Now;
+            foreach (var item in materialized)
+                item.Candidate.FinalizeTiming(snapshot.SnapshotAt, commitAt);
+
+            foreach (var item in materialized)
+            {
+                var assignment = item.Assignment;
+                var task = assignment.Planning.Task;
+                var plan = _fcs.Planner.CreatePlan(assignment.Planning, item.Candidate, commitAt);
+
+                if (!_fcs.PlanExecutor.AddPlan(plan, out var addReason))
+                {
+                    task.progress = Progress.Pending;
+                    task.pendingHint = PendingHint.None;
+                    task.failureReason = "";
+                    MelonLogger.Warning(
+                        $"[FCS Dispatch] T{task.targetId} matched FirePlan was not admitted and remains pending: {addReason}");
+                    continue;
+                }
+
+                if (!RemovePendingTask(task))
+                    MelonLogger.Warning($"[FCS Dispatch] admitted T{task.targetId} was no longer present in pending queue");
+
+                selectedTasks.Add(task);
+                admittedAny = true;
+                MelonLogger.Msg($"[FCS Dispatch] admitted T{task.targetId}; pending={_taskQueue.Count}");
+            }
+        }
+
+        // Every evaluated but unselected task remains pending. A valid pre-match candidate can lose because a
+        // higher-quality complete match consumed the free slots, or because a selected edge failed materialization.
         foreach (var result in planningResults)
         {
             if (selectedTasks.Contains(result.Task))
@@ -204,9 +258,8 @@ internal sealed class TaskDispatcher
         if (deferredPhysicalMask != 0 && _taskQueue.Count > 0)
             EnsurePhysicalRetryWait(deferredPhysicalMask);
 
-        // Consume one coalesced trigger that arrived during this planning round. TryDispatch() sets _planning
-        // synchronously before starting the next coroutine, so EvaluateScheduling() can still see a possible
-        // partner-producing round instead of prematurely single-committing an admitted plan.
+        // Consume one coalesced trigger that arrived after the eligibility scan had already closed. TryDispatch()
+        // sets _planning synchronously before the next coroutine starts, preserving scheduler pair waiting.
         if (_dispatchRequested)
         {
             _dispatchRequested = false;
@@ -214,6 +267,25 @@ internal sealed class TaskDispatcher
         }
 
         _fcs.PlanExecutor.EvaluateScheduling();
+    }
+
+    private IEnumerator WaitForMatchCoalesceWindow()
+    {
+        if (_taskQueue.Count != 1
+            || _fcs.PlanExecutor.GetPlan(LeftRight.Left) != null
+            || _fcs.PlanExecutor.GetPlan(LeftRight.Right) != null)
+        {
+            yield break;
+        }
+
+        var deadline = FcsRuntimeClock.Now + MatchCoalesceWindowSeconds;
+        while (_taskQueue.Count < 2 && FcsRuntimeClock.Now < deadline)
+        {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            if (_taskQueue.Count >= 2)
+                break;
+            yield return FcsRuntimeClock.WaitForSeconds(MatchCoalescePollSeconds);
+        }
     }
 
     private void LogEligibilityMatrix(IReadOnlyList<TaskPlanningResult> results)
@@ -226,14 +298,14 @@ internal sealed class TaskDispatcher
         }
     }
 
-    private static string DescribeCandidate(FirePlanCandidate? candidate, string failureReason)
+    private static string DescribeCandidate(TaskGunCandidate? candidate, string failureReason)
     {
         if (candidate != null)
         {
             var eta = candidate.EtaKnown
                 ? Math.Max(0f, candidate.EstimatedReadyAt - FcsRuntimeClock.Now).ToString("F1") + "s"
                 : "unknown";
-            return $"eligible {candidate.Shell.DisplayName()} C{candidate.Charge} ETA={eta}";
+            return $"eligible {candidate.Shell.DisplayName()} C{candidate.Charge} preETA={eta}";
         }
 
         return string.IsNullOrWhiteSpace(failureReason) ? "ineligible" : failureReason;
@@ -384,5 +456,17 @@ internal sealed class TaskDispatcher
         while (_recentTasks.Count > RecentTaskLimit)
             _recentTasks.Dequeue();
         _fcs.SceneInteractor.TaskFinished(task);
+    }
+
+    private sealed class MaterializedAssignment
+    {
+        public TaskGunAssignment Assignment { get; }
+        public FirePlanCandidate Candidate { get; }
+
+        public MaterializedAssignment(TaskGunAssignment assignment, FirePlanCandidate candidate)
+        {
+            Assignment = assignment;
+            Candidate = candidate;
+        }
     }
 }
