@@ -22,7 +22,7 @@ internal sealed class FirePlanExecutor
     private const float LoadingObservationTimeoutSeconds = 90f;
     private const float AutoFireTimeoutSeconds = 25f;
     private const float ManualFireTimeoutSeconds = 300f;
-    private const float SameAzimuthToleranceDegrees = 0.01f;
+    private const float SameAzimuthToleranceDegrees = 0.09f;
     private const int FireSettlementBufferFrames = 3;
     private const float ReviewLeadTimeBeforeArmSeconds = 1.5f;
 
