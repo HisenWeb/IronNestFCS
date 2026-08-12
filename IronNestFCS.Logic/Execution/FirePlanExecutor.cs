@@ -311,9 +311,9 @@ internal sealed class FirePlanExecutor
         plan.Task.progress = Progress.WaitingForFire;
         MelonLogger.Msg($"[FCS Plan] {plan.Label}: local ready (LoadedReady + elevation)");
 
-        // Do not wait for a volley partner. A non-current gun that becomes ready gets one immediate chance to
-        // arm itself if the current plan is already physically waiting on the exact same shared azimuth.
-        _fcs.TrackCoroutine(TryArmReadyPeerDuringCurrentWait(plan));
+        // A non-current ready plan is only a follower candidate for the current shared-fire opportunity. It never
+        // inherits the scheduler's _next identity; eligibility is derived fresh from the live fire-wait state.
+        _fcs.TrackCoroutine(TryArmReadyFollowerDuringCurrentWait(plan));
     }
 
     private IEnumerator RunShared(FirePlan plan)
@@ -388,8 +388,8 @@ internal sealed class FirePlanExecutor
                     rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
                 }
 
-                // Each gun owns only its own safety. The current gun never arms its peer; a ready peer
-                // gets its own non-blocking same-azimuth arm attempt through TryArmReadyPeerDuringCurrentWait.
+                // The scheduled current owns its normal arm path. Follower eligibility is a separate rule and is
+                // re-evaluated immediately before the follower touches its own safety.
                 yield return _fcs.TriggerConsole.ArmSelected(plan.Side, null);
 
                 // If the player fired during the physical arming operation, settle that reality before issuing an
@@ -408,12 +408,15 @@ internal sealed class FirePlanExecutor
 
                 fireWaitToken = BeginFireWait(plan);
 
-                // If the peer was already LocalReady before this plan entered the shared fire wait, give that
-                // peer one fresh chance to arm ITSELF. This is not a wait and never lets the current plan operate
-                // the peer safety directly.
-                var readyPeer = plan.Side == LeftRight.Left ? _rightPlan : _leftPlan;
-                if (readyPeer != null && !ReferenceEquals(readyPeer, plan) && readyPeer.LocalReady)
-                    _fcs.TrackCoroutine(TryArmReadyPeerDuringCurrentWait(readyPeer));
+                // The other active plan may already be LocalReady. Treat it only as a follower candidate and give
+                // it one fresh non-blocking eligibility check against the newly opened shared-fire wait.
+                var followerCandidate = plan.Side == LeftRight.Left ? _rightPlan : _leftPlan;
+                if (followerCandidate != null
+                    && !ReferenceEquals(followerCandidate, plan)
+                    && followerCandidate.LocalReady)
+                {
+                    _fcs.TrackCoroutine(TryArmReadyFollowerDuringCurrentWait(followerCandidate));
+                }
 
                 if (_fcs.SceneInteractor.AutoFire)
                 {
@@ -485,61 +488,55 @@ internal sealed class FirePlanExecutor
         }
     }
 
-    private IEnumerator TryArmReadyPeerDuringCurrentWait(FirePlan readyPlan)
+    private IEnumerator TryArmReadyFollowerDuringCurrentWait(FirePlan follower)
     {
         yield return FcsRuntimeClock.WaitUntilFocused();
 
-        if (!IsActive(readyPlan) || !readyPlan.LocalReady)
-            yield break;
-
         var current = _current;
-        if (current == null
-            || ReferenceEquals(current, readyPlan)
-            || !IsActive(current)
-            || !current.LocalReady
-            || !current.AzimuthReady)
-        {
-            yield break;
-        }
-
-        var delta = Mathf.Abs(Mathf.DeltaAngle(current.Azimuth, readyPlan.Azimuth));
-        if (delta > SameAzimuthToleranceDegrees)
+        if (current == null || !CanFollowerArm(current, follower, out _))
             yield break;
 
-        // Do not wait for readiness and do not create a watcher. Serialize only the physical console operation.
-        // By the time this lane is free, the current plan must still be in a manual shared-fire wait; AutoFire
-        // already issued means the opportunity has passed and the physical shot must remain authoritative.
+        // The first check prevents pointless Trigger-lane work. It is not authorization: the live relationship may
+        // change while this coroutine waits for the shared physical console lane.
         yield return _fcs.SharedResources.Trigger.Acquire();
         try
         {
             current = _current;
-            if (current == null
-                || ReferenceEquals(current, readyPlan)
-                || !IsActive(current)
-                || !IsActive(readyPlan)
-                || !current.LocalReady
-                || !current.AzimuthReady
-                || !readyPlan.LocalReady
-                || !ReferenceEquals(_fireWaitOwner, current)
-                || _fireWaitGeneration != current.Generation
-                || _autoFireIssuedForWait)
-            {
-                yield break;
-            }
-
-            delta = Mathf.Abs(Mathf.DeltaAngle(current.Azimuth, readyPlan.Azimuth));
-            if (delta > SameAzimuthToleranceDegrees)
+            if (current == null || !CanFollowerArm(current, follower, out var delta))
                 yield break;
 
             MelonLogger.Msg(
-                $"[FCS Plan] ready peer arms without waiting: {readyPlan.Label}; current={current.Label}; " +
+                $"[FCS Plan] ready follower arms without waiting: {follower.Label}; current={current.Label}; " +
                 $"azimuth delta={delta:F3}°");
-            yield return _fcs.TriggerConsole.ArmSelected(readyPlan.Side, null);
+            yield return _fcs.TriggerConsole.ArmSelected(follower.Side, null);
         }
         finally
         {
             _fcs.SharedResources.Trigger.Release();
         }
+    }
+
+    private bool CanFollowerArm(FirePlan current, FirePlan follower, out float azimuthDelta)
+    {
+        azimuthDelta = float.PositiveInfinity;
+
+        if (!ReferenceEquals(_current, current)
+            || ReferenceEquals(current, follower)
+            || current.Side == follower.Side
+            || !IsActive(current)
+            || !IsActive(follower)
+            || !current.LocalReady
+            || !current.AzimuthReady
+            || !follower.LocalReady
+            || !ReferenceEquals(_fireWaitOwner, current)
+            || _fireWaitGeneration != current.Generation
+            || _autoFireIssuedForWait)
+        {
+            return false;
+        }
+
+        azimuthDelta = Mathf.Abs(Mathf.DeltaAngle(current.Azimuth, follower.Azimuth));
+        return azimuthDelta <= SameAzimuthToleranceDegrees;
     }
 
     private PhysicalFireWatch BeginFireWatch(GunSystem gun, string sideName)
