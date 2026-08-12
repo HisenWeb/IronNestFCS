@@ -10,8 +10,8 @@ using MelonLoader;
 namespace IronNestFCS.Logic.Scheduling;
 
 /// <summary>
-/// Owns only task queue/history and serial admission into planning rounds. Queueing never reads gun state.
-/// Pending tasks remain owned by this queue until FirePlanExecutor accepts a concrete FirePlan.
+/// Owns task queue/history and serial admission into planning rounds. A planning round now evaluates all
+/// currently pending tasks against one gun/loading snapshot, then admits the best non-conflicting match.
 /// </summary>
 internal sealed class TaskDispatcher
 {
@@ -77,7 +77,7 @@ internal sealed class TaskDispatcher
     public void TryDispatch()
     {
         // Planning is serialized, but a trigger that arrives while a round is running must not be lost.
-        // Remember only the edge; the next round still re-reads current queue/resource state from scratch.
+        // Remember only the edge; the current round will also pick up newly queued tasks while it is scanning.
         if (_planning)
         {
             _dispatchRequested = true;
@@ -95,17 +95,20 @@ internal sealed class TaskDispatcher
     }
 
     /// <summary>
-    /// Scan pending tasks in queue order and fill every currently free FirePlan slot that can be planned.
-    /// Physical recovery remains authoritative in FirePlanner; an empty plan slot does not imply that the
-    /// underlying gun is mechanically ready.
+    /// One match round captures gun/loading state once, evaluates every pending task against that same snapshot,
+    /// then chooses a maximum-cardinality assignment. Charge fit is resolved before ETA/alignment soft costs.
     /// </summary>
     private IEnumerator PlanPendingTasks()
     {
+        var snapshot = _fcs.Planner.CaptureSnapshot();
         var attempted = new HashSet<ArtilleryTask>();
-        var admittedAny = false;
+        var planningResults = new List<TaskPlanningResult>();
         var deferredPhysicalMask = 0;
+        var admittedAny = false;
 
-        while (_fcs.PlanExecutor.HasFreeGun)
+        // Do not remove tasks while building the matrix. A task queued during this coroutine is naturally picked
+        // up by FindNextUnattempted and joins the same planning window if it arrives before the scan closes.
+        while (true)
         {
             var task = FindNextUnattempted(attempted);
             if (task == null)
@@ -113,45 +116,82 @@ internal sealed class TaskDispatcher
 
             attempted.Add(task);
 
-            FirePlan? plan = null;
-            var reason = "";
-            yield return _fcs.Planner.BuildPlan(task, (result, detail) =>
-            {
-                plan = result;
-                reason = detail;
-            });
-
-            if (plan == null)
+            TaskPlanningResult? result = null;
+            yield return _fcs.Planner.BuildCandidates(task, snapshot, value => result = value);
+            if (result == null)
             {
                 task.progress = Progress.Pending;
                 task.failureReason = "";
+                MelonLogger.Warning($"[FCS Dispatch] T{task.targetId}: planner returned no candidate result");
+                continue;
+            }
 
-                // FirePlanner also uses WAIT when another plan slot is occupied. Only create a physical waiter for
-                // a FREE side that is actually in a transient physical state; otherwise slot release/new input will
-                // provide the normal dispatch edge and we avoid a retry loop on an incompatible loaded gun.
-                if (reason.StartsWith("WAIT:", StringComparison.Ordinal))
+            planningResults.Add(result);
+
+            if (!result.HasCandidate)
+            {
+                task.pendingHint = result.PendingHint;
+                task.progress = Progress.Pending;
+                task.failureReason = "";
+
+                if (result.ShouldWait)
                     deferredPhysicalMask |= CurrentTransientFreeSideMask();
 
                 MelonLogger.Msg(
-                    $"[FCS Dispatch] T{task.targetId} remains pending; no FirePlan from current snapshot: " +
-                    (string.IsNullOrWhiteSpace(reason) ? "no viable gun" : reason));
-                continue;
+                    $"[FCS Dispatch] T{task.targetId} remains pending; {result.FailureDetail}");
             }
+        }
+
+        var decisionAt = FcsRuntimeClock.Now;
+        foreach (var result in planningResults)
+            result.FinalizeTiming(snapshot.SnapshotAt, decisionAt);
+
+        LogEligibilityMatrix(planningResults);
+
+        var assignments = TaskGunMatcher.Match(planningResults);
+        var selectedTasks = new HashSet<ArtilleryTask>();
+
+        if (assignments.Count > 0)
+        {
+            MelonLogger.Msg(
+                $"[FCS Match] selected {assignments.Count} assignment(s): " +
+                string.Join(", ", assignments.Select(DescribeAssignment)));
+        }
+
+        foreach (var assignment in assignments)
+        {
+            var task = assignment.Planning.Task;
+            var plan = _fcs.Planner.CreatePlan(assignment.Planning, assignment.Candidate, decisionAt);
 
             if (!_fcs.PlanExecutor.AddPlan(plan, out var addReason))
             {
                 task.progress = Progress.Pending;
+                task.pendingHint = PendingHint.None;
                 task.failureReason = "";
                 MelonLogger.Warning(
-                    $"[FCS Dispatch] T{task.targetId} FirePlan was not admitted and remains pending: {addReason}");
+                    $"[FCS Dispatch] T{task.targetId} matched FirePlan was not admitted and remains pending: {addReason}");
                 continue;
             }
 
             if (!RemovePendingTask(task))
                 MelonLogger.Warning($"[FCS Dispatch] admitted T{task.targetId} was no longer present in pending queue");
 
+            selectedTasks.Add(task);
             admittedAny = true;
             MelonLogger.Msg($"[FCS Dispatch] admitted T{task.targetId}; pending={_taskQueue.Count}");
+        }
+
+        // Every evaluated but unselected task remains pending. A valid candidate can lose only because the current
+        // free slots were consumed by a higher-quality complete match; that is not a failure and needs no hint.
+        foreach (var result in planningResults)
+        {
+            if (selectedTasks.Contains(result.Task))
+                continue;
+
+            result.Task.progress = Progress.Pending;
+            result.Task.failureReason = "";
+            if (result.HasCandidate)
+                result.Task.pendingHint = PendingHint.None;
         }
 
         _planning = false;
@@ -159,15 +199,14 @@ internal sealed class TaskDispatcher
         if (!admittedAny && attempted.Count > 0)
             MelonLogger.Msg($"[FCS Dispatch] planning round deferred {attempted.Count} pending task(s)");
 
-        // A Plan used to stay alive through WaitBackToIdle and that coroutine provided the recovery-complete
-        // dispatch edge. Plans now finish at the physical shot, so preserve event-driven dispatch with one
-        // temporary waiter only for the concrete free side(s) currently blocked by physical recovery.
+        // Plans finish at physical shot, so preserve event-driven dispatch with one temporary waiter only for
+        // concrete free side(s) currently blocked by physical recovery.
         if (deferredPhysicalMask != 0 && _taskQueue.Count > 0)
             EnsurePhysicalRetryWait(deferredPhysicalMask);
 
         // Consume one coalesced trigger that arrived during this planning round. TryDispatch() sets _planning
-        // synchronously before starting the next coroutine, so EvaluateScheduling() below can still see that a
-        // possible pairing round is active instead of prematurely single-committing an admitted plan.
+        // synchronously before starting the next coroutine, so EvaluateScheduling() can still see a possible
+        // partner-producing round instead of prematurely single-committing an admitted plan.
         if (_dispatchRequested)
         {
             _dispatchRequested = false;
@@ -175,6 +214,39 @@ internal sealed class TaskDispatcher
         }
 
         _fcs.PlanExecutor.EvaluateScheduling();
+    }
+
+    private void LogEligibilityMatrix(IReadOnlyList<TaskPlanningResult> results)
+    {
+        foreach (var result in results)
+        {
+            var left = DescribeCandidate(result.LeftCandidate, result.LeftReason);
+            var right = DescribeCandidate(result.RightCandidate, result.RightReason);
+            MelonLogger.Msg($"[FCS Match] T{result.Task.targetId}: Left={left}; Right={right}");
+        }
+    }
+
+    private static string DescribeCandidate(FirePlanCandidate? candidate, string failureReason)
+    {
+        if (candidate != null)
+        {
+            var eta = candidate.EtaKnown
+                ? Math.Max(0f, candidate.EstimatedReadyAt - FcsRuntimeClock.Now).ToString("F1") + "s"
+                : "unknown";
+            return $"eligible {candidate.Shell.DisplayName()} C{candidate.Charge} ETA={eta}";
+        }
+
+        return string.IsNullOrWhiteSpace(failureReason) ? "ineligible" : failureReason;
+    }
+
+    private static string DescribeAssignment(TaskGunAssignment assignment)
+    {
+        var task = assignment.Planning.Task;
+        var candidate = assignment.Candidate;
+        var minimumCharge = BallisticCalculator.MinimumCharge(task.distance);
+        var chargeExcess = Math.Max(0, candidate.Charge - minimumCharge);
+        return $"T{task.targetId}->{candidate.Side} {candidate.Shell.DisplayName()} C{candidate.Charge} " +
+               $"(chargeExcess={chargeExcess})";
     }
 
     private int CurrentTransientFreeSideMask()
