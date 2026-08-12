@@ -24,6 +24,7 @@ internal sealed class FirePlanExecutor
     private const float ManualFireTimeoutSeconds = 300f;
     private const float SameAzimuthToleranceDegrees = 0.01f;
     private const int FireSettlementBufferFrames = 3;
+    private const float ReviewLeadTimeBeforeArmSeconds = 1.2f;
 
     private readonly FSC _fcs;
     private readonly Dictionary<FirePlan, object> _prepareCoroutines = new();
@@ -40,6 +41,8 @@ internal sealed class FirePlanExecutor
     private int _fireWaitSerial;
     private int _activeFireWaitSerial;
     private bool _autoFireIssuedForWait;
+    private bool _reviewProtocolDispatched;
+    private float _reviewProtocolStartedAt = float.NaN;
 
     public FirePlanExecutor(FSC fcs)
     {
@@ -62,6 +65,8 @@ internal sealed class FirePlanExecutor
         _current = null;
         _next = null;
         _prepareCoroutines.Clear();
+        _reviewProtocolDispatched = false;
+        _reviewProtocolStartedAt = float.NaN;
         ClearAllFireWait();
     }
 
@@ -309,6 +314,34 @@ internal sealed class FirePlanExecutor
         MelonLogger.Msg($"[FCS Plan] {plan.Label}: local ready (LoadedReady + elevation)");
     }
 
+    private void DispatchReviewProtocolOnce()
+    {
+        if (_reviewProtocolDispatched)
+            return;
+
+        _reviewProtocolDispatched = true;
+        _reviewProtocolStartedAt = FcsRuntimeClock.Now;
+
+        // Review controls are protocol/visual actions, not firing gates. Dispatch each physical confirmation
+        // once for this Logic generation. FSC tracks every coroutine so F9 cancels outstanding work safely.
+        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmTask());
+        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmBullet());
+        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmRotation());
+        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmElevation());
+        _fcs.TrackCoroutine(_fcs.TriggerConsole.ReadyToFire());
+        MelonLogger.Msg("[FCS] TriggerConsole: dispatched one-shot review confirmations asynchronously");
+    }
+
+    private IEnumerator WaitForReviewLeadTime()
+    {
+        if (!_reviewProtocolDispatched || float.IsNaN(_reviewProtocolStartedAt))
+            yield break;
+
+        var remaining = ReviewLeadTimeBeforeArmSeconds - (FcsRuntimeClock.Now - _reviewProtocolStartedAt);
+        if (remaining > 0f)
+            yield return FcsRuntimeClock.WaitForSeconds(remaining);
+    }
+
     private IEnumerator RunShared(FirePlan plan)
     {
         if (!ReferenceEquals(_current, plan) || !IsActive(plan))
@@ -362,7 +395,8 @@ internal sealed class FirePlanExecutor
                 rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
 
                 yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);
-                yield return _fcs.TriggerConsole.CompleteReviewProtocol();
+                DispatchReviewProtocolOnce();
+                yield return WaitForReviewLeadTime();
 
                 PollFireWatch(leftWatch);
                 PollFireWatch(rightWatch);
