@@ -158,7 +158,7 @@ internal static class FcsLocalization
         if (string.Equals(reason, "等待队列为空", StringComparison.Ordinal)
             || string.Equals(reason, "queue empty", StringComparison.OrdinalIgnoreCase))
         {
-            return T("等待队列为空", "queue empty");
+            return T("当前没有可立即形成配对的计划", "no immediately available partner plan");
         }
 
         return reason;
@@ -166,8 +166,12 @@ internal static class FcsLocalization
 
     public static string LogReason(string reason)
     {
-        if (string.Equals(reason, "等待队列为空", StringComparison.Ordinal))
-            return "queue empty";
+        if (string.Equals(reason, "等待队列为空", StringComparison.Ordinal)
+            || string.Equals(reason, "queue empty", StringComparison.OrdinalIgnoreCase))
+        {
+            return "no immediately available partner FirePlan";
+        }
+
         return reason;
     }
 
