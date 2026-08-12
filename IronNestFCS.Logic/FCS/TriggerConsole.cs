@@ -38,6 +38,8 @@ public class TriggerConsole {
     // TryBind runs again after F9. FSC calls PrepareForNewFireSolution once immediately after a successful bind;
     // that first call is the hot-reload reset hook. Later calls belong to normal tasks and only reconcile ON state.
     private bool _resetPendingAfterBind;
+    private bool _reviewBatchActive;
+    private int _reviewOperationGeneration;
 
     public bool TryBind() {
         var consoleObject = GameObject.Find(".Review Console Parent");
@@ -87,6 +89,8 @@ public class TriggerConsole {
                  _armLeftPose != null && _armRightPose != null && _fire != null;
         if (ok) {
             _resetPendingAfterBind = true;
+            _reviewBatchActive = false;
+            _reviewOperationGeneration++;
             LogPhysicalStates("bind");
         }
         return ok;
@@ -269,22 +273,54 @@ public class TriggerConsole {
             $"Ready={ReviewStateText(_readyPose)} ArmL={ArmStateText(_armLeftPose)} ArmR={ArmStateText(_armRightPose)}");
     }
 
-    public IEnumerator ResetPhysicalFireControls(string reason) {
-        LogPhysicalStates($"before {reason} reset");
+    /// <summary>
+    /// Start one independent asynchronous ON operation for each review button. The batch remains active until
+    /// ReviewAllOff is called; callers do not pass Plan/current/next state into these operations.
+    /// </summary>
+    public IReadOnlyList<IEnumerator> BeginReviewAsync() {
+        if (_reviewBatchActive)
+            return Array.Empty<IEnumerator>();
 
-        // Arming is independent of the FCS task object and survives Logic hot reload. Clear only controls that
-        // are physically ON; never infer state from LookAtTarget.GetActive()/isClicked.
-        yield return EnsureArmState(_armLeft, _armLeftPose, false, "Left");
-        yield return EnsureArmState(_armRight, _armRightPose, false, "Right");
+        _reviewBatchActive = true;
+        var generation = ++_reviewOperationGeneration;
+        Func<bool> stillCurrent = () => _reviewBatchActive && generation == _reviewOperationGeneration;
 
-        // Keep the proven serial reset ordering for both F9/startup and committed-stack teardown.
+        return new IEnumerator[] {
+            EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck", stillCurrent),
+            EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck", stillCurrent),
+            EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck", stillCurrent),
+            EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck", stillCurrent),
+            EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire", stillCurrent),
+        };
+    }
+
+    /// <summary>
+    /// End the current review-button batch and drive only the five review controls OFF. This is the normal
+    /// execution-stack teardown path and intentionally does not touch either arming lever.
+    /// </summary>
+    public IEnumerator ReviewAllOff(string reason) {
+        _reviewBatchActive = false;
+        _reviewOperationGeneration++;
+
+        LogPhysicalStates($"before {reason} review all-off");
         yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire");
         yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck");
         yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck");
         yield return EnsureReviewState(_bulletCheck, _bulletPose, false, "BulletCheck");
         yield return EnsureReviewState(_taskCheck, _taskPose, false, "TaskCheck");
+        LogPhysicalStates($"after {reason} review all-off");
+    }
 
-        LogPhysicalStates($"after {reason} reset");
+    public IEnumerator ResetPhysicalFireControls(string reason) {
+        LogPhysicalStates($"before {reason} full reset");
+
+        // F9/startup clears the whole TaskSystem execution stack, so it resets both independent physical groups.
+        // Normal execution-stack teardown calls ReviewAllOff and never reaches these arming levers.
+        yield return EnsureArmState(_armLeft, _armLeftPose, false, "Left");
+        yield return EnsureArmState(_armRight, _armRightPose, false, "Right");
+        yield return ReviewAllOff(reason);
+
+        LogPhysicalStates($"after {reason} full reset");
     }
 
     /// <summary>
@@ -400,23 +436,23 @@ public class TriggerConsole {
     }
 
     // Legacy individual confirmation entry points remain available for probes/older callers.
-    public IEnumerator ConfirmTask(Func<bool>? shouldContinue = null) {
-        yield return EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck", shouldContinue);
+    public IEnumerator ConfirmTask() {
+        yield return EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck");
     }
 
-    public IEnumerator ConfirmBullet(Func<bool>? shouldContinue = null) {
-        yield return EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck", shouldContinue);
+    public IEnumerator ConfirmBullet() {
+        yield return EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck");
     }
 
-    public IEnumerator ConfirmRotation(Func<bool>? shouldContinue = null) {
-        yield return EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck", shouldContinue);
+    public IEnumerator ConfirmRotation() {
+        yield return EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck");
     }
 
-    public IEnumerator ConfirmElevation(Func<bool>? shouldContinue = null) {
-        yield return EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck", shouldContinue);
+    public IEnumerator ConfirmElevation() {
+        yield return EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck");
     }
 
-    public IEnumerator ReadyToFire(Func<bool>? shouldContinue = null) {
-        yield return EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire", shouldContinue);
+    public IEnumerator ReadyToFire() {
+        yield return EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire");
     }
 }

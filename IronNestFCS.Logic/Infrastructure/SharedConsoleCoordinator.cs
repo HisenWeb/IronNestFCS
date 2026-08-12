@@ -44,14 +44,14 @@ internal sealed class SharedConsoleCoordinator {
     }
 
     /// <summary>
-    /// A normal committed FirePlan stack resets the shared review/arming console only after its last Compared
-    /// plan leaves the executor. This reset is serialized ahead of the next stack's trigger-console work.
+    /// A normal committed FirePlan stack turns only the five independent review buttons OFF after its last
+    /// Compared plan leaves the executor. Arming remains owned by the physical firing path.
     /// </summary>
-    public IEnumerator ResetFireControlsAfterCommittedStack() {
+    public IEnumerator ResetReviewControlsAfterCommittedStack() {
         yield return FcsRuntimeClock.WaitUntilFocused();
         yield return Trigger.Acquire();
         try {
-            yield return _fcs.TriggerConsole.ResetPhysicalFireControls("committed stack drained");
+            yield return _fcs.TriggerConsole.ReviewAllOff("committed stack drained");
         }
         finally {
             Trigger.Release();

@@ -183,14 +183,9 @@ internal sealed class FirePlanExecutor
         if (promote)
             _fcs.FirePriority.PromoteCommitted(plan);
 
-        // Compared=false -> this call just created a committed execution stack. A promoted plan is
-        // already part of that same stack and must not re-dispatch the shared review protocol.
-        var reviewStack = promote
-            ? null
-            : ActivePlans().Where(candidate => candidate.Compared).ToArray();
-
         // Azimuth has no loading dependency. Start immediately after order commit.
-        _fcs.TrackCoroutine(RunShared(plan, reviewStack));
+        // Review-button dispatch is intentionally independent and is requested later by RunShared.
+        _fcs.TrackCoroutine(RunShared(plan));
     }
 
     private IEnumerator PrepareLocal(FirePlan plan)
@@ -316,24 +311,20 @@ internal sealed class FirePlanExecutor
         MelonLogger.Msg($"[FCS Plan] {plan.Label}: local ready (LoadedReady + elevation)");
     }
 
-    private void DispatchReviewProtocolForStack(FirePlan[] stack)
+    private bool DispatchReviewProtocolAsync()
     {
-        if (stack.Length == 0)
-            return;
+        var operations = _fcs.TriggerConsole.BeginReviewAsync();
+        if (operations.Count == 0)
+            return false;
 
-        // The existing Compared flag already defines this committed execution stack. Capture those exact plan
-        // objects so stale review coroutines cannot become valid again if a later stack is committed immediately.
-        Func<bool> stackStillActive = () => stack.Any(IsActive);
-        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmTask(stackStillActive));
-        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmBullet(stackStillActive));
-        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmRotation(stackStillActive));
-        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmElevation(stackStillActive));
-        _fcs.TrackCoroutine(_fcs.TriggerConsole.ReadyToFire(stackStillActive));
-        MelonLogger.Msg(
-            $"[FCS] TriggerConsole: dispatched review once for committed stack [{string.Join(", ", stack.Select(p => $"T{p.Task.targetId}"))}]");
+        foreach (var operation in operations)
+            _fcs.TrackCoroutine(operation);
+
+        MelonLogger.Msg("[FCS] TriggerConsole: dispatched independent asynchronous review-button operations");
+        return true;
     }
 
-    private IEnumerator RunShared(FirePlan plan, FirePlan[]? reviewStack)
+    private IEnumerator RunShared(FirePlan plan)
     {
         if (!ReferenceEquals(_current, plan) || !IsActive(plan))
             yield break;
@@ -386,11 +377,10 @@ internal sealed class FirePlanExecutor
                 rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
 
                 yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);
-                if (reviewStack != null && reviewStack.Length > 0)
+                if (DispatchReviewProtocolAsync())
                 {
-                    DispatchReviewProtocolForStack(reviewStack);
-                    // Review controls are visual/protocol actions, not a hard firing gate. Give the
-                    // physical switches a short visible lead before arming, then continue regardless.
+                    // Dispatch and the 1.2 s visual lead start at the same point. Review buttons continue
+                    // independently; their completion never gates arming or physical firing.
                     yield return FcsRuntimeClock.WaitForSeconds(ReviewLeadTimeBeforeArmSeconds);
                 }
 
@@ -711,13 +701,13 @@ internal sealed class FirePlanExecutor
         if (ReferenceEquals(_next, plan))
             _next = null;
 
-        // Compared is the existing committed-stack label. Only the removal of the LAST compared
-        // plan ends that stack and permits a full shared-console reset. Unpaired plans do not keep
-        // the old stack alive and will form a new stack after the reset lane is queued.
+        // Compared is the existing committed execution-stack label. When the LAST compared plan
+        // leaves, only the independent review-button module is reset. Arming remains owned by the physical
+        // firing path and is intentionally not coupled to the review-button lifecycle.
         if (plan.Compared && !HasRemainingComparedPlan())
         {
-            MelonLogger.Msg("[FCS Plan] committed stack drained; scheduling full trigger-console reset");
-            _fcs.TrackCoroutine(_fcs.SharedResources.ResetFireControlsAfterCommittedStack());
+            MelonLogger.Msg("[FCS Plan] committed stack drained; scheduling review buttons all-off");
+            _fcs.TrackCoroutine(_fcs.SharedResources.ResetReviewControlsAfterCommittedStack());
         }
 
         if (!notify)
