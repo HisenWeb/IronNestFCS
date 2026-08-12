@@ -102,8 +102,9 @@ Smart 直接读取游戏左炮 Time-To-Impact 表盘上的本地化标签：
 ```text
 读取目标
 → 读取当前真实物理状态
-→ 弹道解算
-→ 选择左右炮
+→ 建立 Task × Gun 资格边
+→ 在两门炮之间完成任务匹配
+→ 只对选中的分配进行弹道解算实体化
 → 必要时购买弹药
 → 装弹 + 装药
 → 调整仰角
@@ -169,7 +170,51 @@ on
 
 ## Smart 架构
 
-Smart 将稳定 Host / 持久物理装填与可热重载的 TaskSystem/Logic 分开。这样 F9 可以放弃并重建任务计划，同时已经被 Host 接受的实际装填仍然继续存在。
+Smart 将持续存在的物理 Host 与可热重载的 TaskSystem / Logic 分开。规划阶段先建立无物理副作用的 Task × Gun 资格边，再在两门炮之间完成合法匹配，最后才让游戏弹道计算器处理被选中的分配。调度顺序属于计划；真实物理状态以及最终实际开火的是哪门炮，才是执行结果的权威来源。
+
+```mermaid
+flowchart TB
+    PLAYER["玩家 / Tactical Map<br/>目标 · 弹药 · T1-T4"]
+
+    subgraph HOST["Stable Host · F9 后仍持续存在"]
+        LOADING["PersistentLoadingSystem<br/>已接受的物理装填"]
+    end
+
+    subgraph LOGIC["可热重载 TaskSystem / Logic"]
+        DISPATCH["TaskDispatcher<br/>Pending · 唤醒 · Admission"]
+        PLANNER["FirePlanner<br/>Snapshot · Eligibility"]
+        MATCHER["TaskGunMatcher<br/>无状态匹配"]
+        MATERIALIZE["Selected-only Materialization<br/>游戏 Ballistic Calculator"]
+        PLAN["FirePlan"]
+        PRIORITY["FirePriorityCoordinator<br/>一次性执行顺序"]
+        EXECUTOR["FirePlanExecutor<br/>左右槽位 · current/next"]
+        CONTROLS["SharedConsoleCoordinator / TriggerConsole<br/>Review · Arm · Fire"]
+    end
+
+    subgraph REALITY["游戏物理现实 · 最终权威"]
+        GUNS["炮膛 / 装填机构 / 左右炮"]
+        TURRET["真实炮塔"]
+        CONSOLES["真实控制台"]
+    end
+
+    PLAYER --> DISPATCH
+    DISPATCH --> PLANNER
+    PLANNER -->|无副作用资格边| MATCHER
+    MATCHER -->|选中的 Task×Gun| MATERIALIZE
+    MATERIALIZE --> PLAN
+    PLAN --> EXECUTOR
+    EXECUTOR <--> PRIORITY
+    EXECUTOR --> CONTROLS
+
+    EXECUTOR -->|已接受的装填工作| LOADING
+    LOADING --> GUNS
+    GUNS -->|物理状态 / observed shot| EXECUTOR
+    EXECUTOR --> TURRET
+    CONTROLS --> CONSOLES
+    EXECUTOR -. 槽位释放 / recovery retry .-> DISPATCH
+```
+
+这张图只展示高层关系。当前维护中的完整架构说明见 [docs/context/PROJECT_CONTEXT.md](docs/context/PROJECT_CONTEXT.md)，Planning 与 Execution 的细节分别见 [ARCHITECTURE_PLANNING.md](docs/context/ARCHITECTURE_PLANNING.md) 和 [ARCHITECTURE_EXECUTION.md](docs/context/ARCHITECTURE_EXECUTION.md)。
 
 本项目继续基于 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 开发。Smart 的自动化重点是执行既有火控工作流，而不是替玩家选择战术目标。
 
@@ -179,7 +224,7 @@ Smart 将稳定 Host / 持久物理装填与可热重载的 TaskSystem/Logic 分
 - `tools/Build-ReleasePackages.ps1`：生成单一通用发布 ZIP；
 - `tools/Release.ps1`：在 `master` 上完成版本号、构建、tag 和 GitHub Release 发布。
 
-开发说明见 [docs/FSC_MODULARIZATION_PLAN.md](docs/FSC_MODULARIZATION_PLAN.md)。
+当前项目背景与架构文档统一维护在 [docs/context/](docs/context/)。Time-To-Impact 的实测依据见 [docs/research/TTI_ESTIMATION.md](docs/research/TTI_ESTIMATION.md)。
 
 ## 致谢
 
