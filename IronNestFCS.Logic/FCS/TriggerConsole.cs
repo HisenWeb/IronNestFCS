@@ -35,11 +35,12 @@ public class TriggerConsole {
 
     private SliderEnergyMomentumSpinner? _fire;
 
-    // TryBind runs again after F9. FSC calls PrepareForNewFireSolution once immediately after a successful bind;
-    // that first call is the hot-reload reset hook. Later calls belong to normal tasks and only reconcile ON state.
+    // Review buttons are an independent physical-state controller. Task execution supplies only left/right
+    // ready inputs; this module continuously converges the five switches to OR(leftReady, rightReady).
     private bool _resetPendingAfterBind;
-    private bool _reviewBatchActive;
-    private int _reviewBatchId;
+    private bool _reviewControllerEnabled;
+    private bool _leftGunReady;
+    private bool _rightGunReady;
 
     public bool TryBind() {
         var consoleObject = GameObject.Find(".Review Console Parent");
@@ -89,8 +90,9 @@ public class TriggerConsole {
                  _armLeftPose != null && _armRightPose != null && _fire != null;
         if (ok) {
             _resetPendingAfterBind = true;
-            _reviewBatchActive = false;
-            _reviewBatchId = 0;
+            _reviewControllerEnabled = false;
+            _leftGunReady = false;
+            _rightGunReady = false;
             LogPhysicalStates("bind");
         }
         return ok;
@@ -273,68 +275,73 @@ public class TriggerConsole {
             $"Ready={ReviewStateText(_readyPose)} ArmL={ArmStateText(_armLeftPose)} ArmR={ArmStateText(_armRightPose)}");
     }
 
+    public void SetGunReady(LeftRight side, bool ready) {
+        var previous = side == LeftRight.Left ? _leftGunReady : _rightGunReady;
+        if (side == LeftRight.Left)
+            _leftGunReady = ready;
+        else
+            _rightGunReady = ready;
+
+        if (previous == ready)
+            return;
+
+        MelonLogger.Msg(
+            $"[FCS] ReviewController: {side} ready={ready}; desired={((_leftGunReady || _rightGunReady) ? "ON" : "OFF")}");
+    }
+
+    public void ResetGunReadyInputs() {
+        _leftGunReady = false;
+        _rightGunReady = false;
+    }
+
+    private void EnableReviewController() {
+        _reviewControllerEnabled = true;
+        MelonLogger.Msg("[FCS] ReviewController: enabled");
+    }
+
     /// <summary>
-    /// Start one independent asynchronous ON operation for each review button in the committed execution batch.
-    /// The caller supplies the batch identity; this module never reads Plan/current/next state.
+    /// Independent review-button state controller. The task executor supplies only gun-ready inputs; this loop
+    /// continuously reconciles the five physical switches to their desired shared state. Every physical action is
+    /// guarded by the current desired state, so an in-flight AllOff stops as soon as either gun becomes ready.
+    /// Continuous reconciliation also repairs the game's automatic post-shot switch reset while another gun remains
+    /// ready, even when the aggregate desired state never changes.
     /// </summary>
-    public IReadOnlyList<IEnumerator> BeginReviewAsync(int executionBatchId) {
-        if (executionBatchId <= 0) {
-            MelonLogger.Error($"[FCS] TriggerConsole: invalid review batch id {executionBatchId}");
-            return Array.Empty<IEnumerator>();
+    public IEnumerator ReviewStateLoop() {
+        while (true) {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+
+            if (!_reviewControllerEnabled) {
+                yield return FcsRuntimeClock.WaitForSeconds(0.1f);
+                continue;
+            }
+
+            var desiredOn = _leftGunReady || _rightGunReady;
+            Func<bool> stillDesired = () =>
+                _reviewControllerEnabled && (_leftGunReady || _rightGunReady) == desiredOn;
+
+            if (desiredOn) {
+                yield return EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck", stillDesired);
+                yield return EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck", stillDesired);
+                yield return EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck", stillDesired);
+                yield return EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck", stillDesired);
+                yield return EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire", stillDesired);
+            }
+            else {
+                yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire", stillDesired);
+                yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck", stillDesired);
+                yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck", stillDesired);
+                yield return EnsureReviewState(_bulletCheck, _bulletPose, false, "BulletCheck", stillDesired);
+                yield return EnsureReviewState(_taskCheck, _taskPose, false, "TaskCheck", stillDesired);
+            }
+
+            yield return FcsRuntimeClock.WaitForSeconds(0.1f);
         }
-
-        // Promotion inside the same committed stack must not re-dispatch review controls or re-run the 1.2s lead.
-        if (_reviewBatchActive && _reviewBatchId == executionBatchId)
-            return Array.Empty<IEnumerator>();
-
-        _reviewBatchId = executionBatchId;
-        _reviewBatchActive = true;
-        Func<bool> stillCurrent = () => _reviewBatchActive && _reviewBatchId == executionBatchId;
-
-        return new IEnumerator[] {
-            EnsureReviewState(_taskCheck, _taskPose, true, "TaskCheck", stillCurrent),
-            EnsureReviewState(_bulletCheck, _bulletPose, true, "BulletCheck", stillCurrent),
-            EnsureReviewState(_rotationCheck, _rotationPose, true, "RotationCheck", stillCurrent),
-            EnsureReviewState(_elevationCheck, _elevationPose, true, "ElevationCheck", stillCurrent),
-            EnsureReviewState(_readyFire, _readyPose, true, "ReadyToFire", stillCurrent),
-        };
-    }
-
-    /// <summary>
-    /// Synchronously close one review batch before its asynchronous physical AllOff is queued. This immediately
-    /// invalidates unfinished ON operations and lets a following committed stack start with its own batch id.
-    /// </summary>
-    public bool EndReviewBatch(int executionBatchId) {
-        if (!_reviewBatchActive || _reviewBatchId != executionBatchId)
-            return false;
-
-        _reviewBatchActive = false;
-        return true;
-    }
-
-    /// <summary>
-    /// Drive only the five review controls OFF for the ended batch. If a newer batch starts before this coroutine
-    /// acquires the physical trigger-console lane, the old AllOff becomes stale and exits without touching it.
-    /// </summary>
-    public IEnumerator ReviewAllOff(int executionBatchId, string reason) {
-        Func<bool> stillEndedBatch = () => !_reviewBatchActive && _reviewBatchId == executionBatchId;
-        if (!stillEndedBatch())
-            yield break;
-
-        LogPhysicalStates($"before {reason} review all-off batch {executionBatchId}");
-        yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire", stillEndedBatch);
-        yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck", stillEndedBatch);
-        yield return EnsureReviewState(_rotationCheck, _rotationPose, false, "RotationCheck", stillEndedBatch);
-        yield return EnsureReviewState(_bulletCheck, _bulletPose, false, "BulletCheck", stillEndedBatch);
-        yield return EnsureReviewState(_taskCheck, _taskPose, false, "TaskCheck", stillEndedBatch);
-        if (stillEndedBatch())
-            LogPhysicalStates($"after {reason} review all-off batch {executionBatchId}");
     }
 
     private IEnumerator ForceReviewAllOff(string reason) {
-        // F9/startup destroys the whole TaskSystem execution stack, so no old batch remains valid afterward.
-        _reviewBatchActive = false;
-        _reviewBatchId = 0;
+        // F9/startup destroys the whole TaskSystem execution stack and disables reconciliation until reset completes.
+        _reviewControllerEnabled = false;
+        ResetGunReadyInputs();
 
         yield return EnsureReviewState(_readyFire, _readyPose, false, "ReadyToFire");
         yield return EnsureReviewState(_elevationCheck, _elevationPose, false, "ElevationCheck");
@@ -347,7 +354,7 @@ public class TriggerConsole {
         LogPhysicalStates($"before {reason} full reset");
 
         // F9/startup clears the whole TaskSystem execution stack, so it resets both independent physical groups.
-        // Normal execution-stack teardown uses the batch-aware ReviewAllOff path and never touches arming levers.
+        // Normal review-button behavior is owned by ReviewStateLoop and never touches arming levers.
         yield return EnsureArmState(_armLeft, _armLeftPose, false, "Left");
         yield return EnsureArmState(_armRight, _armRightPose, false, "Right");
         yield return ForceReviewAllOff(reason);
@@ -364,6 +371,7 @@ public class TriggerConsole {
         if (_resetPendingAfterBind) {
             _resetPendingAfterBind = false;
             yield return ResetPhysicalFireControls("F9/startup");
+            EnableReviewController();
             yield break;
         }
 

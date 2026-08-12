@@ -122,6 +122,7 @@ public class FSC
         {
             SceneInteractor.Initialize();
             TrackCoroutine(SharedResources.ResetFireControlsAfterBind());
+            TrackCoroutine(TriggerConsole.ReviewStateLoop());
             TrackCoroutine(SharedResources.ReplenishPowderLoop());
         }
 

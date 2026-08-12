@@ -63,6 +63,7 @@ internal sealed class FirePlanExecutor
         _current = null;
         _next = null;
         _prepareCoroutines.Clear();
+        _fcs.TriggerConsole.ResetGunReadyInputs();
         ClearAllFireWait();
     }
 
@@ -311,19 +312,6 @@ internal sealed class FirePlanExecutor
         MelonLogger.Msg($"[FCS Plan] {plan.Label}: local ready (LoadedReady + elevation)");
     }
 
-    private bool DispatchReviewProtocolAsync(int executionBatchId)
-    {
-        var operations = _fcs.TriggerConsole.BeginReviewAsync(executionBatchId);
-        if (operations.Count == 0)
-            return false;
-
-        foreach (var operation in operations)
-            _fcs.TrackCoroutine(operation);
-
-        MelonLogger.Msg($"[FCS] TriggerConsole: dispatched async review buttons for batch {executionBatchId}");
-        return true;
-    }
-
     private IEnumerator RunShared(FirePlan plan)
     {
         if (!ReferenceEquals(_current, plan) || !IsActive(plan))
@@ -377,12 +365,12 @@ internal sealed class FirePlanExecutor
                 rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
 
                 yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);
-                if (DispatchReviewProtocolAsync(plan.ExecutionBatchId))
-                {
-                    // Dispatch and the 1.2 s visual lead start at the same point. Review buttons continue
-                    // independently; their completion never gates arming or physical firing.
-                    yield return FcsRuntimeClock.WaitForSeconds(ReviewLeadTimeBeforeArmSeconds);
-                }
+
+                // Once this gun is physically ready for the shared fire stage, publish only that fact to the
+                // independent review-button controller. The controller owns physical switch convergence; the
+                // executor preserves the 1.2 s visual lead before arming without waiting for button completion.
+                _fcs.TriggerConsole.SetGunReady(plan.Side, true);
+                yield return FcsRuntimeClock.WaitForSeconds(ReviewLeadTimeBeforeArmSeconds);
 
                 PollFireWatch(leftWatch);
                 PollFireWatch(rightWatch);
@@ -691,6 +679,7 @@ internal sealed class FirePlanExecutor
 
         var gun = plan.Side == LeftRight.Left ? _fcs.LeftGun : _fcs.RightGun;
         gun.ReleaseElevationOverride();
+        _fcs.TriggerConsole.SetGunReady(plan.Side, false);
 
         if (plan.Side == LeftRight.Left && ReferenceEquals(_leftPlan, plan))
             _leftPlan = null;
@@ -701,36 +690,11 @@ internal sealed class FirePlanExecutor
         if (ReferenceEquals(_next, plan))
             _next = null;
 
-        // Compared marks committed execution membership; ExecutionBatchId identifies the exact stack. End the
-        // review batch synchronously when its LAST plan leaves, then queue physical AllOff. A newer batch id can
-        // supersede that queued AllOff without being touched by stale work.
-        var executionBatchId = plan.ExecutionBatchId;
-        if (plan.Compared
-            && executionBatchId > 0
-            && !HasRemainingExecutionBatch(executionBatchId)
-            && _fcs.TriggerConsole.EndReviewBatch(executionBatchId))
-        {
-            MelonLogger.Msg($"[FCS Plan] batch {executionBatchId} drained; scheduling review buttons all-off");
-            _fcs.TrackCoroutine(_fcs.SharedResources.ResetReviewControlsAfterCommittedStack(executionBatchId));
-        }
-
         if (!notify)
             return;
 
         _fcs.Dispatcher.TryDispatch();
         EvaluateScheduling();
-    }
-
-    private bool HasRemainingExecutionBatch(int executionBatchId)
-    {
-        return (_leftPlan != null
-                && _leftPlan.Compared
-                && _leftPlan.ExecutionBatchId == executionBatchId
-                && !_leftPlan.CompletionHandled)
-               || (_rightPlan != null
-                   && _rightPlan.Compared
-                   && _rightPlan.ExecutionBatchId == executionBatchId
-                   && !_rightPlan.CompletionHandled);
     }
 
     private bool IsActive(FirePlan plan)

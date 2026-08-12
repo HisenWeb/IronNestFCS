@@ -43,21 +43,6 @@ internal sealed class SharedConsoleCoordinator {
         }
     }
 
-    /// <summary>
-    /// Serialize physical AllOff for one ended execution batch. TriggerConsole rechecks that exact batch id after
-    /// the lock is acquired, so a newer committed stack cannot be affected by stale teardown work.
-    /// </summary>
-    public IEnumerator ResetReviewControlsAfterCommittedStack(int executionBatchId) {
-        yield return FcsRuntimeClock.WaitUntilFocused();
-        yield return Trigger.Acquire();
-        try {
-            yield return _fcs.TriggerConsole.ReviewAllOff(executionBatchId, "committed stack drained");
-        }
-        finally {
-            Trigger.Release();
-        }
-    }
-
     public IEnumerator ReplenishPowderLoop() {
         while (true) {
             yield return FcsRuntimeClock.WaitForSeconds(PowderCheckInterval);
