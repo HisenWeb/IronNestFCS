@@ -1,0 +1,299 @@
+name: Apply compared stack console lifecycle
+
+on:
+  push:
+    branches:
+      - feature/physical-fire-settlement
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'chore: apply compared stack console lifecycle'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/physical-fire-settlement
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Apply compared-stack console lifecycle
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, found {count}')
+              return text.replace(old, new, 1)
+
+          # FirePlanExecutor: Compared plans define the committed execution stack.
+          p = Path('IronNestFCS.Logic/Execution/FirePlanExecutor.cs')
+          text = p.read_text(encoding='utf-8-sig')
+
+          text = replace_once(
+              text,
+              '    private bool _autoFireIssuedForWait;\n    private bool _reviewProtocolDispatched;\n    private float _reviewProtocolStartedAt = float.NaN;\n',
+              '    private bool _autoFireIssuedForWait;\n',
+              'remove duplicate review lifecycle fields')
+
+          text = replace_once(
+              text,
+              '        _prepareCoroutines.Clear();\n        _reviewProtocolDispatched = false;\n        _reviewProtocolStartedAt = float.NaN;\n        ClearAllFireWait();\n',
+              '        _prepareCoroutines.Clear();\n        ClearAllFireWait();\n',
+              'remove review lifecycle reset')
+
+          text = replace_once(
+              text,
+              '        // Azimuth has no loading dependency. Start immediately after order commit.\n        _fcs.TrackCoroutine(RunShared(plan));\n',
+              '        // Compared=false -> this call just created a committed execution stack. A promoted plan is\n'
+              '        // already part of that same stack and must not re-dispatch the shared review protocol.\n'
+              '        var reviewStack = promote\n'
+              '            ? null\n'
+              '            : ActivePlans().Where(candidate => candidate.Compared).ToArray();\n\n'
+              '        // Azimuth has no loading dependency. Start immediately after order commit.\n'
+              '        _fcs.TrackCoroutine(RunShared(plan, reviewStack));\n',
+              'set current stack capture')
+
+          old_helpers = '''    private void DispatchReviewProtocolOnce()\n    {\n        if (_reviewProtocolDispatched)\n            return;\n\n        _reviewProtocolDispatched = true;\n        _reviewProtocolStartedAt = FcsRuntimeClock.Now;\n\n        // Review controls are protocol/visual actions, not firing gates. Dispatch each physical confirmation\n        // once for this Logic generation. FSC tracks every coroutine so F9 cancels outstanding work safely.\n        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmTask());\n        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmBullet());\n        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmRotation());\n        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmElevation());\n        _fcs.TrackCoroutine(_fcs.TriggerConsole.ReadyToFire());\n        MelonLogger.Msg("[FCS] TriggerConsole: dispatched one-shot review confirmations asynchronously");\n    }\n\n    private IEnumerator WaitForReviewLeadTime()\n    {\n        if (!_reviewProtocolDispatched || float.IsNaN(_reviewProtocolStartedAt))\n            yield break;\n\n        var remaining = ReviewLeadTimeBeforeArmSeconds - (FcsRuntimeClock.Now - _reviewProtocolStartedAt);\n        if (remaining > 0f)\n            yield return FcsRuntimeClock.WaitForSeconds(remaining);\n    }\n\n'''
+          new_helpers = '''    private void DispatchReviewProtocolForStack(FirePlan[] stack)\n    {\n        if (stack.Length == 0)\n            return;\n\n        // The existing Compared flag already defines this committed execution stack. Capture those exact plan\n        // objects so stale review coroutines cannot become valid again if a later stack is committed immediately.\n        Func<bool> stackStillActive = () => stack.Any(IsActive);\n        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmTask(stackStillActive));\n        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmBullet(stackStillActive));\n        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmRotation(stackStillActive));\n        _fcs.TrackCoroutine(_fcs.TriggerConsole.ConfirmElevation(stackStillActive));\n        _fcs.TrackCoroutine(_fcs.TriggerConsole.ReadyToFire(stackStillActive));\n        MelonLogger.Msg(\n            $"[FCS] TriggerConsole: dispatched review once for committed stack [{string.Join(", ", stack.Select(p => $"T{p.Task.targetId}"))}]");\n    }\n\n'''
+          text = replace_once(text, old_helpers, new_helpers, 'replace review helper lifecycle')
+
+          text = replace_once(
+              text,
+              '    private IEnumerator RunShared(FirePlan plan)\n',
+              '    private IEnumerator RunShared(FirePlan plan, FirePlan[]? reviewStack)\n',
+              'RunShared signature')
+
+          text = replace_once(
+              text,
+              '                yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);\n                DispatchReviewProtocolOnce();\n                yield return WaitForReviewLeadTime();\n',
+              '                yield return _fcs.TriggerConsole.PrepareForNewFireSolution(plan.Side);\n'
+              '                if (reviewStack != null && reviewStack.Length > 0)\n'
+              '                {\n'
+              '                    DispatchReviewProtocolForStack(reviewStack);\n'
+              '                    // Review controls are visual/protocol actions, not a hard firing gate. Give the\n'
+              '                    // physical switches a short visible lead before arming, then continue regardless.\n'
+              '                    yield return FcsRuntimeClock.WaitForSeconds(ReviewLeadTimeBeforeArmSeconds);\n'
+              '                }\n',
+              'review dispatch in shared flow')
+
+          text = replace_once(
+              text,
+              '        if (ReferenceEquals(_next, plan))\n            _next = null;\n\n        if (!notify)\n            return;\n',
+              '        if (ReferenceEquals(_next, plan))\n            _next = null;\n\n'
+              '        // Compared is the existing committed-stack label. Only the removal of the LAST compared\n'
+              '        // plan ends that stack and permits a full shared-console reset. Unpaired plans do not keep\n'
+              '        // the old stack alive and will form a new stack after the reset lane is queued.\n'
+              '        if (plan.Compared && !HasRemainingComparedPlan())\n'
+              '        {\n'
+              '            MelonLogger.Msg("[FCS Plan] committed stack drained; scheduling full trigger-console reset");\n'
+              '            _fcs.TrackCoroutine(_fcs.SharedResources.ResetFireControlsAfterCommittedStack());\n'
+              '        }\n\n'
+              '        if (!notify)\n            return;\n',
+              'stack drain reset hook')
+
+          text = replace_once(
+              text,
+              '    private bool IsActive(FirePlan plan)\n    {\n',
+              '    private bool HasRemainingComparedPlan()\n'
+              '    {\n'
+              '        return (_leftPlan != null && _leftPlan.Compared && !_leftPlan.CompletionHandled)\n'
+              '               || (_rightPlan != null && _rightPlan.Compared && !_rightPlan.CompletionHandled);\n'
+              '    }\n\n'
+              '    private bool IsActive(FirePlan plan)\n    {\n',
+              'remaining compared helper')
+
+          p.write_text(text, encoding='utf-8')
+
+          # TriggerConsole: normal review actions are cancellable by the exact captured Compared stack.
+          p = Path('IronNestFCS.Logic/FCS/TriggerConsole.cs')
+          text = p.read_text(encoding='utf-8-sig')
+
+          text = replace_once(
+              text,
+              '    private static IEnumerator EnsureReviewState(LookAtTarget? control, Transform? pose, bool desiredOn, string name) {\n',
+              '    private static IEnumerator EnsureReviewState(\n'
+              '        LookAtTarget? control,\n'
+              '        Transform? pose,\n'
+              '        bool desiredOn,\n'
+              '        string name,\n'
+              '        Func<bool>? shouldContinue = null) {\n',
+              'review ensure signature')
+
+          text = replace_once(
+              text,
+              '        var deadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;\n        bool current;\n        float angle;\n        while (!TryReadReviewState(pose, out current, out angle)) {\n            if (FcsRuntimeClock.Now >= deadline) {\n',
+              '        if (shouldContinue != null && !shouldContinue())\n'
+              '            yield break;\n\n'
+              '        var deadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;\n'
+              '        bool current;\n'
+              '        float angle;\n'
+              '        while (!TryReadReviewState(pose, out current, out angle)) {\n'
+              '            if (shouldContinue != null && !shouldContinue())\n'
+              '                yield break;\n'
+              '            if (FcsRuntimeClock.Now >= deadline) {\n',
+              'review initial cancellation')
+
+          text = replace_once(
+              text,
+              '        if (current == desiredOn)\n            yield break;\n\n        yield return FcsSceneInteractor.WaitAndClick(control);\n\n        deadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;\n',
+              '        if (current == desiredOn)\n'
+              '            yield break;\n\n'
+              '        Func<bool>? clickGuard = null;\n'
+              '        if (shouldContinue != null)\n'
+              '        {\n'
+              '            clickGuard = () =>\n'
+              '                shouldContinue()\n'
+              '                && TryReadReviewState(pose, out var stillOn, out _)\n'
+              '                && stillOn != desiredOn;\n'
+              '        }\n\n'
+              '        yield return FcsSceneInteractor.WaitAndClick(control, 10f, clickGuard);\n'
+              '        if (shouldContinue != null && !shouldContinue())\n'
+              '            yield break;\n\n'
+              '        deadline = FcsRuntimeClock.Now + PoseTransitionTimeoutSeconds;\n',
+              'review click guard')
+
+          text = replace_once(
+              text,
+              '        while (true) {\n            yield return FcsRuntimeClock.WaitUntilFocused();\n            if (TryReadReviewState(pose, out var after, out angle) && after == desiredOn)\n',
+              '        while (true) {\n'
+              '            yield return FcsRuntimeClock.WaitUntilFocused();\n'
+              '            if (shouldContinue != null && !shouldContinue())\n'
+              '                yield break;\n'
+              '            if (TryReadReviewState(pose, out var after, out angle) && after == desiredOn)\n',
+              'review verify cancellation')
+
+          text = replace_once(
+              text,
+              '    private IEnumerator ResetPhysicalFireControlsAfterBind() {\n        LogPhysicalStates("before F9 reset");\n',
+              '    public IEnumerator ResetPhysicalFireControls(string reason) {\n'
+              '        LogPhysicalStates($"before {reason} reset");\n',
+              'expose physical console reset')
+
+          text = replace_once(
+              text,
+              '        // Keep the proven serial reset ordering. Normal review confirmation is parallelized separately below.\n',
+              '        // Keep the proven serial reset ordering for both F9/startup and committed-stack teardown.\n',
+              'reset ordering comment')
+
+          text = replace_once(
+              text,
+              '        LogPhysicalStates("after F9 reset");\n    }\n',
+              '        LogPhysicalStates($"after {reason} reset");\n    }\n',
+              'reset end log')
+
+          text = replace_once(
+              text,
+              '            yield return ResetPhysicalFireControlsAfterBind();\n',
+              '            yield return ResetPhysicalFireControls("F9/startup");\n',
+              'prepare reset call')
+
+          for name, field in [
+              ('ConfirmTask', '_taskCheck, _taskPose, true, "TaskCheck"'),
+              ('ConfirmBullet', '_bulletCheck, _bulletPose, true, "BulletCheck"'),
+              ('ConfirmRotation', '_rotationCheck, _rotationPose, true, "RotationCheck"'),
+              ('ConfirmElevation', '_elevationCheck, _elevationPose, true, "ElevationCheck"'),
+              ('ReadyToFire', '_readyFire, _readyPose, true, "ReadyToFire"'),
+          ]:
+              old = f'    public IEnumerator {name}() {{\n        yield return EnsureReviewState({field});\n    }}\n'
+              new = f'    public IEnumerator {name}(Func<bool>? shouldContinue = null) {{\n        yield return EnsureReviewState({field}, shouldContinue);\n    }}\n'
+              text = replace_once(text, old, new, f'{name} cancellation signature')
+
+          p.write_text(text, encoding='utf-8')
+
+          # WaitAndClick: allow a one-shot review intent to disappear while its button is still gated. Once a
+          # physical click begins, always finish the down/up pair.
+          p = Path('IronNestFCS.Logic/FcsSceneInteractor.cs')
+          text = p.read_text(encoding='utf-8-sig')
+          old = '''    public static IEnumerator WaitAndClick(LookAtTarget? button, float timeoutSeconds = 10f)\n    {\n        if (button == null)\n            yield break;\n\n        var deadline = FcsRuntimeClock.Now + Mathf.Max(0.1f, timeoutSeconds);\n        while (true)\n        {\n            yield return FcsRuntimeClock.WaitUntilFocused();\n            if (button.isActive && button.nextAllowedClickTime <= Time.realtimeSinceStartup)\n                break;\n\n            if (FcsRuntimeClock.Now >= deadline)\n            {\n                MelonLogger.Error($"[FCS] WaitAndClick timeout: {button.gameObject.name}");\n                yield break;\n            }\n            yield return FcsRuntimeClock.WaitForSeconds(0.1f);\n        }\n\n        yield return FcsRuntimeClock.WaitForSeconds(0.1f);\n        yield return FcsRuntimeClock.WaitUntilFocused();\n        BeginPhysicalClick(button);\n        yield return new WaitForSeconds(0.1f);\n        EndPhysicalClick(button);\n    }\n'''
+          new = '''    public static IEnumerator WaitAndClick(\n        LookAtTarget? button,\n        float timeoutSeconds = 10f,\n        Func<bool>? shouldContinue = null)\n    {\n        if (button == null || (shouldContinue != null && !shouldContinue()))\n            yield break;\n\n        var deadline = FcsRuntimeClock.Now + Mathf.Max(0.1f, timeoutSeconds);\n        while (true)\n        {\n            yield return FcsRuntimeClock.WaitUntilFocused();\n            if (shouldContinue != null && !shouldContinue())\n                yield break;\n            if (button.isActive && button.nextAllowedClickTime <= Time.realtimeSinceStartup)\n                break;\n\n            if (FcsRuntimeClock.Now >= deadline)\n            {\n                MelonLogger.Error($"[FCS] WaitAndClick timeout: {button.gameObject.name}");\n                yield break;\n            }\n            yield return FcsRuntimeClock.WaitForSeconds(0.1f);\n        }\n\n        yield return FcsRuntimeClock.WaitForSeconds(0.1f);\n        yield return FcsRuntimeClock.WaitUntilFocused();\n        if (shouldContinue != null && !shouldContinue())\n            yield break;\n\n        BeginPhysicalClick(button);\n        try\n        {\n            yield return new WaitForSeconds(0.1f);\n        }\n        finally\n        {\n            EndPhysicalClick(button);\n        }\n    }\n'''
+          text = replace_once(text, old, new, 'cancellable WaitAndClick')
+          p.write_text(text, encoding='utf-8')
+
+          # SharedConsoleCoordinator owns the serialized reset lane.
+          p = Path('IronNestFCS.Logic/Infrastructure/SharedConsoleCoordinator.cs')
+          text = p.read_text(encoding='utf-8-sig')
+          marker = '''    public IEnumerator ReplenishPowderLoop() {\n'''
+          method = '''    /// <summary>\n    /// A normal committed FirePlan stack resets the shared review/arming console only after its last Compared\n    /// plan leaves the executor. This reset is serialized ahead of the next stack's trigger-console work.\n    /// </summary>\n    public IEnumerator ResetFireControlsAfterCommittedStack() {\n        yield return FcsRuntimeClock.WaitUntilFocused();\n        yield return Trigger.Acquire();\n        try {\n            yield return _fcs.TriggerConsole.ResetPhysicalFireControls("committed stack drained");\n        }\n        finally {\n            Trigger.Release();\n        }\n    }\n\n'''
+          text = replace_once(text, marker, method + marker, 'stack reset coordinator')
+          p.write_text(text, encoding='utf-8')
+
+          # Final source invariants before syntax parsing.
+          executor = Path('IronNestFCS.Logic/Execution/FirePlanExecutor.cs').read_text(encoding='utf-8')
+          trigger = Path('IronNestFCS.Logic/FCS/TriggerConsole.cs').read_text(encoding='utf-8')
+          scene = Path('IronNestFCS.Logic/FcsSceneInteractor.cs').read_text(encoding='utf-8')
+          shared = Path('IronNestFCS.Logic/Infrastructure/SharedConsoleCoordinator.cs').read_text(encoding='utf-8')
+
+          required_executor = [
+              'ReviewLeadTimeBeforeArmSeconds = 1.2f',
+              'ActivePlans().Where(candidate => candidate.Compared).ToArray()',
+              'DispatchReviewProtocolForStack(reviewStack)',
+              'Func<bool> stackStillActive = () => stack.Any(IsActive)',
+              'if (plan.Compared && !HasRemainingComparedPlan())',
+              'ResetFireControlsAfterCommittedStack()',
+          ]
+          for item in required_executor:
+              if item not in executor:
+                  raise SystemExit(f'missing executor invariant: {item}')
+          for forbidden in ['_reviewProtocolDispatched', '_reviewProtocolStartedAt', 'DispatchReviewProtocolOnce', 'WaitForReviewLeadTime']:
+              if forbidden in executor:
+                  raise SystemExit(f'stale duplicate review lifecycle remains: {forbidden}')
+          if 'ResetPhysicalFireControls("F9/startup")' not in trigger:
+              raise SystemExit('F9/startup physical reset missing')
+          if 'Func<bool>? shouldContinue = null' not in trigger:
+              raise SystemExit('review cancellation predicate missing')
+          if 'Func<bool>? shouldContinue = null' not in scene:
+              raise SystemExit('WaitAndClick cancellation predicate missing')
+          if 'ResetPhysicalFireControls("committed stack drained")' not in shared:
+              raise SystemExit('committed stack reset lane missing')
+
+      - name: Parse all C# sources with Roslyn
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/roslyncheck
+          mkdir -p /tmp/roslyncheck
+          cd /tmp/roslyncheck
+          dotnet new console --framework net8.0 --force >/dev/null
+          dotnet add package Microsoft.CodeAnalysis.CSharp --version 4.11.0 >/dev/null
+          cat > Program.cs <<'CS'
+          using Microsoft.CodeAnalysis;
+          using Microsoft.CodeAnalysis.CSharp;
+
+          var root = Environment.GetEnvironmentVariable("REPO_ROOT")!;
+          var errors = new List<string>();
+          foreach (var file in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
+          {
+              var text = File.ReadAllText(file);
+              var tree = CSharpSyntaxTree.ParseText(text, new CSharpParseOptions(LanguageVersion.Latest), file);
+              foreach (var diagnostic in tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error))
+                  errors.Add(diagnostic.ToString());
+          }
+          if (errors.Count > 0)
+          {
+              foreach (var error in errors) Console.Error.WriteLine(error);
+              Environment.Exit(1);
+          }
+          Console.WriteLine("Roslyn syntax parse passed for all C# sources.");
+          CS
+          REPO_ROOT="$GITHUB_WORKSPACE" dotnet run --no-restore
+
+      - name: Commit production change and remove temporary workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "HisenWeb"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/apply-compared-stack-console.yml
+          git add IronNestFCS.Logic/Execution/FirePlanExecutor.cs \
+                  IronNestFCS.Logic/FCS/TriggerConsole.cs \
+                  IronNestFCS.Logic/FcsSceneInteractor.cs \
+                  IronNestFCS.Logic/Infrastructure/SharedConsoleCoordinator.cs
+          git commit -m "fix: bind trigger console lifecycle to compared plans"
+          git push origin HEAD:feature/physical-fire-settlement
