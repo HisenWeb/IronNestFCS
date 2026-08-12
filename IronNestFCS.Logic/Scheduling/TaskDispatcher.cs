@@ -17,6 +17,8 @@ internal sealed class TaskDispatcher
 {
     private const int RecentTaskLimit = 20;
     private const float PhysicalRetryPollSeconds = 0.25f;
+    private const int LeftPhysicalRetryBit = 1;
+    private const int RightPhysicalRetryBit = 2;
 
     private readonly FSC _fcs;
     private readonly Queue<ArtilleryTask> _taskQueue = new();
@@ -25,6 +27,7 @@ internal sealed class TaskDispatcher
     private bool _planning;
     private bool _dispatchRequested;
     private bool _physicalRetryWaiting;
+    private int _physicalRetryMask;
 
     public int PendingCount => _taskQueue.Count;
 
@@ -51,6 +54,7 @@ internal sealed class TaskDispatcher
         _planning = false;
         _dispatchRequested = false;
         _physicalRetryWaiting = false;
+        _physicalRetryMask = 0;
     }
 
     public void EnqueueTask(ArtilleryTask task)
@@ -99,7 +103,7 @@ internal sealed class TaskDispatcher
     {
         var attempted = new HashSet<ArtilleryTask>();
         var admittedAny = false;
-        var deferredForPhysicalState = false;
+        var deferredPhysicalMask = 0;
 
         while (_fcs.PlanExecutor.HasFreeGun)
         {
@@ -121,8 +125,12 @@ internal sealed class TaskDispatcher
             {
                 task.progress = Progress.Pending;
                 task.failureReason = "";
+
+                // FirePlanner also uses WAIT when another plan slot is occupied. Only create a physical waiter for
+                // a FREE side that is actually in a transient physical state; otherwise slot release/new input will
+                // provide the normal dispatch edge and we avoid a retry loop on an incompatible loaded gun.
                 if (reason.StartsWith("WAIT:", StringComparison.Ordinal))
-                    deferredForPhysicalState = true;
+                    deferredPhysicalMask |= CurrentTransientFreeSideMask();
 
                 MelonLogger.Msg(
                     $"[FCS Dispatch] T{task.targetId} remains pending; no FirePlan from current snapshot: " +
@@ -153,9 +161,9 @@ internal sealed class TaskDispatcher
 
         // A Plan used to stay alive through WaitBackToIdle and that coroutine provided the recovery-complete
         // dispatch edge. Plans now finish at the physical shot, so preserve event-driven dispatch with one
-        // temporary waiter only while planning was explicitly deferred by transient physical state.
-        if (deferredForPhysicalState && _taskQueue.Count > 0)
-            EnsurePhysicalRetryWait();
+        // temporary waiter only for the concrete free side(s) currently blocked by physical recovery.
+        if (deferredPhysicalMask != 0 && _taskQueue.Count > 0)
+            EnsurePhysicalRetryWait(deferredPhysicalMask);
 
         // Consume one coalesced trigger that arrived during this planning round. TryDispatch() sets _planning
         // synchronously before starting the next coroutine, so EvaluateScheduling() below can still see that a
@@ -169,8 +177,27 @@ internal sealed class TaskDispatcher
         _fcs.PlanExecutor.EvaluateScheduling();
     }
 
-    private void EnsurePhysicalRetryWait()
+    private int CurrentTransientFreeSideMask()
     {
+        var mask = 0;
+        if (_fcs.PlanExecutor.GetPlan(LeftRight.Left) == null
+            && IsTransient(_fcs.Loading.GetSnapshot(GunSide.Left).PhysicalState))
+        {
+            mask |= LeftPhysicalRetryBit;
+        }
+
+        if (_fcs.PlanExecutor.GetPlan(LeftRight.Right) == null
+            && IsTransient(_fcs.Loading.GetSnapshot(GunSide.Right).PhysicalState))
+        {
+            mask |= RightPhysicalRetryBit;
+        }
+
+        return mask;
+    }
+
+    private void EnsurePhysicalRetryWait(int sideMask)
+    {
+        _physicalRetryMask |= sideMask;
         if (_physicalRetryWaiting)
             return;
 
@@ -180,46 +207,66 @@ internal sealed class TaskDispatcher
 
     private IEnumerator WaitForPhysicalPlanningOpportunity()
     {
+        var shouldRetry = false;
         try
         {
-            while (_taskQueue.Count > 0)
+            while (_taskQueue.Count > 0 && _physicalRetryMask != 0)
             {
                 yield return FcsRuntimeClock.WaitUntilFocused();
 
-                if (_fcs.PlanExecutor.HasFreeGun && HasPlannableFreeSide())
-                    break;
+                if ((_physicalRetryMask & LeftPhysicalRetryBit) != 0)
+                {
+                    if (_fcs.PlanExecutor.GetPlan(LeftRight.Left) != null)
+                    {
+                        _physicalRetryMask &= ~LeftPhysicalRetryBit;
+                    }
+                    else if (IsPlannable(_fcs.Loading.GetSnapshot(GunSide.Left).PhysicalState))
+                    {
+                        shouldRetry = true;
+                        break;
+                    }
+                }
 
-                yield return FcsRuntimeClock.WaitForSeconds(PhysicalRetryPollSeconds);
+                if ((_physicalRetryMask & RightPhysicalRetryBit) != 0)
+                {
+                    if (_fcs.PlanExecutor.GetPlan(LeftRight.Right) != null)
+                    {
+                        _physicalRetryMask &= ~RightPhysicalRetryBit;
+                    }
+                    else if (IsPlannable(_fcs.Loading.GetSnapshot(GunSide.Right).PhysicalState))
+                    {
+                        shouldRetry = true;
+                        break;
+                    }
+                }
+
+                if (!shouldRetry)
+                    yield return FcsRuntimeClock.WaitForSeconds(PhysicalRetryPollSeconds);
             }
         }
         finally
         {
             _physicalRetryWaiting = false;
+            _physicalRetryMask = 0;
         }
 
-        if (_taskQueue.Count > 0)
+        if (shouldRetry && _taskQueue.Count > 0)
         {
             MelonLogger.Msg("[FCS Dispatch] physical recovery opened a planning opportunity; retrying pending tasks");
             TryDispatch();
         }
     }
 
-    private bool HasPlannableFreeSide()
-    {
-        if (_fcs.PlanExecutor.GetPlan(LeftRight.Left) == null
-            && IsPlannable(_fcs.Loading.GetSnapshot(GunSide.Left).PhysicalState))
-        {
-            return true;
-        }
-
-        return _fcs.PlanExecutor.GetPlan(LeftRight.Right) == null
-               && IsPlannable(_fcs.Loading.GetSnapshot(GunSide.Right).PhysicalState);
-    }
-
     private static bool IsPlannable(LoadingPhysicalState state) =>
         state == LoadingPhysicalState.EmptyReady
         || state == LoadingPhysicalState.ShellLoaded
         || state == LoadingPhysicalState.LoadedReady;
+
+    private static bool IsTransient(LoadingPhysicalState state) =>
+        state == LoadingPhysicalState.Recovering
+        || state == LoadingPhysicalState.PostShotRecovery
+        || state == LoadingPhysicalState.Unknown
+        || state == LoadingPhysicalState.Unbound;
 
     private ArtilleryTask? FindNextUnattempted(HashSet<ArtilleryTask> attempted)
     {
