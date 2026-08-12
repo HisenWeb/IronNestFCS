@@ -1,0 +1,73 @@
+name: Apply execution batch ids
+
+on:
+  push:
+    branches:
+      - feature/physical-fire-settlement
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ github.event.head_commit.message == 'chore: apply execution batch ids' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/physical-fire-settlement
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Apply execution batch patch
+        run: python tools/apply_execution_batch_ids.py
+
+      - name: Parse all C# sources with Roslyn
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/roslyncheck
+          mkdir -p /tmp/roslyncheck
+          cd /tmp/roslyncheck
+          dotnet new console --framework net8.0 --force >/dev/null
+          dotnet add package Microsoft.CodeAnalysis.CSharp --version 4.11.0 >/dev/null
+          cat > Program.cs <<'CS'
+          using Microsoft.CodeAnalysis;
+          using Microsoft.CodeAnalysis.CSharp;
+
+          var root = Environment.GetEnvironmentVariable("REPO_ROOT")!;
+          var errors = new List<string>();
+          foreach (var file in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
+          {
+              var text = File.ReadAllText(file);
+              var tree = CSharpSyntaxTree.ParseText(text, new CSharpParseOptions(LanguageVersion.Latest), file);
+              foreach (var diagnostic in tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error))
+                  errors.Add(diagnostic.ToString());
+          }
+
+          if (errors.Count > 0)
+          {
+              foreach (var error in errors) Console.Error.WriteLine(error);
+              Environment.Exit(1);
+          }
+
+          Console.WriteLine("Roslyn syntax parse passed for all C# sources.");
+          CS
+          REPO_ROOT="$GITHUB_WORKSPACE" dotnet run --no-restore
+
+      - name: Commit production change and clean helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "HisenWeb"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/apply-execution-batch-ids.yml tools/apply_execution_batch_ids.py
+          git add IronNestFCS.Logic/Scheduling/FirePlan.cs \
+                  IronNestFCS.Logic/Scheduling/FirePriorityCoordinator.cs \
+                  IronNestFCS.Logic/FCS/TriggerConsole.cs \
+                  IronNestFCS.Logic/Execution/FirePlanExecutor.cs \
+                  IronNestFCS.Logic/Infrastructure/SharedConsoleCoordinator.cs
+          git commit -m "fix: bind review lifecycle to execution batch ids"
+          git push origin HEAD:feature/physical-fire-settlement
