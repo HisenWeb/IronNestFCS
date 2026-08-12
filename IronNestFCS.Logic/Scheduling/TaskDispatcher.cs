@@ -111,7 +111,10 @@ internal sealed class TaskDispatcher
         var snapshot = _fcs.Planner.CaptureSnapshot();
         var attempted = new HashSet<ArtilleryTask>();
         var planningResults = new List<TaskPlanningResult>();
-        var deferredPhysicalMask = 0;
+        // Retry ownership belongs to a free transient gun side, not to whether a particular task had zero
+        // candidates. A task may be eligible on Left while Right is still recovering; if Right opens during
+        // materialization, pending work must be dispatched into that newly free side.
+        var deferredPhysicalMask = SnapshotTransientFreeSideMask(snapshot);
         var admittedAny = false;
 
         while (true)
@@ -129,9 +132,6 @@ internal sealed class TaskDispatcher
                 task.pendingHint = result.PendingHint;
                 task.progress = Progress.Pending;
                 task.failureReason = "";
-
-                if (result.ShouldWait)
-                    deferredPhysicalMask |= CurrentTransientFreeSideMask();
 
                 MelonLogger.Msg(
                     $"[FCS Dispatch] T{task.targetId} remains pending; {result.FailureDetail}");
@@ -253,10 +253,16 @@ internal sealed class TaskDispatcher
         if (!admittedAny && attempted.Count > 0)
             MelonLogger.Msg($"[FCS Dispatch] planning round deferred {attempted.Count} pending task(s)");
 
-        // Plans finish at physical shot, so preserve event-driven dispatch with one temporary waiter only for
-        // concrete free side(s) currently blocked by physical recovery.
+        // Plans finish at physical shot, so preserve event-driven dispatch for any free side that was transient
+        // in this round's snapshot. If it became plannable while materializing another assignment, immediately
+        // open the next planning round; otherwise keep one temporary waiter for the physical transition.
         if (deferredPhysicalMask != 0 && _taskQueue.Count > 0)
-            EnsurePhysicalRetryWait(deferredPhysicalMask);
+        {
+            if (CurrentPlannableFreeSideMask(deferredPhysicalMask) != 0)
+                _dispatchRequested = true;
+            else
+                EnsurePhysicalRetryWait(deferredPhysicalMask);
+        }
 
         // Consume one coalesced trigger that arrived after the eligibility scan had already closed. TryDispatch()
         // sets _planning synchronously before the next coroutine starts, preserving scheduler pair waiting.
@@ -321,17 +327,29 @@ internal sealed class TaskDispatcher
                $"(chargeExcess={chargeExcess})";
     }
 
-    private int CurrentTransientFreeSideMask()
+    private static int SnapshotTransientFreeSideMask(FirePlanningSnapshot snapshot)
     {
         var mask = 0;
-        if (_fcs.PlanExecutor.GetPlan(LeftRight.Left) == null
-            && IsTransient(_fcs.Loading.GetSnapshot(GunSide.Left).PhysicalState))
+        if (snapshot.LeftSlotAvailable && IsTransient(snapshot.LeftLoading.PhysicalState))
+            mask |= LeftPhysicalRetryBit;
+        if (snapshot.RightSlotAvailable && IsTransient(snapshot.RightLoading.PhysicalState))
+            mask |= RightPhysicalRetryBit;
+        return mask;
+    }
+
+    private int CurrentPlannableFreeSideMask(int sideMask)
+    {
+        var mask = 0;
+        if ((sideMask & LeftPhysicalRetryBit) != 0
+            && _fcs.PlanExecutor.GetPlan(LeftRight.Left) == null
+            && IsPlannable(_fcs.Loading.GetSnapshot(GunSide.Left).PhysicalState))
         {
             mask |= LeftPhysicalRetryBit;
         }
 
-        if (_fcs.PlanExecutor.GetPlan(LeftRight.Right) == null
-            && IsTransient(_fcs.Loading.GetSnapshot(GunSide.Right).PhysicalState))
+        if ((sideMask & RightPhysicalRetryBit) != 0
+            && _fcs.PlanExecutor.GetPlan(LeftRight.Right) == null
+            && IsPlannable(_fcs.Loading.GetSnapshot(GunSide.Right).PhysicalState))
         {
             mask |= RightPhysicalRetryBit;
         }
