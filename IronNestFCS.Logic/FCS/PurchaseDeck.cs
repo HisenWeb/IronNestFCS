@@ -10,6 +10,7 @@ public class PurchaseDeck {
     private Transform? _powderCard;
     private Dictionary<BulletType, Transform> bulletCards = new();
     private LookAtTarget? _buyButton;
+    private RequisitionProbe? _probe;
 
     public IReadOnlyCollection<BulletType> AvailableBulletTypes => bulletCards.Keys;
 
@@ -19,8 +20,15 @@ public class PurchaseDeck {
         _powderCard = null;
         bulletCards.Clear();
         _buyButton = null;
+        _probe = null;
 
-        var requisitionConsole = GameObject.Find("Requisition Console").transform;
+        var requisitionObject = GameObject.Find("Requisition Console");
+        if (requisitionObject == null) {
+            MelonLogger.Warning("[FCS] PurchaseDeck: Requisition Console not found");
+            return false;
+        }
+
+        var requisitionConsole = requisitionObject.transform;
         var cards = requisitionConsole.GetComponentsInChildren<PunchcardRuntime>();
         foreach (var card in cards) {
             MelonLogger.Msg($"[FCS] PurchaseDeck: Found card {card.CurrentDefinition.ID}");
@@ -38,9 +46,12 @@ public class PurchaseDeck {
             }
         }
         _buyButton = requisitionConsole.FindChild("Universal Button").GetComponent<LookAtTarget>();
+        _probe = new RequisitionProbe(requisitionConsole);
         MelonLogger.Msg($"[FCS] PurchaseDeck: Available shell types = {bulletCards.Count}");
         return true;
     }
+
+    public void ProbeTick() => _probe?.Tick();
     
     private DialInteractable GetLeftRightDial() {
         var consoleBox = GameObject.Find("Console Box").transform;
