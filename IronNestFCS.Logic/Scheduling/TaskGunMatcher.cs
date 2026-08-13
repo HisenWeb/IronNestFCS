@@ -6,6 +6,7 @@ namespace IronNestFCS.Logic.Scheduling;
 /// <summary>
 /// Stateless task-to-gun matcher. FirePlanner supplies only side-effect-free eligibility edges; this class
 /// chooses the best non-conflicting assignment and never touches the physical ballistic calculator.
+/// Scarce charge/range capability is protected before pending task order; timing/alignment remain soft costs.
 /// </summary>
 internal static class TaskGunMatcher
 {
@@ -14,13 +15,14 @@ internal static class TaskGunMatcher
         ISet<(ArtilleryTask Task, LeftRight Side)>? excludedEdges = null)
     {
         List<TaskGunAssignment>? best = null;
+        var queueRanks = BuildQueueRanks(tasks);
 
         foreach (var task in tasks)
         {
             if (IsAllowed(task, task.LeftCandidate, excludedEdges))
-                Consider(new List<TaskGunAssignment> { new(task, task.LeftCandidate!) }, ref best);
+                Consider(new List<TaskGunAssignment> { new(task, task.LeftCandidate!) }, queueRanks, ref best);
             if (IsAllowed(task, task.RightCandidate, excludedEdges))
-                Consider(new List<TaskGunAssignment> { new(task, task.RightCandidate!) }, ref best);
+                Consider(new List<TaskGunAssignment> { new(task, task.RightCandidate!) }, queueRanks, ref best);
         }
 
         // Two guns are the architectural maximum. Enumerate only the two possible side slots while
@@ -44,6 +46,7 @@ internal static class TaskGunMatcher
                         new(leftTask, leftTask.LeftCandidate!),
                         new(rightTask, rightTask.RightCandidate!),
                     },
+                    queueRanks,
                     ref best);
             }
         }
@@ -51,6 +54,14 @@ internal static class TaskGunMatcher
         if (best != null)
             return best;
         return Array.Empty<TaskGunAssignment>();
+    }
+
+    private static Dictionary<TaskPlanningResult, int> BuildQueueRanks(IReadOnlyList<TaskPlanningResult> tasks)
+    {
+        var ranks = new Dictionary<TaskPlanningResult, int>(tasks.Count);
+        for (var i = 0; i < tasks.Count; i++)
+            ranks[tasks[i]] = i;
+        return ranks;
     }
 
     private static bool IsAllowed(
@@ -62,21 +73,27 @@ internal static class TaskGunMatcher
                && (excludedEdges == null || !excludedEdges.Contains((planning.Task, candidate.Side)));
     }
 
-    private static void Consider(List<TaskGunAssignment> candidate, ref List<TaskGunAssignment>? best)
+    private static void Consider(
+        List<TaskGunAssignment> candidate,
+        Dictionary<TaskPlanningResult, int> queueRanks,
+        ref List<TaskGunAssignment>? best)
     {
-        if (best == null || Compare(candidate, best) < 0)
+        if (best == null || Compare(candidate, best, queueRanks) < 0)
             best = candidate;
     }
 
     // Negative means a is the better solution.
-    private static int Compare(IReadOnlyList<TaskGunAssignment> a, IReadOnlyList<TaskGunAssignment> b)
+    private static int Compare(
+        IReadOnlyList<TaskGunAssignment> a,
+        IReadOnlyList<TaskGunAssignment> b,
+        Dictionary<TaskPlanningResult, int> queueRanks)
     {
         // Hard priority #1: fill as many currently available gun slots as possible.
         if (a.Count != b.Count)
             return b.Count.CompareTo(a.Count);
 
-        // Charge fit stays ahead of soft timing costs: preserve scarce range capability whenever the same
-        // number of tasks can be covered with a tighter charge-to-range fit.
+        // Hard priority #2: protect scarce charge/range capability. A short-range task should prefer the lower
+        // charge when that leaves a higher-charge gun available for a task that actually needs the extra range.
         var aMaxChargeExcess = a.Max(ChargeExcess);
         var bMaxChargeExcess = b.Max(ChargeExcess);
         if (aMaxChargeExcess != bMaxChargeExcess)
@@ -86,6 +103,15 @@ internal static class TaskGunMatcher
         var bTotalChargeExcess = b.Sum(ChargeExcess);
         if (aTotalChargeExcess != bTotalChargeExcess)
             return aTotalChargeExcess.CompareTo(bTotalChargeExcess);
+
+        // Hard priority #3: once equally good charge-resource matches are known, preserve dispatcher queue order.
+        // A later task may bypass an older one only when eligibility/cardinality/charge fit make that necessary.
+        var taskPriority = CompareTaskPriority(a, b, queueRanks);
+        if (taskPriority != 0)
+            return taskPriority;
+
+        // From here on both solutions contain the same pending task set with the same charge fit. Timing and
+        // alignment only decide which gun each already-selected task should use; they cannot reorder targets.
 
         // Pre-match ETA contains loading + shared azimuth only. Elevation is deliberately absent because
         // obtaining it would invoke the physical calculator and create a sticker before the match is final.
@@ -104,12 +130,36 @@ internal static class TaskGunMatcher
                 return aTotalReady.CompareTo(bTotalReady);
         }
 
-        var aAzimuth = a.Sum(x => x.Candidate.AzimuthScore);
-        var bAzimuth = b.Sum(x => x.Candidate.AzimuthScore);
+        // AzimuthSeconds already uses FireReadyEstimator's canonical signed-bearing conversion. Convert it
+        // back to degrees for the existing alignment tolerance instead of trusting the legacy AzimuthScore field.
+        var aAzimuth = a.Sum(CorrectAzimuthScore);
+        var bAzimuth = b.Sum(CorrectAzimuthScore);
         if (Math.Abs(aAzimuth - bAzimuth) > FireReadyEstimator.AlignmentTieTolerance)
             return aAzimuth.CompareTo(bAzimuth);
 
         return 0;
+    }
+
+    private static int CompareTaskPriority(
+        IReadOnlyList<TaskGunAssignment> a,
+        IReadOnlyList<TaskGunAssignment> b,
+        Dictionary<TaskPlanningResult, int> queueRanks)
+    {
+        var aRanks = a.Select(x => queueRanks[x.Planning]).OrderBy(x => x).ToArray();
+        var bRanks = b.Select(x => queueRanks[x.Planning]).OrderBy(x => x).ToArray();
+
+        for (var i = 0; i < aRanks.Length; i++)
+        {
+            if (aRanks[i] != bRanks[i])
+                return aRanks[i].CompareTo(bRanks[i]);
+        }
+
+        return 0;
+    }
+
+    private static float CorrectAzimuthScore(TaskGunAssignment assignment)
+    {
+        return assignment.Candidate.AzimuthSeconds * FireReadyEstimator.AzimuthSlewDegreesPerSecond;
     }
 
     private static int ChargeExcess(TaskGunAssignment assignment)
