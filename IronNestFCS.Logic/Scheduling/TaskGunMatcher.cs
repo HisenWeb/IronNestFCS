@@ -6,7 +6,7 @@ namespace IronNestFCS.Logic.Scheduling;
 /// <summary>
 /// Stateless task-to-gun matcher. FirePlanner supplies only side-effect-free eligibility edges; this class
 /// chooses the best non-conflicting assignment and never touches the physical ballistic calculator.
-/// Pending task order is preserved before soft gun-assignment costs are considered.
+/// Scarce charge/range capability is protected before pending task order; timing/alignment remain soft costs.
 /// </summary>
 internal static class TaskGunMatcher
 {
@@ -92,15 +92,8 @@ internal static class TaskGunMatcher
         if (a.Count != b.Count)
             return b.Count.CompareTo(a.Count);
 
-        // Hard priority #2: preserve dispatcher queue order among equally complete feasible matches.
-        // Eligibility already reflects the current physical loading state, so a later task may bypass an older
-        // one only when the older task cannot participate in an equally complete feasible assignment.
-        var taskPriority = CompareTaskPriority(a, b, queueRanks);
-        if (taskPriority != 0)
-            return taskPriority;
-
-        // From here on both solutions contain the same pending task set. Soft costs only decide which gun each
-        // already-selected task should use; they must never change which tactical task is admitted first.
+        // Hard priority #2: protect scarce charge/range capability. A short-range task should prefer the lower
+        // charge when that leaves a higher-charge gun available for a task that actually needs the extra range.
         var aMaxChargeExcess = a.Max(ChargeExcess);
         var bMaxChargeExcess = b.Max(ChargeExcess);
         if (aMaxChargeExcess != bMaxChargeExcess)
@@ -110,6 +103,15 @@ internal static class TaskGunMatcher
         var bTotalChargeExcess = b.Sum(ChargeExcess);
         if (aTotalChargeExcess != bTotalChargeExcess)
             return aTotalChargeExcess.CompareTo(bTotalChargeExcess);
+
+        // Hard priority #3: once equally good charge-resource matches are known, preserve dispatcher queue order.
+        // A later task may bypass an older one only when eligibility/cardinality/charge fit make that necessary.
+        var taskPriority = CompareTaskPriority(a, b, queueRanks);
+        if (taskPriority != 0)
+            return taskPriority;
+
+        // From here on both solutions contain the same pending task set with the same charge fit. Timing and
+        // alignment only decide which gun each already-selected task should use; they cannot reorder targets.
 
         // Pre-match ETA contains loading + shared azimuth only. Elevation is deliberately absent because
         // obtaining it would invoke the physical calculator and create a sticker before the match is final.
