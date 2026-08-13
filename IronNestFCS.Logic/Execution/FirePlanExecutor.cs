@@ -21,7 +21,6 @@ internal sealed class FirePlanExecutor
     private const float ElevationTimeoutSeconds = 35f;
     private const float LoadingObservationTimeoutSeconds = 90f;
     private const float AutoFireTimeoutSeconds = 25f;
-    private const float ManualFireTimeoutSeconds = 300f;
     private const float SameAzimuthToleranceDegrees = 0.09f;
     private const int FireSettlementBufferFrames = 3;
     private const float ReviewLeadTimeBeforeArmSeconds = 1.5f;
@@ -434,10 +433,11 @@ internal sealed class FirePlanExecutor
             if (leftWatch == null || rightWatch == null)
                 yield break;
 
-            var fireTimeout = autoFireIssued || _fcs.SceneInteractor.AutoFire
-                ? AutoFireTimeoutSeconds
-                : ManualFireTimeoutSeconds;
-            var deadline = FcsRuntimeClock.Now + fireTimeout;
+            // Manual fire is intentionally open-ended. Only an Auto Fire attempt gets a deadline so a failed
+            // automation can still recover without turning deliberate wait-and-fire missions into task failures.
+            float? autoFireDeadline = autoFireIssued || _autoFireIssuedForWait || _fcs.SceneInteractor.AutoFire
+                ? FcsRuntimeClock.Now + AutoFireTimeoutSeconds
+                : null;
             var resumeGeneration = FcsRuntimeClock.ResumeGeneration;
 
             while (true)
@@ -471,11 +471,12 @@ internal sealed class FirePlanExecutor
                     rightWatch = BeginFireWatch(_fcs.RightGun, "Right");
                 }
 
-                if (FcsRuntimeClock.Now >= deadline)
+                if (!autoFireDeadline.HasValue && (_autoFireIssuedForWait || _fcs.SceneInteractor.AutoFire))
+                    autoFireDeadline = FcsRuntimeClock.Now + AutoFireTimeoutSeconds;
+
+                if (autoFireDeadline.HasValue && FcsRuntimeClock.Now >= autoFireDeadline.Value)
                 {
-                    FailPlan(plan, _autoFireIssuedForWait || _fcs.SceneInteractor.AutoFire
-                        ? "automatic fire was not observed"
-                        : "manual fire wait timed out");
+                    FailPlan(plan, "automatic fire was not observed");
                     yield break;
                 }
 
