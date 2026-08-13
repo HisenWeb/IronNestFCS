@@ -92,6 +92,13 @@ internal static class TaskGunMatcher
         if (a.Count != b.Count)
             return b.Count.CompareTo(a.Count);
 
+        // Narrow single-task exception: when the same task can use either an already-loaded gun or a completely
+        // empty gun, consume the compatible LoadedReady round instead of starting a redundant fresh load.
+        // This never participates in multi-task set selection, so the existing charge/range protection is intact.
+        var loadedReadyPreference = CompareSingleTaskLoadedReadyOverEmptyReady(a, b);
+        if (loadedReadyPreference != 0)
+            return loadedReadyPreference;
+
         // Hard priority #2: protect scarce charge/range capability. A short-range task should prefer the lower
         // charge when that leaves a higher-charge gun available for a task that actually needs the extra range.
         var aMaxChargeExcess = a.Max(ChargeExcess);
@@ -138,6 +145,45 @@ internal static class TaskGunMatcher
             return aAzimuth.CompareTo(bAzimuth);
 
         return 0;
+    }
+
+    private static int CompareSingleTaskLoadedReadyOverEmptyReady(
+        IReadOnlyList<TaskGunAssignment> a,
+        IReadOnlyList<TaskGunAssignment> b)
+    {
+        if (a.Count != 1
+            || b.Count != 1
+            || !ReferenceEquals(a[0].Planning.Task, b[0].Planning.Task))
+        {
+            return 0;
+        }
+
+        var aLoadedReady = IsLoadedReadyCandidate(a[0].Candidate);
+        var bLoadedReady = IsLoadedReadyCandidate(b[0].Candidate);
+        var aEmptyReady = IsEmptyReadyCandidate(a[0].Candidate);
+        var bEmptyReady = IsEmptyReadyCandidate(b[0].Candidate);
+
+        if (aLoadedReady && bEmptyReady)
+            return -1;
+        if (bLoadedReady && aEmptyReady)
+            return 1;
+        return 0;
+    }
+
+    // FirePlanner's canonical candidate encoding is exact for these two physical states:
+    // LoadedReady => known zero remaining load; EmptyReady => known fresh-load baseline.
+    private static bool IsLoadedReadyCandidate(TaskGunCandidate candidate)
+    {
+        return candidate.EtaKnown
+               && !candidate.LoadAlreadyRunning
+               && candidate.LoadSeconds == 0f;
+    }
+
+    private static bool IsEmptyReadyCandidate(TaskGunCandidate candidate)
+    {
+        return candidate.EtaKnown
+               && !candidate.LoadAlreadyRunning
+               && candidate.LoadSeconds == FireReadyEstimator.FreshLoadReadySeconds;
     }
 
     private static int CompareTaskPriority(
