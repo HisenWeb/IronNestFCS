@@ -47,14 +47,22 @@ public class FcsSceneInteractor
     public void Initialize()
     {
         _shuttingDown = false;
-        InitializeBulletTypeButtons();
+        RebuildBulletTypeButtons(preserveSelection: false);
         InitializeTargetButtons();
     }
 
-    private void InitializeBulletTypeButtons()
+    public void RefreshBulletTypeButtons()
     {
+        if (_shuttingDown)
+            return;
+        RebuildBulletTypeButtons(preserveSelection: true);
+    }
+
+    private void RebuildBulletTypeButtons(bool preserveSelection)
+    {
+        ClearBulletTypeButtons();
+
         // Requisition Console decides availability; enum order remains the canonical UI order.
-        // This keeps button positions stable when a scenario exposes only a subset of shell types.
         var types = ((BulletType[])Enum.GetValues(typeof(BulletType)))
             .Where(_fcs.PurchaseDeck.HasShell)
             .ToArray();
@@ -65,12 +73,15 @@ public class FcsSceneInteractor
             return;
         }
 
-        selectedBulletType = types.Contains(BulletType.HE)
-            ? BulletType.HE
-            : types[0];
+        if (!preserveSelection || !types.Contains(selectedBulletType))
+        {
+            selectedBulletType = types.Contains(BulletType.HE)
+                ? BulletType.HE
+                : types[0];
+        }
 
         MelonLogger.Msg(
-            $"[FCS] Ammo UI: showing {types.Length} available shell types, default={selectedBulletType}");
+            $"[FCS] Ammo UI: showing {types.Length} available shell types, selected={selectedBulletType.DisplayName()}");
 
         for (var index = 0; index < types.Length; index++)
         {
@@ -100,6 +111,30 @@ public class FcsSceneInteractor
             text.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
             text.transform.localScale = Vector3.one;
         }
+    }
+
+    private void ClearBulletTypeButtons()
+    {
+        foreach (var button in _bulletTypeButtons)
+        {
+            if (button == null)
+                continue;
+
+            var collider = button.GetComponent<Collider>();
+            if (collider != null)
+                _clicks.Unregister(collider);
+
+            // Text objects are children of the button but are also tracked individually for shutdown.
+            // Remove the whole subtree from that list before destroying the parent now.
+            var ownedObjects = button.GetComponentsInChildren<Transform>(true)
+                .Select(transform => transform.gameObject)
+                .ToArray();
+            foreach (var ownedObject in ownedObjects)
+                _destroyOnShutdown.Remove(ownedObject);
+
+            Object.Destroy(button);
+        }
+        _bulletTypeButtons.Clear();
     }
 
     private void InitializeTargetButtons()
