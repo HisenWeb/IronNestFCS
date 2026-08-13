@@ -112,7 +112,6 @@ public class FSC
         if (!Loading.IsBound)
             MelonLogger.Warning("[FCS] Persistent LoadingSystem is not bound.");
 
-        // FirePriority caches its rendered status text, so detect the game language before resetting it.
         if (IsBound)
             FcsLocalization.BindGameLanguage();
         FirePriority.Reset();
@@ -142,6 +141,8 @@ public class FSC
         }
 
         FcsLocalization.TickGameLanguage();
+        if (PurchaseDeck.SyncTick())
+            SceneInteractor.RefreshBulletTypeButtons();
         SceneInteractor.Update();
         PlanExecutor.Tick();
         CaptureEstimatedFlightTime(LeftRight.Left);
@@ -180,7 +181,6 @@ public class FSC
         TimeToImpactReader.Reset();
         FcsLocalization.ResetGameLanguage();
 
-        // Only TaskSystem-owned clicks are released here. Persistent loading has a separate Host tracker.
         SceneInteractor.ShutDown();
 
         try { _harmony?.UnpatchSelf(); }

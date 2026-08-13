@@ -26,6 +26,14 @@ public class ClickRaycaster
             targets.Add((collider, onClick));
     }
 
+    /// <summary>移除一个动态销毁的 Collider，避免刷新 UI 时残留旧注册。</summary>
+    public void Unregister(Collider collider)
+    {
+        if (collider == null)
+            return;
+        targets.RemoveAll(item => item.collider == null || item.collider.Equals(collider));
+    }
+
     /// <summary>每帧调用。检测左键点击并派发。</summary>
     public void Update()
     {
