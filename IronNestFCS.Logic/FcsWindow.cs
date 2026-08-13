@@ -6,8 +6,8 @@ using UnityEngine;
 namespace IronNestFCS.Logic;
 
 /// <summary>
-/// Compact FCS IMGUI status window. The HUD answers what each gun is doing, what fires next,
-/// and why queued work is waiting; detailed firing-solution data remains on the in-game stickers.
+/// Combat-focused FCS IMGUI status window. Keep current gun state and firing-solution information visible,
+/// while omitting historical/session statistics and internal scheduling diagnostics.
 /// </summary>
 public class FcsWindow
 {
@@ -28,8 +28,9 @@ public class FcsWindow
         var lineCount = 2;
         if (fcs.IsBound)
         {
-            // Left gun + right gun + controls are always visible.
-            lineCount = 3;
+            lineCount = 1;
+            lineCount += fcs.LeftTask == null ? 1 : 2;
+            lineCount += fcs.RightTask == null ? 1 : 2;
             if (showPriority)
                 lineCount += 1;
             if (queue.Count > 0)
@@ -89,24 +90,10 @@ public class FcsWindow
             Label(FcsLocalization.T($"等待队列：{queue.Count}", $"Pending: {queue.Count}"));
             foreach (var item in queue)
             {
-                var hintZh = item.pendingHint switch
-                {
-                    PendingHint.ShellMismatch => " · 弹种不匹配",
-                    PendingHint.ChargeRangeInsufficient => " · 装药射程不足",
-                    PendingHint.AmmoMismatch => " · 装药射程不足",
-                    _ => "",
-                };
-                var hintEn = item.pendingHint switch
-                {
-                    PendingHint.ShellMismatch => " · shell mismatch",
-                    PendingHint.ChargeRangeInsufficient => " · charge range insufficient",
-                    PendingHint.AmmoMismatch => " · charge range insufficient",
-                    _ => "",
-                };
-
+                var position = ConvertPosition(item.position);
                 Label(FcsLocalization.T(
-                    $"  T{item.targetId} {item.bulletType.DisplayName()}{hintZh}",
-                    $"  T{item.targetId} {item.bulletType.DisplayName()}{hintEn}"));
+                    $"  T{item.targetId} {item.bulletType.DisplayName()} · 打击 {position} · 方位 {item.angel:F1}°",
+                    $"  T{item.targetId} {item.bulletType.DisplayName()} · Impact {position} · Az {item.angel:F1}°"));
             }
         }
     }
@@ -125,13 +112,13 @@ public class FcsWindow
             {
                 case GunPhysicalStateKind.LoadedReady:
                     label(FcsLocalization.T(
-                        $"{gunName}：已装填 {state.ShellType!.Value.DisplayName()} / 装药{state.PowderCharges}，等待目标",
-                        $"{gunName}: loaded {state.ShellType!.Value.DisplayName()} / C{state.PowderCharges}, waiting for target"));
+                        $"{gunName}：已装填 {state.ShellType!.Value.DisplayName()} / 装药{state.PowderCharges}，等待匹配任务",
+                        $"{gunName}: loaded {state.ShellType!.Value.DisplayName()} / C{state.PowderCharges}, waiting for matching task"));
                     break;
                 case GunPhysicalStateKind.ShellLoaded:
                     label(FcsLocalization.T(
-                        $"{gunName}：已入膛 {state.ShellType!.Value.DisplayName()}，等待同弹种目标",
-                        $"{gunName}: chambered {state.ShellType!.Value.DisplayName()}, waiting for matching target"));
+                        $"{gunName}：已入膛 {state.ShellType!.Value.DisplayName()}，等待匹配任务",
+                        $"{gunName}: chambered {state.ShellType!.Value.DisplayName()}, waiting for matching task"));
                     break;
                 case GunPhysicalStateKind.EmptyReady:
                     label(FcsLocalization.T($"{gunName}：空闲（空炮）", $"{gunName}: idle / empty"));
@@ -153,11 +140,27 @@ public class FcsWindow
         }
 
         var elapsed = task.startedAt > 0f ? FcsRuntimeClock.Now - task.startedAt : 0f;
-        var flightZh = float.IsNaN(estimatedFlightSeconds) ? "" : $" · 飞行 {estimatedFlightSeconds:F1}秒";
-        var flightEn = float.IsNaN(estimatedFlightSeconds) ? "" : $" · Flight {estimatedFlightSeconds:F1}s";
-
         label(FcsLocalization.T(
-            $"{gunName}：T{task.targetId} {task.bulletType.DisplayName()} · {FcsLocalization.ProgressText(task.progress)} · {elapsed:F0}秒{flightZh}",
-            $"{gunName}: T{task.targetId} {task.bulletType.DisplayName()} · {FcsLocalization.ProgressText(task.progress)} · {elapsed:F0}s{flightEn}"));
+            $"{gunName}：T{task.targetId} {task.bulletType.DisplayName()} · {FcsLocalization.ProgressText(task.progress)} · {elapsed:F0}秒",
+            $"{gunName}: T{task.targetId} {task.bulletType.DisplayName()} · {FcsLocalization.ProgressText(task.progress)} · {elapsed:F0}s"));
+
+        var position = ConvertPosition(task.position);
+        var flightZh = float.IsNaN(estimatedFlightSeconds) ? "--" : $"{estimatedFlightSeconds:F1}秒";
+        var flightEn = float.IsNaN(estimatedFlightSeconds) ? "--" : $"{estimatedFlightSeconds:F1}s";
+        label(FcsLocalization.T(
+            $"  打击 {position} · 方位 {task.angel:F1}° · 装药{task.chargeCount} · 仰角{task.elevation:F1}° · 飞行 {flightZh}",
+            $"  Impact {position} · Az {task.angel:F1}° · C{task.chargeCount} · E{task.elevation:F1}° · Flight {flightEn}"));
+    }
+
+    /// <summary>Converts a map coordinate into the grid/sub-grid notation used by the tactical map.</summary>
+    public static string ConvertPosition(Vector3 position)
+    {
+        var letterIndex = (int)position.x;
+        var zoneCol = letterIndex >= 0 && letterIndex < 26 ? ((char)('A' + letterIndex)).ToString() : "#";
+        var zoneRow = (int)position.y + 1;
+        var subCol = (int)(position.x * 10) % 10;
+        var subRow = (int)(position.y * 10) % 10;
+
+        return $"{zoneCol}{zoneRow}  {subCol}:{subRow}";
     }
 }
