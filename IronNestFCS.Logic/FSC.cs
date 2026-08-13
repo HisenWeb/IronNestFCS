@@ -141,7 +141,8 @@ public class FSC
         }
 
         FcsLocalization.TickGameLanguage();
-        PurchaseDeck.ProbeTick();
+        if (PurchaseDeck.SyncTick())
+            SceneInteractor.RefreshBulletTypeButtons();
         SceneInteractor.Update();
         PlanExecutor.Tick();
         CaptureEstimatedFlightTime(LeftRight.Left);
@@ -179,7 +180,6 @@ public class FSC
         FirePriority.Reset();
         TimeToImpactReader.Reset();
         FcsLocalization.ResetGameLanguage();
-        PurchaseDeck.DisposeProbe();
 
         SceneInteractor.ShutDown();
 
