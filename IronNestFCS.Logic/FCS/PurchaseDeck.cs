@@ -17,6 +17,7 @@ public class PurchaseDeck {
     public bool HasShell(BulletType type) => bulletCards.ContainsKey(type);
     
     public bool TryBind() {
+        _probe?.Dispose();
         _powderCard = null;
         bulletCards.Clear();
         _buyButton = null;
@@ -52,6 +53,11 @@ public class PurchaseDeck {
     }
 
     public void ProbeTick() => _probe?.Tick();
+
+    public void DisposeProbe() {
+        _probe?.Dispose();
+        _probe = null;
+    }
     
     private DialInteractable GetLeftRightDial() {
         var consoleBox = GameObject.Find("Console Box").transform;
