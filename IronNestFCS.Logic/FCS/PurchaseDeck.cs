@@ -10,8 +10,16 @@ public class PurchaseDeck {
     private Transform? _powderCard;
     private Dictionary<BulletType, Transform> bulletCards = new();
     private LookAtTarget? _buyButton;
+
+    public IReadOnlyCollection<BulletType> AvailableBulletTypes => bulletCards.Keys;
+
+    public bool HasShell(BulletType type) => bulletCards.ContainsKey(type);
     
     public bool TryBind() {
+        _powderCard = null;
+        bulletCards.Clear();
+        _buyButton = null;
+
         var requisitionConsole = GameObject.Find("Requisition Console").transform;
         var cards = requisitionConsole.GetComponentsInChildren<PunchcardRuntime>();
         foreach (var card in cards) {
@@ -30,6 +38,7 @@ public class PurchaseDeck {
             }
         }
         _buyButton = requisitionConsole.FindChild("Universal Button").GetComponent<LookAtTarget>();
+        MelonLogger.Msg($"[FCS] PurchaseDeck: Available shell types = {bulletCards.Count}");
         return true;
     }
     
