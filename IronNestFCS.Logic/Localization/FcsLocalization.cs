@@ -21,7 +21,7 @@ internal static class FcsLocalization
     private static float _nextLanguagePollAt;
 
     public static bool IsChinese => _isChinese;
-    public static float WindowWidth => IsChinese ? 520f : 560f;
+    public static float WindowWidth => IsChinese ? 490f : 560f;
 
     public static string T(string zhCn, string enUs) => IsChinese ? zhCn : enUs;
 
@@ -95,7 +95,7 @@ internal static class FcsLocalization
 
             _isChinese = chinese;
             MelonLogger.Msg(
-                $"[FCS] Game UI language changed: {(_isChinese ? "zh-CN" : "en-US")} (probe='{probe}')");
+                $"[FCS] UI language changed: {(_isChinese ? "zh-CN" : "en-US")} (probe='{probe}')");
         }
         catch
         {
