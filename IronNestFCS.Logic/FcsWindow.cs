@@ -82,7 +82,7 @@ public class FcsWindow
             Label(fcs.FirePriorityStatusText);
 
         Label(FcsLocalization.T(
-            $"自动开火：{FcsLocalization.OnOff(fcs.AutoFireEnabled)}    最大装药：{FcsLocalization.OnOff(fcs.MaxChargeEnabled)}",
+            $"自动开火：{FcsLocalization.OnOff(fcs.AutoFireEnabled)}    最大装药量：{FcsLocalization.OnOff(fcs.MaxChargeEnabled)}",
             $"Auto Fire: {FcsLocalization.OnOff(fcs.AutoFireEnabled)}    Max Charge: {FcsLocalization.OnOff(fcs.MaxChargeEnabled)}"));
 
         if (queue.Count > 0)
@@ -112,7 +112,7 @@ public class FcsWindow
             {
                 case GunPhysicalStateKind.LoadedReady:
                     label(FcsLocalization.T(
-                        $"{gunName}：已装填 {state.ShellType!.Value.DisplayName()} / 装药{state.PowderCharges}，等待匹配任务",
+                        $"{gunName}：已装填 {state.ShellType!.Value.DisplayName()} / 装药量{state.PowderCharges}，等待匹配任务",
                         $"{gunName}: loaded {state.ShellType!.Value.DisplayName()} / C{state.PowderCharges}, waiting for matching task"));
                     break;
                 case GunPhysicalStateKind.ShellLoaded:
@@ -148,7 +148,7 @@ public class FcsWindow
         var flightZh = float.IsNaN(estimatedFlightSeconds) ? "--" : $"{estimatedFlightSeconds:F1}秒";
         var flightEn = float.IsNaN(estimatedFlightSeconds) ? "--" : $"{estimatedFlightSeconds:F1}s";
         label(FcsLocalization.T(
-            $"  打击 {position} · 方位 {task.angel:F1}° · 装药{task.chargeCount} · 仰角{task.elevation:F1}° · 飞行 {flightZh}",
+            $"  打击 {position} · 方位 {task.angel:F1}° · 装药量{task.chargeCount} · 仰角{task.elevation:F1}° · 飞行 {flightZh}",
             $"  Impact {position} · Az {task.angel:F1}° · C{task.chargeCount} · E{task.elevation:F1}° · Flight {flightEn}"));
     }
 
