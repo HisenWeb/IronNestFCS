@@ -1,7 +1,5 @@
 using HarmonyInstance = HarmonyLib.Harmony;
-using HarmonyLib;
 using System.Collections;
-using Il2Cpp;
 using IronNestFCS.Abstractions;
 using IronNestFCS.Logic.Execution;
 using IronNestFCS.Logic.FCS;
@@ -115,10 +113,7 @@ public class FSC
             MelonLogger.Warning("[FCS] Persistent LoadingSystem is not bound.");
 
         if (IsBound)
-        {
             FcsLocalization.BindGameLanguage();
-            InstallRequisitionProbePatches();
-        }
         FirePriority.Reset();
 
         MelonLogger.Msg("[FCS] Initialize: " + (IsBound ? "success" : "failed"));
@@ -131,36 +126,6 @@ public class FSC
         }
 
         return IsBound;
-    }
-
-    private void InstallRequisitionProbePatches()
-    {
-        if (_harmony == null)
-            return;
-
-        try
-        {
-            PatchLookAtTargetForProbe(nameof(LookAtTarget.OnClickDown), nameof(RequisitionProbe.LookAtTargetClickDownPostfix));
-            PatchLookAtTargetForProbe(nameof(LookAtTarget.OnClickUp), nameof(RequisitionProbe.LookAtTargetClickUpPostfix));
-            MelonLogger.Msg("[FCS RequisitionProbe] LookAtTarget click hooks installed");
-        }
-        catch (Exception ex)
-        {
-            MelonLogger.Error($"[FCS RequisitionProbe] failed to install LookAtTarget click hooks: {ex}");
-        }
-    }
-
-    private void PatchLookAtTargetForProbe(string originalName, string postfixName)
-    {
-        if (_harmony == null)
-            return;
-
-        var original = AccessTools.Method(typeof(LookAtTarget), originalName, Type.EmptyTypes);
-        var postfix = AccessTools.Method(typeof(RequisitionProbe), postfixName);
-        if (original == null || postfix == null)
-            throw new MissingMethodException($"LookAtTarget.{originalName} or RequisitionProbe.{postfixName} not found");
-
-        _harmony.Patch(original, postfix: new HarmonyMethod(postfix));
     }
 
     public void Update()
