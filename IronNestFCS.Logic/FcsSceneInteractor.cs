@@ -17,8 +17,11 @@ public class FcsSceneInteractor
     private const float UiRowY = 0.0045f;
     private const float AmmoLeftZ = -18.4181f;
     private const float RightColumnZ = -18.5881f;
+
+    // Keep the current panel skeleton stable: up to 13 ammo rows on the left, while the first
+    // 6 rows on the right remain reserved for Auto Fire, Max Charge and T1-T4.
     private const int LeftAmmoCount = 13;
-    private const float RightAmmoStartRow = 6f;
+    private const int RightAmmoStartRow = 6;
 
     private readonly FSC _fcs;
     private readonly List<GameObject> _destroyOnShutdown = new();
@@ -50,7 +53,24 @@ public class FcsSceneInteractor
 
     private void InitializeBulletTypeButtons()
     {
-        var types = (BulletType[])Enum.GetValues(typeof(BulletType));
+        // Requisition Console decides availability; enum order remains the canonical UI order.
+        // This keeps button positions stable when a scenario exposes only a subset of shell types.
+        var types = ((BulletType[])Enum.GetValues(typeof(BulletType)))
+            .Where(_fcs.PurchaseDeck.HasShell)
+            .ToArray();
+
+        if (types.Length == 0)
+        {
+            MelonLogger.Warning("[FCS] Ammo UI: Requisition Console exposed no known shell types");
+            return;
+        }
+
+        selectedBulletType = types.Contains(BulletType.HE)
+            ? BulletType.HE
+            : types[0];
+
+        MelonLogger.Msg(
+            $"[FCS] Ammo UI: showing {types.Length} available shell types, default={selectedBulletType}");
 
         for (var index = 0; index < types.Length; index++)
         {
@@ -69,7 +89,7 @@ public class FcsSceneInteractor
                 selectedBulletType = captured;
                 foreach (var item in _bulletTypeButtons)
                     SetColor(item, item == button ? Color.green : Color.white);
-            }, type == BulletType.HE ? Color.green : Color.white);
+            }, type == selectedBulletType ? Color.green : Color.white);
 
             button.transform.position = new Vector3(x, y, z);
             button.transform.localScale = Vector3.one * 0.02f;
