@@ -16,6 +16,7 @@ namespace IronNestFCS;
 public class FcsHostMod : MelonMod
 {
     private const string ReloadKeyName = "F9";
+    private const string HudToggleKeyName = "F8";
     private const string LogicTypeName = "IronNestFCS.Logic.FcsModule";
     private const float InitialBindDelaySeconds = 1f;
     private const float SceneBindDelaySeconds = 3f;
@@ -26,6 +27,7 @@ public class FcsHostMod : MelonMod
     private bool _sceneBindPending;
     private float _nextBindAttemptAt;
     private bool _shutdownStarted;
+    private bool _hudHidden;
 
     public override void OnInitializeMelon()
     {
@@ -53,6 +55,12 @@ public class FcsHostMod : MelonMod
     {
         var kb = Keyboard.current;
         return kb != null && kb.f9Key.wasPressedThisFrame;
+    }
+
+    private static bool HudToggleKeyPressed()
+    {
+        var kb = Keyboard.current;
+        return kb != null && kb.f8Key.wasPressedThisFrame;
     }
 
     public override void OnSceneWasLoaded(int buildIndex, string sceneName)
@@ -97,6 +105,9 @@ public class FcsHostMod : MelonMod
         // Run persistent physical ownership before deciding whether this frame reloads Logic.
         _hostServices.LoadingRuntime.Update();
 
+        if (HudToggleKeyPressed())
+            _hudHidden = !_hudHidden;
+
         if (_reloader == null)
             return;
 
@@ -119,7 +130,7 @@ public class FcsHostMod : MelonMod
 
     public override void OnGUI()
     {
-        if (_reloader?.Current == null)
+        if (_hudHidden || _reloader?.Current == null)
             return;
 
         try { _reloader.Current.OnGui(); }
