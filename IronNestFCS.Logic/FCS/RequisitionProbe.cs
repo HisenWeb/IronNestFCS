@@ -8,20 +8,16 @@ internal sealed class RequisitionProbe : IDisposable
 {
     private const float SampleIntervalSeconds = 0.10f;
 
-    private static RequisitionProbe? _active;
-
     private readonly Transform _root;
     private float _nextSampleAt;
     private string _lastCardFingerprint = "";
     private string _lastControlFingerprint = "";
     private int _cardChangeSerial;
     private int _controlChangeSerial;
-    private int _clickSerial;
 
     public RequisitionProbe(Transform root)
     {
         _root = root;
-        _active = this;
         MelonLogger.Msg($"[FCS RequisitionProbe] bound root={BuildPath(root)} t={Time.unscaledTime:F3}");
         DumpCandidateHierarchy();
         Sample(true);
@@ -29,8 +25,6 @@ internal sealed class RequisitionProbe : IDisposable
 
     public void Dispose()
     {
-        if (ReferenceEquals(_active, this))
-            _active = null;
     }
 
     public void Tick()
@@ -40,40 +34,6 @@ internal sealed class RequisitionProbe : IDisposable
 
         _nextSampleAt = Time.unscaledTime + SampleIntervalSeconds;
         Sample(false);
-    }
-
-    // Harmony postfix targets installed by FSC. Filtering stays here so the patch can observe all
-    // LookAtTarget interactions without polluting logs outside the requisition console.
-    public static void LookAtTargetClickDownPostfix(LookAtTarget __instance) =>
-        _active?.RecordClick("DOWN", __instance);
-
-    public static void LookAtTargetClickUpPostfix(LookAtTarget __instance) =>
-        _active?.RecordClick("UP", __instance);
-
-    private void RecordClick(string phase, LookAtTarget? control)
-    {
-        if (control == null || !IsUnderRoot(control.transform))
-            return;
-
-        _clickSerial++;
-        var transform = control.transform;
-        var euler = transform.localEulerAngles;
-        MelonLogger.Msg(
-            $"[FCS RequisitionProbe] CLICK #{_clickSerial} {phase} t={Time.unscaledTime:F3} " +
-            $"instance={control.GetInstanceID()} active={control.isActive} nextClick={control.nextAllowedClickTime:F3} " +
-            $"localEuler=({euler.x:F1},{euler.y:F1},{euler.z:F1}) path={BuildPath(transform)}");
-    }
-
-    private bool IsUnderRoot(Transform? node)
-    {
-        var current = node;
-        while (current != null)
-        {
-            if (current == _root)
-                return true;
-            current = current.parent;
-        }
-        return false;
     }
 
     private void Sample(bool force)
