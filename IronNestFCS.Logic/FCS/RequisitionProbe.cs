@@ -4,9 +4,11 @@ using UnityEngine;
 
 namespace IronNestFCS.Logic.FCS;
 
-internal sealed class RequisitionProbe
+internal sealed class RequisitionProbe : IDisposable
 {
     private const float SampleIntervalSeconds = 0.10f;
+
+    private static RequisitionProbe? _active;
 
     private readonly Transform _root;
     private float _nextSampleAt;
@@ -14,13 +16,21 @@ internal sealed class RequisitionProbe
     private string _lastControlFingerprint = "";
     private int _cardChangeSerial;
     private int _controlChangeSerial;
+    private int _clickSerial;
 
     public RequisitionProbe(Transform root)
     {
         _root = root;
+        _active = this;
         MelonLogger.Msg($"[FCS RequisitionProbe] bound root={BuildPath(root)} t={Time.unscaledTime:F3}");
         DumpCandidateHierarchy();
         Sample(true);
+    }
+
+    public void Dispose()
+    {
+        if (ReferenceEquals(_active, this))
+            _active = null;
     }
 
     public void Tick()
@@ -30,6 +40,40 @@ internal sealed class RequisitionProbe
 
         _nextSampleAt = Time.unscaledTime + SampleIntervalSeconds;
         Sample(false);
+    }
+
+    // Harmony postfix targets installed by FSC. Filtering stays here so the patch can observe all
+    // LookAtTarget interactions without polluting logs outside the requisition console.
+    public static void LookAtTargetClickDownPostfix(LookAtTarget __instance) =>
+        _active?.RecordClick("DOWN", __instance);
+
+    public static void LookAtTargetClickUpPostfix(LookAtTarget __instance) =>
+        _active?.RecordClick("UP", __instance);
+
+    private void RecordClick(string phase, LookAtTarget? control)
+    {
+        if (control == null || !IsUnderRoot(control.transform))
+            return;
+
+        _clickSerial++;
+        var transform = control.transform;
+        var euler = transform.localEulerAngles;
+        MelonLogger.Msg(
+            $"[FCS RequisitionProbe] CLICK #{_clickSerial} {phase} t={Time.unscaledTime:F3} " +
+            $"instance={control.GetInstanceID()} active={control.isActive} nextClick={control.nextAllowedClickTime:F3} " +
+            $"localEuler=({euler.x:F1},{euler.y:F1},{euler.z:F1}) path={BuildPath(transform)}");
+    }
+
+    private bool IsUnderRoot(Transform? node)
+    {
+        var current = node;
+        while (current != null)
+        {
+            if (current == _root)
+                return true;
+            current = current.parent;
+        }
+        return false;
     }
 
     private void Sample(bool force)
@@ -92,13 +136,15 @@ internal sealed class RequisitionProbe
                 control.GetInstanceID(),
                 BuildPath(control.transform),
                 control.isActive,
-                control.nextAllowedClickTime))
+                control.nextAllowedClickTime,
+                control.transform.localEulerAngles))
             .OrderBy(row => row.Path, StringComparer.Ordinal)
             .ThenBy(row => row.InstanceId)
             .ToArray();
 
         var fingerprint = string.Join("|", rows.Select(row =>
-            $"{row.InstanceId}:{row.Path}:{row.IsActive}:{row.NextAllowedClickTime:F3}"));
+            $"{row.InstanceId}:{row.Path}:{row.IsActive}:{row.NextAllowedClickTime:F3}:" +
+            $"{row.LocalEuler.x:F1},{row.LocalEuler.y:F1},{row.LocalEuler.z:F1}"));
 
         if (!force && fingerprint == _lastControlFingerprint)
             return;
@@ -111,7 +157,8 @@ internal sealed class RequisitionProbe
             var row = rows[i];
             MelonLogger.Msg(
                 $"[FCS RequisitionProbe]   control[{i}] instance={row.InstanceId} active={row.IsActive} " +
-                $"nextClick={row.NextAllowedClickTime:F3} path={row.Path}");
+                $"nextClick={row.NextAllowedClickTime:F3} localEuler=({row.LocalEuler.x:F1},{row.LocalEuler.y:F1},{row.LocalEuler.z:F1}) " +
+                $"path={row.Path}");
         }
     }
 
@@ -187,5 +234,5 @@ internal sealed class RequisitionProbe
     }
 
     private sealed record CardRow(int InstanceId, string Path, string DefinitionId, bool Active, Vector3 Position);
-    private sealed record ControlRow(int InstanceId, string Path, bool IsActive, float NextAllowedClickTime);
+    private sealed record ControlRow(int InstanceId, string Path, bool IsActive, float NextAllowedClickTime, Vector3 LocalEuler);
 }
