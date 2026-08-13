@@ -21,7 +21,7 @@ internal static class FcsLocalization
     private static float _nextLanguagePollAt;
 
     public static bool IsChinese => _isChinese;
-    public static float WindowWidth => IsChinese ? 430f : 560f;
+    public static float WindowWidth => IsChinese ? 520f : 560f;
 
     public static string T(string zhCn, string enUs) => IsChinese ? zhCn : enUs;
 
