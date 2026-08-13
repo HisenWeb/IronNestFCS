@@ -17,8 +17,11 @@ public class FcsSceneInteractor
     private const float UiRowY = 0.0045f;
     private const float AmmoLeftZ = -18.4181f;
     private const float RightColumnZ = -18.5881f;
+
+    // Keep the current panel skeleton stable: up to 13 ammo rows on the left, while the first
+    // 6 rows on the right remain reserved for Auto Fire, Max Charge and T1-T4.
     private const int LeftAmmoCount = 13;
-    private const float RightAmmoStartRow = 6f;
+    private const int RightAmmoStartRow = 6;
 
     private readonly FSC _fcs;
     private readonly List<GameObject> _destroyOnShutdown = new();
@@ -44,13 +47,41 @@ public class FcsSceneInteractor
     public void Initialize()
     {
         _shuttingDown = false;
-        InitializeBulletTypeButtons();
+        RebuildBulletTypeButtons(preserveSelection: false);
         InitializeTargetButtons();
     }
 
-    private void InitializeBulletTypeButtons()
+    public void RefreshBulletTypeButtons()
     {
-        var types = (BulletType[])Enum.GetValues(typeof(BulletType));
+        if (_shuttingDown)
+            return;
+        RebuildBulletTypeButtons(preserveSelection: true);
+    }
+
+    private void RebuildBulletTypeButtons(bool preserveSelection)
+    {
+        ClearBulletTypeButtons();
+
+        // Requisition Console decides availability; enum order remains the canonical UI order.
+        var types = ((BulletType[])Enum.GetValues(typeof(BulletType)))
+            .Where(_fcs.PurchaseDeck.HasShell)
+            .ToArray();
+
+        if (types.Length == 0)
+        {
+            MelonLogger.Warning("[FCS] Ammo UI: Requisition Console exposed no known shell types");
+            return;
+        }
+
+        if (!preserveSelection || !types.Contains(selectedBulletType))
+        {
+            selectedBulletType = types.Contains(BulletType.HE)
+                ? BulletType.HE
+                : types[0];
+        }
+
+        MelonLogger.Msg(
+            $"[FCS] Ammo UI: showing {types.Length} available shell types, selected={selectedBulletType.DisplayName()}");
 
         for (var index = 0; index < types.Length; index++)
         {
@@ -69,7 +100,7 @@ public class FcsSceneInteractor
                 selectedBulletType = captured;
                 foreach (var item in _bulletTypeButtons)
                     SetColor(item, item == button ? Color.green : Color.white);
-            }, type == BulletType.HE ? Color.green : Color.white);
+            }, type == selectedBulletType ? Color.green : Color.white);
 
             button.transform.position = new Vector3(x, y, z);
             button.transform.localScale = Vector3.one * 0.02f;
@@ -80,6 +111,30 @@ public class FcsSceneInteractor
             text.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
             text.transform.localScale = Vector3.one;
         }
+    }
+
+    private void ClearBulletTypeButtons()
+    {
+        foreach (var button in _bulletTypeButtons)
+        {
+            if (button == null)
+                continue;
+
+            var collider = button.GetComponent<Collider>();
+            if (collider != null)
+                _clicks.Unregister(collider);
+
+            // Text objects are children of the button but are also tracked individually for shutdown.
+            // Remove the whole subtree from that list before destroying the parent now.
+            var ownedObjects = button.GetComponentsInChildren<Transform>(true)
+                .Select(transform => transform.gameObject)
+                .ToArray();
+            foreach (var ownedObject in ownedObjects)
+                _destroyOnShutdown.Remove(ownedObject);
+
+            Object.Destroy(button);
+        }
+        _bulletTypeButtons.Clear();
     }
 
     private void InitializeTargetButtons()
