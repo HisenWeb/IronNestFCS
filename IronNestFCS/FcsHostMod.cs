@@ -4,7 +4,7 @@ using MelonLoader.Utils;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
-[assembly: MelonInfo(typeof(IronNestFCS.FcsHostMod), "IronNestFCS Smart", "1.2.6", "svr2kos2")]
+[assembly: MelonInfo(typeof(IronNestFCS.FcsHostMod), "IronNestFCS Smart", "1.2.7", "svr2kos2")]
 [assembly: MelonGame()]
 
 namespace IronNestFCS;
