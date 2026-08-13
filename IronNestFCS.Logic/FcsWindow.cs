@@ -6,15 +6,12 @@ using UnityEngine;
 namespace IronNestFCS.Logic;
 
 /// <summary>
-/// FCS IMGUI status window. Absolute Rect positioning avoids incomplete GUILayout passes under IL2CPP.
+/// Combat-focused FCS IMGUI status window. Keep current gun state and firing-solution information visible,
+/// while omitting historical/session statistics and internal scheduling diagnostics.
 /// </summary>
 public class FcsWindow
 {
-    private const int RecentDisplayLimit = 8;
-
     private readonly FSC fcs;
-
-    private bool showWindow = true;
     private Rect defaultWindowRect = new(40, 40, 430, 220);
 
     public FcsWindow(FSC fcs)
@@ -24,34 +21,20 @@ public class FcsWindow
 
     public void OnGui()
     {
-        if (!showWindow)
-            return;
-
         var queue = fcs.QueueCan;
-        var recent = fcs.RecentTasks;
-        var recentItems = recent.ToArray();
-        var recentStart = Math.Max(0, recentItems.Length - RecentDisplayLimit);
+        var hasActiveTask = fcs.LeftTask != null || fcs.RightTask != null;
+        var showPriority = hasActiveTask && !string.IsNullOrWhiteSpace(fcs.FirePriorityStatusText);
 
         var lineCount = 2;
         if (fcs.IsBound)
         {
-            lineCount = 0;
+            lineCount = 1;
             lineCount += fcs.LeftTask == null ? 1 : 2;
             lineCount += fcs.RightTask == null ? 1 : 2;
-            lineCount += 1;
-            if (!string.IsNullOrEmpty(fcs.FirePriorityLeftDetail)) lineCount += 1;
-            if (!string.IsNullOrEmpty(fcs.FirePriorityRightDetail)) lineCount += 1;
-            lineCount += 1;
-            lineCount += 1 + queue.Count;
-            lineCount += 2;
-
-            for (var i = recentStart; i < recentItems.Length; i++)
-            {
+            if (showPriority)
                 lineCount += 1;
-                var task = recentItems[i];
-                if (task.progress == Progress.Failed && !string.IsNullOrEmpty(task.failureReason))
-                    lineCount += 1;
-            }
+            if (queue.Count > 0)
+                lineCount += 1 + queue.Count;
         }
 
         var windowRect = defaultWindowRect;
@@ -95,65 +78,22 @@ public class FcsWindow
             fcs.PlanExecutor.GetPlan(LeftRight.Right)?.EstimatedFlightSeconds ?? float.NaN,
             Label);
 
-        Label(fcs.FirePriorityStatusText);
-        if (!string.IsNullOrEmpty(fcs.FirePriorityLeftDetail))
-            Label($"  {fcs.FirePriorityLeftDetail}");
-        if (!string.IsNullOrEmpty(fcs.FirePriorityRightDetail))
-            Label($"  {fcs.FirePriorityRightDetail}");
+        if (showPriority)
+            Label(fcs.FirePriorityStatusText);
 
         Label(FcsLocalization.T(
-            $"自动开火：{FcsLocalization.OnOff(fcs.AutoFireEnabled)}    最大装药：{FcsLocalization.OnOff(fcs.MaxChargeEnabled)}",
+            $"自动开火：{FcsLocalization.OnOff(fcs.AutoFireEnabled)}    最大装药量：{FcsLocalization.OnOff(fcs.MaxChargeEnabled)}",
             $"Auto Fire: {FcsLocalization.OnOff(fcs.AutoFireEnabled)}    Max Charge: {FcsLocalization.OnOff(fcs.MaxChargeEnabled)}"));
 
-        Label(FcsLocalization.T($"等待队列：{queue.Count}", $"Pending queue: {queue.Count}"));
-        foreach (var item in queue)
+        if (queue.Count > 0)
         {
-            var hintZh = item.pendingHint switch
+            Label(FcsLocalization.T($"等待队列：{queue.Count}", $"Pending: {queue.Count}"));
+            foreach (var item in queue)
             {
-                PendingHint.ShellMismatch => " · 弹种不匹配",
-                PendingHint.ChargeRangeInsufficient => " · 装药射程不足",
-                PendingHint.AmmoMismatch => " · 装药射程不足",
-                _ => "",
-            };
-            var hintEn = item.pendingHint switch
-            {
-                PendingHint.ShellMismatch => " · shell mismatch",
-                PendingHint.ChargeRangeInsufficient => " · charge range insufficient",
-                PendingHint.AmmoMismatch => " · charge range insufficient",
-                _ => "",
-            };
-
-            Label(FcsLocalization.T(
-                $"  T{item.targetId} {item.bulletType.DisplayName()}  方位 {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}{hintZh}",
-                $"  T{item.targetId} {item.bulletType.DisplayName()}  Az {item.angel:F1}° / {item.distance:F2}km  {ConvertPosition(item.position)}{hintEn}"));
-        }
-
-        Label(FcsLocalization.T(
-            $"本轮：完成 {fcs.CompletedTaskCount}    成功 {fcs.SuccessfulTaskCount}    失败 {fcs.FailedTaskCount}",
-            $"Session: completed {fcs.CompletedTaskCount}    success {fcs.SuccessfulTaskCount}    failed {fcs.FailedTaskCount}"));
-
-        var shownRecent = recentItems.Length - recentStart;
-        Label(FcsLocalization.T(
-            $"近期记录：最近 {shownRecent} 条（内部保留 {recent.Count}/20）",
-            $"Recent: showing {shownRecent} (kept {recent.Count}/20)"));
-
-        for (var i = recentStart; i < recentItems.Length; i++)
-        {
-            var item = recentItems[i];
-            var result = item.progress == Progress.Finished
-                ? FcsLocalization.T("成功", "SUCCESS")
-                : FcsLocalization.T("失败", "FAILED");
-            var duration = item.completedAt > item.startedAt ? item.completedAt - item.startedAt : 0f;
-
-            Label(FcsLocalization.T(
-                $"  {result} T{item.targetId} {item.bulletType.DisplayName()}  装药{item.chargeCount} 仰角{item.elevation:F1}°  {duration:F0}秒",
-                $"  {result} T{item.targetId} {item.bulletType.DisplayName()}  C{item.chargeCount} E{item.elevation:F1}°  {duration:F0}s"));
-
-            if (item.progress == Progress.Failed && !string.IsNullOrEmpty(item.failureReason))
-            {
+                var position = ConvertPosition(item.position);
                 Label(FcsLocalization.T(
-                    $"    原因：{FcsLocalization.FailureReason(item.failureReason)}",
-                    $"    Reason: {FcsLocalization.FailureReason(item.failureReason)}"));
+                    $"  T{item.targetId} {item.bulletType.DisplayName()} · 打击 {position} · 方位 {item.angel:F1}°",
+                    $"  T{item.targetId} {item.bulletType.DisplayName()} · Impact {position} · Az {item.angel:F1}°"));
             }
         }
     }
@@ -172,13 +112,13 @@ public class FcsWindow
             {
                 case GunPhysicalStateKind.LoadedReady:
                     label(FcsLocalization.T(
-                        $"{gunName}：已装填 {state.ShellType!.Value.DisplayName()} / 装药{state.PowderCharges}，等待目标",
-                        $"{gunName}: loaded {state.ShellType!.Value.DisplayName()} / C{state.PowderCharges}, waiting for target"));
+                        $"{gunName}：已装填 {state.ShellType!.Value.DisplayName()} / 装药量{state.PowderCharges}，等待匹配任务",
+                        $"{gunName}: loaded {state.ShellType!.Value.DisplayName()} / C{state.PowderCharges}, waiting for matching task"));
                     break;
                 case GunPhysicalStateKind.ShellLoaded:
                     label(FcsLocalization.T(
-                        $"{gunName}：已入膛 {state.ShellType!.Value.DisplayName()} / 未装药，等待同弹种目标",
-                        $"{gunName}: chambered {state.ShellType!.Value.DisplayName()} / no charge, waiting for matching target"));
+                        $"{gunName}：已入膛 {state.ShellType!.Value.DisplayName()}，等待匹配任务",
+                        $"{gunName}: chambered {state.ShellType!.Value.DisplayName()}, waiting for matching task"));
                     break;
                 case GunPhysicalStateKind.EmptyReady:
                     label(FcsLocalization.T($"{gunName}：空闲（空炮）", $"{gunName}: idle / empty"));
@@ -187,10 +127,10 @@ public class FcsWindow
                     label(FcsLocalization.T($"{gunName}：击发后复位中", $"{gunName}: post-shot recovery"));
                     break;
                 case GunPhysicalStateKind.Recovering:
-                    label(FcsLocalization.T($"{gunName}：状态恢复中  {state.Summary()}", $"{gunName}: recovering  {state.Summary()}"));
+                    label(FcsLocalization.T($"{gunName}：状态恢复中", $"{gunName}: recovering"));
                     break;
                 case GunPhysicalStateKind.Unknown:
-                    label(FcsLocalization.T($"{gunName}：状态待确认  {state.Summary()}", $"{gunName}: state unknown  {state.Summary()}"));
+                    label(FcsLocalization.T($"{gunName}：状态待确认", $"{gunName}: state unknown"));
                     break;
                 default:
                     label(FcsLocalization.T($"{gunName}：未绑定", $"{gunName}: unbound"));
@@ -201,14 +141,15 @@ public class FcsWindow
 
         var elapsed = task.startedAt > 0f ? FcsRuntimeClock.Now - task.startedAt : 0f;
         label(FcsLocalization.T(
-            $"{gunName}：T{task.targetId} {task.bulletType.DisplayName()}  {FcsLocalization.ProgressText(task.progress)}  {elapsed:F0}秒",
-            $"{gunName}: T{task.targetId} {task.bulletType.DisplayName()}  {FcsLocalization.ProgressText(task.progress)}  {elapsed:F0}s"));
+            $"{gunName}：T{task.targetId} {task.bulletType.DisplayName()} · {FcsLocalization.ProgressText(task.progress)} · {elapsed:F0}秒",
+            $"{gunName}: T{task.targetId} {task.bulletType.DisplayName()} · {FcsLocalization.ProgressText(task.progress)} · {elapsed:F0}s"));
 
+        var position = ConvertPosition(task.position);
         var flightZh = float.IsNaN(estimatedFlightSeconds) ? "--" : $"{estimatedFlightSeconds:F1}秒";
         var flightEn = float.IsNaN(estimatedFlightSeconds) ? "--" : $"{estimatedFlightSeconds:F1}s";
         label(FcsLocalization.T(
-            $"  方位 {task.angel:F1}° / 距离 {task.distance:F2}km   装药 {task.chargeCount}   仰角 {task.elevation:F1}°   预计飞行 {flightZh}",
-            $"  Az {task.angel:F1}° / Range {task.distance:F2}km   Charge {task.chargeCount}   Elevation {task.elevation:F1}°   Est. Flight {flightEn}"));
+            $"  打击 {position} · 方位 {task.angel:F1}° · 装药量{task.chargeCount} · 仰角{task.elevation:F1}° · 飞行 {flightZh}",
+            $"  Impact {position} · Az {task.angel:F1}° · C{task.chargeCount} · E{task.elevation:F1}° · Flight {flightEn}"));
     }
 
     /// <summary>Converts a map coordinate into the grid/sub-grid notation used by the tactical map.</summary>
