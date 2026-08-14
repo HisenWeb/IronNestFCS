@@ -43,11 +43,12 @@ IronNestFCS-Smart_vX.X.X.zip
 
 安装步骤：
 
-1. 安装适用于 IL2CPP 的 MelonLoader，并至少正常启动一次游戏。
-2. 退出游戏。
-3. 将 ZIP 中的全部内容直接解压到游戏根目录。
-4. Windows 提示合并 `Mods`、`UserLibs`、`UserData` 时允许合并。
-5. 通过 MelonLoader 正常启动游戏。
+1. 使用 MelonLoader 官方安装器安装适用于 IL2CPP 的 MelonLoader，并至少正常启动一次游戏。
+2. 不支持 BepInEx-to-MelonLoader bridge 安装方式；bridge 与运行时版本不兼容时，可能导致 IronNestFCS 无法正常加载。
+3. 退出游戏。
+4. 将 ZIP 中的全部内容直接解压到游戏根目录。
+5. Windows 提示合并 `Mods`、`UserLibs`、`UserData` 时允许合并。
+6. 通过 MelonLoader 正常启动游戏。
 
 安装后应存在：
 
