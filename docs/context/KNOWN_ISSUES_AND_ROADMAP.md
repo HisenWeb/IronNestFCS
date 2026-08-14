@@ -1,9 +1,9 @@
 # IronNestFCS Smart — Known Issues & Roadmap
 
-> 状态快照：2026-08-13（UTC+8）  
-> 当前正式版本：**v1.2.0**  
+> 状态快照：2026-08-14（UTC+8）  
+> 当前正式版本：**v1.2.7**  
 > 默认分支：`master`  
-> 发布基线：`8197223ced619525d78d4b7bc24f7a30aacc28e7`（`release: v1.2.0`）  
+> 发布基线：`da756d0f288956c2e099fd2e4a8a65cd86b97715`（`release: v1.2.7`）  
 > 本组文档由原单文件 `IronNestFCS-Smart_项目背景与设计来源.md` 拆分而来。
 
 > 定位：当前明确记录的复杂度热点、已知行为检查项和后续优化清单。
@@ -135,7 +135,7 @@ follower coroutine 如果此时还在等同一个 Trigger lane，AutoFire 可能
 
 ## 当前主要后续优化清单
 
-这些是**已记录的后续项**，不要和 v1.2.0 已完成能力混淆。
+这些是**已记录的后续项**，不要和当前已完成能力混淆。
 
 ### A. Dispatcher 轻拆分
 
@@ -180,3 +180,91 @@ existing loaded gun / ETA
 - 手动提前开火；
 - 双炮近同时开火；
 - AutoFire + same azimuth。
+
+### F. Salvo / 双炮齐射（候选，尚未实现）
+
+当前结论：Smart **已经自然具备双炮同方位协同并同时 Arm / Fire 的后半段能力**。因此如果加入显式 `Salvo`，不应新增一套 Salvo executor、长期 pair state 或新的执行生命周期。
+
+玩家侧语义：
+
+```text
+Salvo OFF
+→ 普通任务，保持现有最大吞吐量调度
+
+Salvo ON
+→ 玩家点一次目标
+→ 创建 1 个逻辑上的 SalvoTask
+→ 明确接受等待两门炮同时可接任务的代价
+→ 两门炮一起执行这个目标
+```
+
+这里的等待是显式模式本身的产品取舍：普通模式负责效率；Salvo 模式负责玩家选择的同步射击体验。不要为了同时追求 Salvo 与零等待而引入 half-salvo、提前占一门炮、长期等待另一门炮等额外状态。
+
+#### Pending 表达一个任务，不放两个 linked task
+
+队列中推荐只保存：
+
+```text
+[ SalvoTask A ]
+```
+
+而不是：
+
+```text
+[ A1 ][ A2 ]  // linked pending tasks
+```
+
+原因：Pending 应表达一次玩家意图。提前放两个 linked task 会额外制造相邻性、reorder、coalesce、cancel、F9/replan 和“只 admission 了一半”等问题。
+
+#### Admission / Matcher 只增加一个很窄的双槽规则
+
+`SalvoTask` 到达可派发位置后，只有当左右两门炮的执行槽都可接收新任务，并且当前 Snapshot 下两侧都满足既有 eligibility 时，才允许 admission。
+
+```text
+只有一门炮可接
+→ SalvoTask 保持 Pending
+
+两门炮都可接
+→ atomic admission
+→ 同一个 SalvoTask 同时 materialize 到 Left / Right
+```
+
+这可以实现为 Matcher / admission 前后的窄特判；不需要修改普通任务的 cardinality、scarcity、Pending order、ETA / azimuth 等比较规则，也不应在 Dispatcher 中另造一条绕开现有 eligibility / materialization 不变量的直接派发路径。
+
+#### 进入执行栈时展开为两个普通执行实例
+
+成功 admission 时，从同一个 `SalvoTask` 创建两份参数完全相同、仅 AssignedGun 不同的普通执行实例 / `FirePlan`：
+
+```text
+SalvoTask A
+    ↓
+Left  FirePlan(A)
+Right FirePlan(A)
+```
+
+这里不需要真的复制成两个 Pending Task；更准确的语义是：
+
+> **1 个玩家任务请求 → 2 个执行实例。**
+
+一旦进入执行栈，`Salvo` 的特殊性即结束。
+
+#### 后半段保持现有执行模型
+
+进入执行层后：
+
+- 两侧继续各自走现有 `PrepareLocal`；
+- 现有 same-azimuth / follower 逻辑负责识别双炮共同击发机会；
+- 两边条件满足后沿现有路径同时 Arm；
+- Fire / physical shot settlement / recovery 全部按现有规则处理；
+- 当前没有理由给 `FirePlan` 增加 `SalvoPairId`，除非未来实机证据证明后半段确实需要额外区分。
+
+设计不变量：
+
+> **Salvo 的特殊性只存在于 UI / Pending / admission；进入执行栈后立即退化为两个普通执行实例。**
+
+未来实现前需要确认的边界：
+
+- “两门炮清空”应精确定义为两侧执行槽均可接收新任务，而不是误解为物理炮膛必须为空；
+- Salvo 是否作为持续模式开关（当前倾向：按钮激活期间，每次点目标都创建一个 SalvoTask）；
+- F9 在 admission 前按 Pending 现有语义处理；admission 后则已经是两个普通执行实例，继续遵循现有 F9 / physical reality 规则；
+- 实机验证现有 same-azimuth Arm 路径确实足以覆盖显式 Salvo 的最终同步体验。
