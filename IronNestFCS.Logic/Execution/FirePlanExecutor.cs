@@ -249,6 +249,15 @@ internal sealed class FirePlanExecutor
         if (!IsActive(plan))
             yield break;
 
+        // Forced Sync has exactly one extra execution rendezvous. Both sides finish the existing requisition path,
+        // release the shared requisition lane, and only then are allowed to submit persistent loading requests.
+        if (plan.Task.forcedSync)
+        {
+            yield return WaitForForcedSyncProcurementPeer(plan);
+            if (!IsActive(plan))
+                yield break;
+        }
+
         if (!_fcs.Loading.TryRequest(plan.LoadRequest, out var loadReason))
         {
             FailPlan(plan, $"loading request rejected: {loadReason}");
@@ -313,6 +322,43 @@ internal sealed class FirePlanExecutor
         // A non-current ready plan is only a follower candidate for the current shared-fire opportunity. It never
         // inherits the scheduler's _next identity; eligibility is derived fresh from the live fire-wait state.
         _fcs.TrackCoroutine(TryArmReadyFollowerDuringCurrentWait(plan));
+    }
+
+    private IEnumerator WaitForForcedSyncProcurementPeer(FirePlan plan)
+    {
+        plan.ForcedSyncProcurementReady = true;
+        var peerSide = plan.Side == LeftRight.Left ? LeftRight.Right : LeftRight.Left;
+
+        while (true)
+        {
+            yield return FcsRuntimeClock.WaitUntilFocused();
+            if (!IsActive(plan))
+                yield break;
+
+            var peer = GetPlan(peerSide);
+            if (peer == null || !peer.Task.forcedSync)
+            {
+                FailPlan(plan, "Forced Sync peer disappeared before loading request");
+                yield break;
+            }
+
+            if (peer.Failed || peer.CompletionHandled)
+            {
+                FailPlan(plan, "Forced Sync peer failed before loading request");
+                yield break;
+            }
+
+            if (peer.ForcedSyncProcurementReady)
+                break;
+
+            yield return null;
+        }
+
+        MelonLogger.Msg($"[FCS ForcedSync] {plan.Label}: L+R procurement complete; releasing loading request");
+
+        // Give both preparation coroutines the same next-frame release point. TryRequest remains naturally
+        // serialized by coroutine order, but neither side can start before both requisition phases have arrived.
+        yield return null;
     }
 
     private IEnumerator RunShared(FirePlan plan)
