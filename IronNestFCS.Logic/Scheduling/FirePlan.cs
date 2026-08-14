@@ -34,6 +34,10 @@ internal sealed class FirePlan
     public bool CompletionHandled { get; set; }
     public string FailureReason { get; set; } = "";
 
+    // Forced Sync uses one short rendezvous after both gun-local requisition phases have released the shared
+    // requisition lane. It has no meaning after the loading requests are released.
+    public bool ForcedSyncProcurementReady { get; set; }
+
     public FirePlan(
         ArtilleryTask task,
         LeftRight side,
