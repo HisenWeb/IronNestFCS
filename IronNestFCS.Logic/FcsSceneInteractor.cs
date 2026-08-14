@@ -19,7 +19,7 @@ public class FcsSceneInteractor
     private const float RightColumnZ = -18.5881f;
 
     // Keep the current panel skeleton stable: up to 13 ammo rows on the left, while the first
-    // 7 rows on the right remain reserved for Auto Fire, Max Charge, Forced Sync and T1-T4.
+    // 7 rows on the right remain reserved for Forced Sync, Auto Fire, Max Charge and T1-T4.
     private const int LeftAmmoCount = 13;
     private const int RightAmmoStartRow = 7;
 
@@ -144,6 +144,28 @@ public class FcsSceneInteractor
         var y = UiStartY;
         var toggleFontSize = FcsLocalization.IsChinese ? 14f : 11f;
 
+        TextMeshPro? forcedSyncLabel = null;
+        GameObject? forcedSyncButton = null;
+        forcedSyncButton = AddButton(() =>
+        {
+            ForcedSync = !ForcedSync;
+            MelonLogger.Msg($"[FCS] Forced Sync toggled {(ForcedSync ? "ON" : "OFF")}");
+            SetColor(forcedSyncButton!, ForcedSync ? Color.green : Color.white);
+            if (forcedSyncLabel != null)
+                forcedSyncLabel.text = ForcedSyncText(ForcedSync);
+        }, Color.white);
+
+        forcedSyncButton.transform.position = new Vector3(x, y, RightColumnZ);
+        forcedSyncButton.transform.localScale = Vector3.one * 0.02f;
+        var forcedSyncText = AddText(ForcedSyncText(false), toggleFontSize);
+        forcedSyncLabel = forcedSyncText.GetComponent<TextMeshPro>();
+        forcedSyncText.transform.SetParent(forcedSyncButton.transform, false);
+        forcedSyncText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
+        forcedSyncText.transform.localScale = Vector3.one;
+
+        x -= UiRowX;
+        y -= UiRowY;
+
         TextMeshPro? autoFireLabel = null;
         GameObject? autoFireButton = null;
         autoFireButton = AddButton(() =>
@@ -187,28 +209,6 @@ public class FcsSceneInteractor
         maxChargeText.transform.SetParent(maxChargeButton.transform, false);
         maxChargeText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
         maxChargeText.transform.localScale = Vector3.one;
-
-        x -= UiRowX;
-        y -= UiRowY;
-
-        TextMeshPro? forcedSyncLabel = null;
-        GameObject? forcedSyncButton = null;
-        forcedSyncButton = AddButton(() =>
-        {
-            ForcedSync = !ForcedSync;
-            MelonLogger.Msg($"[FCS] Forced Sync toggled {(ForcedSync ? "ON" : "OFF")}");
-            SetColor(forcedSyncButton!, ForcedSync ? Color.red : Color.white);
-            if (forcedSyncLabel != null)
-                forcedSyncLabel.text = ForcedSyncText(ForcedSync);
-        }, Color.white);
-
-        forcedSyncButton.transform.position = new Vector3(x, y, RightColumnZ);
-        forcedSyncButton.transform.localScale = Vector3.one * 0.02f;
-        var forcedSyncText = AddText(ForcedSyncText(false), toggleFontSize);
-        forcedSyncLabel = forcedSyncText.GetComponent<TextMeshPro>();
-        forcedSyncText.transform.SetParent(forcedSyncButton.transform, false);
-        forcedSyncText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
-        forcedSyncText.transform.localScale = Vector3.one;
 
         x -= UiRowX;
         y -= UiRowY;
