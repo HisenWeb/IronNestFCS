@@ -181,90 +181,185 @@ existing loaded gun / ETA
 - 双炮近同时开火；
 - AutoFire + same azimuth。
 
-### F. Salvo / 双炮齐射（候选，尚未实现）
+### F. Forced Sync / 强制同步模式（实现中）
 
-当前结论：Smart **已经自然具备双炮同方位协同并同时 Arm / Fire 的后半段能力**。因此如果加入显式 `Salvo`，不应新增一套 Salvo executor、长期 pair state 或新的执行生命周期。
+实现分支：`agent/forced-sync-lr`
 
-玩家侧语义：
-
-```text
-Salvo OFF
-→ 普通任务，保持现有最大吞吐量调度
-
-Salvo ON
-→ 玩家点一次目标
-→ 创建 1 个逻辑上的 SalvoTask
-→ 明确接受等待两门炮同时可接任务的代价
-→ 两门炮一起执行这个目标
-```
-
-这里的等待是显式模式本身的产品取舍：普通模式负责效率；Salvo 模式负责玩家选择的同步射击体验。不要为了同时追求 Salvo 与零等待而引入 half-salvo、提前占一门炮、长期等待另一门炮等额外状态。
-
-#### Pending 表达一个任务，不放两个 linked task
-
-队列中推荐只保存：
+Forced Sync 是一个**提交模式**，不是新的执行生命周期，也不是取消 / 降级控制。
 
 ```text
-[ SalvoTask A ]
+Forced Sync OFF
+→ 新提交任务按普通模式进入 Pending
+
+Forced Sync ON
+→ 新提交任务标记为 Forced Sync
+→ HUD 显示：原任务名 [Forced Sync L+R]
 ```
 
-而不是：
+切换按钮只影响之后新提交的任务，不追溯修改已经进入 Pending 的任务。
+
+设计原则：
+
+> **完全同步的代价就是效率。**
+
+普通模式继续优化吞吐量；Forced Sync 明确接受等待，以换取左右炮成对执行。
+
+#### Pending 是单向 Head-of-Line Barrier
+
+Pending 容器和 HUD 始终保留完整队列。Forced Sync 不锁住或修改队列本身，而是限制本轮 Dispatcher 能看到的候选范围。
+
+例如：
 
 ```text
-[ A1 ][ A2 ]  // linked pending tasks
+T1
+S2 [Forced Sync L+R]
+T3
 ```
 
-原因：Pending 应表达一次玩家意图。提前放两个 linked task 会额外制造相邻性、reorder、coalesce、cancel、F9/replan 和“只 admission 了一半”等问题。
-
-#### Admission / Matcher 只增加一个很窄的双槽规则
-
-`SalvoTask` 到达可派发位置后，只有当左右两门炮的执行槽都可接收新任务，并且当前 Snapshot 下两侧都满足既有 eligibility 时，才允许 admission。
+正确语义：
 
 ```text
-只有一门炮可接
-→ SalvoTask 保持 Pending
-
-两门炮都可接
-→ atomic admission
-→ 同一个 SalvoTask 同时 materialize 到 Left / Right
+T1 → 完全按普通 Matcher / Dispatcher 规则执行
+S2 → 当前屏障
+T3 → 在 S2 完成前不可越过
 ```
 
-这可以实现为 Matcher / admission 前后的窄特判；不需要修改普通任务的 cardinality、scarcity、Pending order、ETA / azimuth 等比较规则，也不应在 Dispatcher 中另造一条绕开现有 eligibility / materialization 不变量的直接派发路径。
+也就是说：
 
-#### 进入执行栈时展开为两个普通执行实例
+> **Forced Sync 只挡后面，不挡前面。**
 
-成功 admission 时，从同一个 `SalvoTask` 创建两份参数完全相同、仅 AssignedGun 不同的普通执行实例 / `FirePlan`：
+本轮普通任务扫描在遇到第一个 Forced Sync 时停止，Forced Sync 自身只有在真正到达 Pending 队首后才进入特殊处理。不要把它实现成全队列冻结，也不要让它抢占自己前面的普通任务。
+
+多个 Forced Sync 不需要额外锁状态：永远只有 Pending 中第一个 Forced Sync 是当前屏障；前一个完成后再自然暴露后续任务和下一个 Forced Sync。
+
+#### 到达队首后要求 L + R
+
+Forced Sync 位于 Pending 队首时，只有满足以下条件才允许继续：
 
 ```text
-SalvoTask A
-    ↓
-Left  FirePlan(A)
-Right FirePlan(A)
+Left executor slot  = free
+Right executor slot = free
+Left eligible       = true
+Right eligible      = true
 ```
 
-这里不需要真的复制成两个 Pending Task；更准确的语义是：
+否则保持 Pending，且后面的任务仍不可越过。
 
-> **1 个玩家任务请求 → 2 个执行实例。**
+这里不是给 Forced Sync 一个极高 Matcher 分数。它的语义是特殊的双槽 admission contract：左右两侧都必须可执行。
 
-一旦进入执行栈，`Salvo` 的特殊性即结束。
+#### 火控解算保持现有串行模型
 
-#### 后半段保持现有执行模型
+不修改 `BallisticCalculator`，也不新增同步解算。
 
-进入执行层后：
+Forced Sync 复用现有 `FirePlanner.BuildEligibility()` 和 `MaterializeCandidate()`：
 
-- 两侧继续各自走现有 `PrepareLocal`；
-- 现有 same-azimuth / follower 逻辑负责识别双炮共同击发机会；
-- 两边条件满足后沿现有路径同时 Arm；
-- Fire / physical shot settlement / recovery 全部按现有规则处理；
-- 当前没有理由给 `FirePlan` 增加 `SalvoPairId`，除非未来实机证据证明后半段确实需要额外区分。
+```text
+Left materialize / ballistic solve
+→ Right materialize / ballistic solve
+→ 两边都成功
+→ 才进入执行
+```
 
-设计不变量：
+物理弹道计算器本来就由共享 Ballistic lane 串行保护；Left → Right 的固定顺序只提供确定性，不改变火控架构。
 
-> **Salvo 的特殊性只存在于 UI / Pending / admission；进入执行栈后立即退化为两个普通执行实例。**
+#### 进入执行时展开为 Left Task + Right Task
 
-未来实现前需要确认的边界：
+Pending 中的 Forced Sync 保持一个提交意图；真正准入后展开为两个独立的普通射击任务：
 
-- “两门炮清空”应精确定义为两侧执行槽均可接收新任务，而不是误解为物理炮膛必须为空；
-- Salvo 是否作为持续模式开关（当前倾向：按钮激活期间，每次点目标都创建一个 SalvoTask）；
-- F9 在 admission 前按 Pending 现有语义处理；admission 后则已经是两个普通执行实例，继续遵循现有 F9 / physical reality 规则；
-- 实机验证现有 same-azimuth Arm 路径确实足以覆盖显式 Salvo 的最终同步体验。
+```text
+S2 [Forced Sync L+R]
+        ↓
+Left Task  → Left FirePlan
+Right Task → Right FirePlan
+```
+
+因此：
+
+- 左右任务各自拥有 progress；
+- 各自对应一次物理击发；
+- 各自完成 / 失败结算；
+- 统计上是 **2 个射击任务**；
+- 不增加父任务完成聚合；
+- 不增加长期 pair state machine。
+
+#### 采购沿用现有逻辑，只在 TryRequest 前会合一次
+
+左右两侧继续各自走当前 `PrepareLocal()` 的采购逻辑：
+
+```text
+检查装药 / 必要时采购
+检查弹种 / 必要时采购
+finally Requisition.Release()
+```
+
+Forced Sync 唯一新增的执行同步点位于：
+
+```text
+Requisition.Release()
+→ 确认 FirePlan 仍 Active
+→ Forced Sync L+R rendezvous
+→ Loading.TryRequest(...)
+```
+
+两侧都完成采购并释放 Requisition 后才放行各自的 `TryRequest()`。
+
+这个 rendezvous **必须位于 `Requisition.Release()` 之后**，避免一侧持有共享采购 lane 等待另一侧，从而形成死锁。
+
+当前实现不修改共享装药采购 / reservation 语义；共享装药总量问题留作未来有实机证据后再单独处理。
+
+#### TryRequest 后 Forced Sync 特殊性结束
+
+两个加载请求放行后，后半段完全复用现有系统：
+
+```text
+PersistentLoadingSystem
+→ 转弹架 / 入膛 / 装药
+→ 各自 elevation
+→ 现有 current / follower / Review / Arm
+→ Fire
+→ physical shot settlement
+→ recovery
+```
+
+当前明确**不增加**：
+
+- LoadedReady barrier；
+- LocalReady gate；
+- Arm barrier；
+- `SalvoPairId` / 长期 GroupId；
+- Host 侧 Forced Sync 状态；
+- Forced Sync 专用 executor；
+- 共享装药重构。
+
+现有 same-azimuth follower / Arm / physical settlement 继续负责后半段行为。
+
+#### F9 语义
+
+Forced Sync 的 Pending、队列屏障和采购会合全部属于 reloadable Logic。
+
+```text
+F9 before Loading.TryRequest
+→ Forced Sync 逻辑状态消失
+→ 已经发生的物理采购仍留在游戏现实中
+
+F9 after Loading.TryRequest accepted
+→ Logic 任务状态消失
+→ 已接受的 Host PersistentLoading transaction 按现有规则继续
+```
+
+原则保持不变：
+
+> **F9 丢弃计划，不重置物理现实。**
+
+#### 实机验证重点
+
+实现完成后优先验证：
+
+- `T1 → Forced Sync → T3`：T1 正常执行，T3 不越过；
+- Forced Sync 到队首但仅一门炮空闲：空闲炮故意等待；
+- 两门炮都空闲：Forced Sync 展开为 L + R；
+- 一边需要采购、一边无需采购：无需采购的一边在 `TryRequest()` 前等待；
+- 两边都需要采购：Requisition 串行采购后正确会合，无死锁；
+- Forced Sync 两发分别计入任务统计；
+- F9 分别发生在 Pending / 采购 / rendezvous / loading 阶段；
+- AutoFire OFF / ON 下现有 same-azimuth Arm / Fire 行为未回归。
