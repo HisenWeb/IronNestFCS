@@ -19,9 +19,9 @@ public class FcsSceneInteractor
     private const float RightColumnZ = -18.5881f;
 
     // Keep the current panel skeleton stable: up to 13 ammo rows on the left, while the first
-    // 6 rows on the right remain reserved for Auto Fire, Max Charge and T1-T4.
+    // 7 rows on the right remain reserved for Auto Fire, Max Charge, Forced Sync and T1-T4.
     private const int LeftAmmoCount = 13;
-    private const int RightAmmoStartRow = 6;
+    private const int RightAmmoStartRow = 7;
 
     private readonly FSC _fcs;
     private readonly List<GameObject> _destroyOnShutdown = new();
@@ -38,6 +38,7 @@ public class FcsSceneInteractor
 
     public bool AutoFire;
     public bool maxCharge;
+    public bool ForcedSync;
 
     public FcsSceneInteractor(FSC fcs)
     {
@@ -190,6 +191,28 @@ public class FcsSceneInteractor
         x -= UiRowX;
         y -= UiRowY;
 
+        TextMeshPro? forcedSyncLabel = null;
+        GameObject? forcedSyncButton = null;
+        forcedSyncButton = AddButton(() =>
+        {
+            ForcedSync = !ForcedSync;
+            MelonLogger.Msg($"[FCS] Forced Sync toggled {(ForcedSync ? "ON" : "OFF")}");
+            SetColor(forcedSyncButton!, ForcedSync ? Color.red : Color.white);
+            if (forcedSyncLabel != null)
+                forcedSyncLabel.text = ForcedSyncText(ForcedSync);
+        }, Color.white);
+
+        forcedSyncButton.transform.position = new Vector3(x, y, RightColumnZ);
+        forcedSyncButton.transform.localScale = Vector3.one * 0.02f;
+        var forcedSyncText = AddText(ForcedSyncText(false), toggleFontSize);
+        forcedSyncLabel = forcedSyncText.GetComponent<TextMeshPro>();
+        forcedSyncText.transform.SetParent(forcedSyncButton.transform, false);
+        forcedSyncText.transform.localPosition = new Vector3(-1.9f, 0, -10.6f);
+        forcedSyncText.transform.localScale = Vector3.one;
+
+        x -= UiRowX;
+        y -= UiRowY;
+
         for (var i = 1; i <= 4; i++)
         {
             var targetId = i;
@@ -197,12 +220,13 @@ public class FcsSceneInteractor
             button = AddButton(() =>
             {
                 var bulletAtClick = selectedBulletType;
+                var forcedSyncAtClick = ForcedSync;
                 SetColor(button!, Color.gray);
                 var collider = button!.GetComponent<Collider>();
                 if (collider != null)
                     collider.enabled = false;
 
-                var handle = MelonCoroutines.Start(QueueStableTarget(targetId, bulletAtClick, button));
+                var handle = MelonCoroutines.Start(QueueStableTarget(targetId, bulletAtClick, forcedSyncAtClick, button));
                 _localCoroutines.Add(handle);
             }, Color.red);
 
@@ -226,7 +250,10 @@ public class FcsSceneInteractor
     private static string MaxChargeText(bool enabled) =>
         FcsLocalization.T($"最大装药：{FcsLocalization.OnOff(enabled)}", $"Max Charge: {FcsLocalization.OnOff(enabled)}");
 
-    private IEnumerator QueueStableTarget(int targetId, BulletType bulletType, GameObject button)
+    private static string ForcedSyncText(bool enabled) =>
+        FcsLocalization.T($"强制同步：{FcsLocalization.OnOff(enabled)}", $"Forced Sync: {FcsLocalization.OnOff(enabled)}");
+
+    private IEnumerator QueueStableTarget(int targetId, BulletType bulletType, bool forcedSync, GameObject button)
     {
         if (_shuttingDown)
             yield break;
@@ -246,6 +273,7 @@ public class FcsSceneInteractor
             task.targetId = targetId;
             // Queue is intent-only. Physical state is captured later, once, in FirePlanner.
             task.bulletType = bulletType;
+            task.forcedSync = forcedSync;
             _fcs.EnqueueTask(task);
         }
 
