@@ -31,6 +31,10 @@ public class ArtilleryTask {
     public BulletType bulletType;
     public Progress progress;
 
+    // Submission-mode marker. A Forced Sync queue entry remains one intent until it reaches the head barrier,
+    // then TaskDispatcher materializes independent Left + Right execution tasks from that intent.
+    public bool forcedSync;
+
     // Lightweight UI hint for a task that remains in the pending queue.
     public PendingHint pendingHint;
 
