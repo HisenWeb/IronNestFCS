@@ -34,7 +34,11 @@ public class FcsWindow
             if (showPriority)
                 lineCount += 1;
             if (queue.Count > 0)
-                lineCount += 1 + queue.Count;
+            {
+                lineCount += 1;
+                foreach (var item in queue)
+                    lineCount += item.forcedSync ? 2 : 1;
+            }
         }
 
         var windowRect = defaultWindowRect;
@@ -91,6 +95,17 @@ public class FcsWindow
             foreach (var item in queue)
             {
                 var position = ConvertPosition(item.position);
+                if (item.forcedSync)
+                {
+                    // Keep the mode marker on its own short line. The existing target-detail row is already close
+                    // to the HUD width limit in English, so appending the full marker would reintroduce overflow.
+                    Label($"  T{item.targetId} {item.bulletType.DisplayName()} [Forced Sync L+R]");
+                    Label(FcsLocalization.T(
+                        $"    打击 {position} · 距离 {item.distance:F2}km · 方位 {item.angel:F1}°",
+                        $"    Impact {position} · Range {item.distance:F2}km · Az {item.angel:F1}°"));
+                    continue;
+                }
+
                 Label(FcsLocalization.T(
                     $"  T{item.targetId} {item.bulletType.DisplayName()} · 打击 {position} · 距离 {item.distance:F2}km · 方位 {item.angel:F1}°",
                     $"  T{item.targetId} {item.bulletType.DisplayName()} · Impact {position} · Range {item.distance:F2}km · Az {item.angel:F1}°"));
