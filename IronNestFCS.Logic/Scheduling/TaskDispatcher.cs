@@ -12,6 +12,8 @@ namespace IronNestFCS.Logic.Scheduling;
 /// <summary>
 /// Owns task queue/history and serial admission into planning rounds. Each round first builds a side-effect-free
 /// eligibility matrix, then materializes only the Task x Gun edges selected by TaskGunMatcher before admission.
+/// Forced Sync is a one-way queue barrier: normal tasks before it keep normal matching semantics, while tasks
+/// after it cannot overtake it. Once it reaches the queue head, it requires both gun slots and expands to L + R.
 /// </summary>
 internal sealed class TaskDispatcher
 {
@@ -72,7 +74,8 @@ internal sealed class TaskDispatcher
 
         // Intent-only queue: no gun/loading read here.
         _taskQueue.Enqueue(task);
-        MelonLogger.Msg($"[FCS Dispatch] queued T{task.targetId}; pending={_taskQueue.Count}");
+        var mode = task.forcedSync ? " [Forced Sync L+R]" : "";
+        MelonLogger.Msg($"[FCS Dispatch] queued T{task.targetId}{mode}; pending={_taskQueue.Count}");
         TryDispatch();
     }
 
@@ -109,17 +112,28 @@ internal sealed class TaskDispatcher
         _dispatchRequested = false;
 
         var snapshot = _fcs.Planner.CaptureSnapshot();
-        var attempted = new HashSet<ArtilleryTask>();
-        var planningResults = new List<TaskPlanningResult>();
         // Retry ownership belongs to a free transient gun side, not to whether a particular task had zero
         // candidates. A task may be eligible on Left while Right is still recovering; if Right opens during
         // materialization, pending work must be dispatched into that newly free side.
         var deferredPhysicalMask = SnapshotTransientFreeSideMask(snapshot);
         var admittedAny = false;
 
+        // Forced Sync becomes special only after every normal task before it has left Pending. If it is not the
+        // queue head, the normal scan below stops immediately before it and therefore cannot see tasks behind it.
+        var head = _taskQueue.Count > 0 ? _taskQueue.Peek() : null;
+        if (head?.forcedSync == true)
+        {
+            yield return PlanForcedSyncHead(head, snapshot, admitted => admittedAny = admitted);
+            FinishPlanningRound(admittedAny, 1, deferredPhysicalMask);
+            yield break;
+        }
+
+        var attempted = new HashSet<ArtilleryTask>();
+        var planningResults = new List<TaskPlanningResult>();
+
         while (true)
         {
-            var task = FindNextUnattempted(attempted);
+            var task = FindNextUnattemptedBeforeForcedSync(attempted);
             if (task == null)
                 break;
 
@@ -248,10 +262,141 @@ internal sealed class TaskDispatcher
                 result.Task.pendingHint = PendingHint.None;
         }
 
+        FinishPlanningRound(admittedAny, attempted.Count, deferredPhysicalMask);
+    }
+
+    /// <summary>
+    /// A head Forced Sync intent owns both gun slots or neither. It reuses the normal eligibility and ballistic
+    /// materialization paths, but there is no matching decision to make: Left and Right are both required.
+    /// The queue still contains only the source intent until both FirePlans have been materialized.
+    /// </summary>
+    private IEnumerator PlanForcedSyncHead(
+        ArtilleryTask source,
+        FirePlanningSnapshot snapshot,
+        Action<bool> completed)
+    {
+        completed(false);
+        source.pendingHint = PendingHint.None;
+        source.failureReason = "";
+
+        if (!snapshot.LeftSlotAvailable || !snapshot.RightSlotAvailable)
+        {
+            source.progress = Progress.Pending;
+            MelonLogger.Msg(
+                $"[FCS ForcedSync] T{source.targetId} head barrier waiting for both executor slots; " +
+                $"Left={(snapshot.LeftSlotAvailable ? "free" : "occupied")}, " +
+                $"Right={(snapshot.RightSlotAvailable ? "free" : "occupied")}");
+            yield break;
+        }
+
+        var planning = _fcs.Planner.BuildEligibility(source, snapshot);
+        var matchAt = FcsRuntimeClock.Now;
+        planning.FinalizeTiming(snapshot.SnapshotAt, matchAt);
+
+        if (planning.LeftCandidate == null || planning.RightCandidate == null)
+        {
+            source.progress = Progress.Pending;
+            source.pendingHint = planning.PendingHint;
+            source.failureReason = "";
+            MelonLogger.Msg(
+                $"[FCS ForcedSync] T{source.targetId} head barrier waiting for L+R eligibility; " +
+                $"Left={DescribeCandidate(planning.LeftCandidate, planning.LeftReason)}; " +
+                $"Right={DescribeCandidate(planning.RightCandidate, planning.RightReason)}");
+            yield break;
+        }
+
+        FirePlanCandidate? leftResolved = null;
+        var leftFailure = "";
+        yield return _fcs.Planner.MaterializeCandidate(
+            source,
+            planning.LeftCandidate,
+            snapshot,
+            result => leftResolved = result,
+            reason => leftFailure = reason);
+
+        if (leftResolved == null)
+        {
+            source.progress = Progress.Pending;
+            MelonLogger.Warning(
+                $"[FCS ForcedSync] T{source.targetId}->Left materialization rejected; remains pending: {leftFailure}");
+            yield break;
+        }
+
+        FirePlanCandidate? rightResolved = null;
+        var rightFailure = "";
+        yield return _fcs.Planner.MaterializeCandidate(
+            source,
+            planning.RightCandidate,
+            snapshot,
+            result => rightResolved = result,
+            reason => rightFailure = reason);
+
+        if (rightResolved == null)
+        {
+            source.progress = Progress.Pending;
+            MelonLogger.Warning(
+                $"[FCS ForcedSync] T{source.targetId}->Right materialization rejected; remains pending: {rightFailure}");
+            yield break;
+        }
+
+        // Nothing else can claim these slots while this serialized planning round is active. Re-check immediately
+        // before admission so a stale snapshot cannot turn a Forced Sync pair into an accidental single plan.
+        if (_fcs.PlanExecutor.GetPlan(LeftRight.Left) != null
+            || _fcs.PlanExecutor.GetPlan(LeftRight.Right) != null)
+        {
+            source.progress = Progress.Pending;
+            MelonLogger.Warning(
+                $"[FCS ForcedSync] T{source.targetId} lost the empty L+R window before admission; remains pending");
+            yield break;
+        }
+
+        var leftTask = CreateForcedSyncExecutionTask(source);
+        var rightTask = CreateForcedSyncExecutionTask(source);
+        var leftPlanning = CopyPlanningForExecutionTask(planning, leftTask);
+        var rightPlanning = CopyPlanningForExecutionTask(planning, rightTask);
+
+        var commitAt = FcsRuntimeClock.Now;
+        leftResolved.FinalizeTiming(snapshot.SnapshotAt, commitAt);
+        rightResolved.FinalizeTiming(snapshot.SnapshotAt, commitAt);
+
+        var leftPlan = _fcs.Planner.CreatePlan(leftPlanning, leftResolved, commitAt);
+        var rightPlan = _fcs.Planner.CreatePlan(rightPlanning, rightResolved, commitAt);
+
+        if (!_fcs.PlanExecutor.AddPlan(leftPlan, out var leftAddReason))
+        {
+            source.progress = Progress.Pending;
+            MelonLogger.Warning(
+                $"[FCS ForcedSync] T{source.targetId}->Left was not admitted and remains pending: {leftAddReason}");
+            yield break;
+        }
+
+        // AddPlan starts preparation only after one focus yield. Dispatcher is still inside this same serialized
+        // planning round, so Right is installed before either side can reach the procurement rendezvous.
+        if (!_fcs.PlanExecutor.AddPlan(rightPlan, out var rightAddReason))
+        {
+            // Both slots were re-checked immediately above; reaching this branch means an executor invariant was
+            // violated. Do not leave the source intent queued, which would otherwise duplicate the accepted Left.
+            RemovePendingTask(source);
+            MelonLogger.Error(
+                $"[FCS ForcedSync] T{source.targetId} invariant violation: Left admitted but Right rejected: {rightAddReason}");
+            completed(true);
+            yield break;
+        }
+
+        if (!RemovePendingTask(source))
+            MelonLogger.Warning($"[FCS ForcedSync] admitted T{source.targetId} source intent was no longer pending");
+
+        completed(true);
+        MelonLogger.Msg(
+            $"[FCS ForcedSync] admitted T{source.targetId} as Left + Right; pending={_taskQueue.Count}");
+    }
+
+    private void FinishPlanningRound(bool admittedAny, int attemptedCount, int deferredPhysicalMask)
+    {
         _planning = false;
 
-        if (!admittedAny && attempted.Count > 0)
-            MelonLogger.Msg($"[FCS Dispatch] planning round deferred {attempted.Count} pending task(s)");
+        if (!admittedAny && attemptedCount > 0)
+            MelonLogger.Msg($"[FCS Dispatch] planning round deferred {attemptedCount} pending task(s)");
 
         // Plans finish at physical shot, so preserve event-driven dispatch for any free side that was transient
         // in this round's snapshot. If it became plannable while materializing another assignment, immediately
@@ -278,6 +423,7 @@ internal sealed class TaskDispatcher
     private IEnumerator WaitForMatchCoalesceWindow()
     {
         if (_taskQueue.Count != 1
+            || _taskQueue.Peek().forcedSync
             || _fcs.PlanExecutor.GetPlan(LeftRight.Left) != null
             || _fcs.PlanExecutor.GetPlan(LeftRight.Right) != null)
         {
@@ -430,15 +576,57 @@ internal sealed class TaskDispatcher
         || state == LoadingPhysicalState.Unknown
         || state == LoadingPhysicalState.Unbound;
 
-    private ArtilleryTask? FindNextUnattempted(HashSet<ArtilleryTask> attempted)
+    /// <summary>
+    /// Return only normal tasks before the first Forced Sync barrier. The barrier itself is handled only when it
+    /// reaches queue head; tasks behind it are intentionally invisible to this planning round.
+    /// </summary>
+    private ArtilleryTask? FindNextUnattemptedBeforeForcedSync(HashSet<ArtilleryTask> attempted)
     {
         foreach (var task in _taskQueue)
         {
+            if (task.forcedSync)
+                break;
             if (!attempted.Contains(task))
                 return task;
         }
 
         return null;
+    }
+
+    private static ArtilleryTask CreateForcedSyncExecutionTask(ArtilleryTask source)
+    {
+        return new ArtilleryTask
+        {
+            targetId = source.targetId,
+            angel = source.angel,
+            distance = source.distance,
+            position = source.position,
+            bulletType = source.bulletType,
+            progress = Progress.Calculating,
+            forcedSync = true,
+            pendingHint = PendingHint.None,
+            chargeCount = 0,
+            elevation = 0f,
+            startedAt = source.startedAt,
+            completedAt = 0f,
+            failureReason = "",
+            dispatchExcludedGunMask = 0,
+        };
+    }
+
+    private static TaskPlanningResult CopyPlanningForExecutionTask(
+        TaskPlanningResult source,
+        ArtilleryTask executionTask)
+    {
+        return new TaskPlanningResult(
+            executionTask,
+            source.LeftCandidate,
+            source.RightCandidate,
+            source.LeftReason,
+            source.RightReason,
+            source.PendingHint,
+            source.FailureDetail,
+            source.ShouldWait);
     }
 
     private bool RemovePendingTask(ArtilleryTask target)
