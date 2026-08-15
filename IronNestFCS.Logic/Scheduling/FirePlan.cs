@@ -34,6 +34,12 @@ internal sealed class FirePlan
     public bool CompletionHandled { get; set; }
     public string FailureReason { get; set; } = "";
 
+    // Experimental SmoothStep validation state. These fields only support one-shot comparison logging
+    // against the game's mechanical Time-To-Impact dial once WaitingForFire is reached.
+    public float TtiValidationLastDialSeconds { get; set; } = float.NaN;
+    public int TtiValidationStableSamples { get; set; }
+    public bool TtiValidationLogged { get; set; }
+
     public FirePlan(
         ArtilleryTask task,
         LeftRight side,
