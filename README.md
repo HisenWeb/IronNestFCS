@@ -30,7 +30,7 @@ Press **F9** when you want to abandon the current mission plan and build a new o
 - **Max Charge** can prefer the highest usable powder charge.
 - The top-left FCS panel shows the current mission, progress, range, charge, elevation and **estimated shell flight time**; flight time is available as soon as the FirePlan is created instead of waiting for the mechanical TTI dial to reach the firing-ready stage.
 - Pending tasks can show a short HUD reason such as shell mismatch or insufficient current charge range.
-- The UI automatically follows the game's Chinese/English language state. If Chinese cannot be positively identified, the FCS uses English.
+- Automatically detects Chinese and supports both English and Simplified Chinese UI.
 - One universal release package is used for all players.
 
 ## Download and installation
@@ -62,14 +62,7 @@ Do **not** put the whole ZIP inside the `Mods` folder.
 
 ## Automatic UI language
 
-There is no separate Chinese package, English package, or `language.txt` file.
-
-Smart reads a localized game UI label that belongs to the left Time-To-Impact dial:
-
-- exact Chinese label `左` → Simplified Chinese FCS UI;
-- anything else, missing detection, or unsupported languages → English FCS UI.
-
-The cached game label is rechecked periodically, so changing the game language can update the FCS UI without maintaining a separate mod-language setting.
+Smart automatically detects Chinese and supports both **English** and **Simplified Chinese** UI.
 
 ## How to use it
 
