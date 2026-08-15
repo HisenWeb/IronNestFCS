@@ -215,92 +215,62 @@ flowchart TB
     EXECUTOR -. 槽位释放 / recovery retry .-> DISPATCH
 ```
 
-### 单任务 / 双任务执行流程
+### 任务生命周期
 
 Pending 中的 **Task 不绑定炮位**。只有经过 Planner / Matcher 选定分配并生成 **FirePlan** 后，任务才确定使用 Left 或 Right。左右炮可以并行完成本地准备；共享炮塔与击发流程由 `current / next` 控制，最终以真实物理击发结果决定消费哪个 FirePlan。
 
 #### 单任务
 
 ```mermaid
-flowchart TD
-    A["提交 T1"] --> B["Pending"]
-    B --> C["Dispatcher 唤醒"]
-    C --> D["Planner 读取左右炮物理快照"]
-    D --> E["建立 T1 × Left / Right Candidate"]
-    E --> F["Matcher 选择炮位"]
-    F --> G["生成 FirePlan<br/>此时确定 Left / Right"]
-    G --> H["Executor 接管"]
+flowchart LR
+    A["Pending"] --> B["规划与匹配<br/>快照 · 资格边"]
+    B --> C["FirePlan<br/>确定炮位"]
 
-    H --> I["本炮 Local Prepare<br/>装填 + 仰角"]
-    H --> J["Current 获得共享执行权"]
-    J --> K["炮塔转向目标方位"]
+    C --> D["本炮准备<br/>装填 + 仰角"]
+    C --> E["共享准备<br/>current + 炮塔"]
+    D --> F["Ready"]
+    E --> F
 
-    I --> L["LocalReady"]
-    K --> M["AzimuthReady"]
-    L --> N{"LocalReady + AzimuthReady"}
-    M --> N
-
-    N --> O["Review 收敛 + Arm"]
-    O --> P["WaitingForFire"]
-    P --> Q["监控左右炮实际物理击发"]
-
-    Q -->|"手动击发"| R["确认实际哪门炮开火"]
-    Q -->|"Auto Fire"| S["操作共享击发控制"]
-    S --> R
-
-    R --> T["消费对应 FirePlan"]
-    T --> U["释放炮位"]
-    U --> V["触发下一次 Dispatcher 调度"]
-
-    R --> W["击发后 Recovery"]
-    W --> X["PersistentLoadingSystem<br/>继续管理物理状态"]
+    F --> G["Review · Arm<br/>WaitingForFire"]
+    G --> H["观察真实物理击发"]
+    H --> I["消费 FirePlan<br/>释放炮位"]
+    H --> J["击发后 Recovery<br/>PersistentLoadingSystem"]
+    I -.-> K["下一次 Dispatcher<br/>调度机会"]
 ```
 
-#### 双任务
+#### 双炮滑动窗口
 
 ```mermaid
-flowchart TD
-    A["T1 + T2 Pending"] --> B["Dispatcher"]
-    B --> C["Planner 一次读取左右炮快照"]
-    C --> D["建立 Task × Gun Candidate 矩阵"]
-    D --> E["Matcher 选择最佳无冲突组合"]
+flowchart LR
+    A["T1 + T2<br/>Pending"] --> B["规划与匹配<br/>共享物理快照"]
 
-    E --> F1["FirePlan A → Left"]
-    E --> F2["FirePlan B → Right"]
-    F1 --> G["Executor"]
-    F2 --> G
+    subgraph LOCAL["并行本地准备"]
+        direction LR
 
-    G --> H1["Left Local Prepare<br/>装填 + 仰角"]
-    G --> H2["Right Local Prepare<br/>装填 + 仰角"]
-    H1 --> I1["Left LocalReady"]
-    H2 --> I2["Right LocalReady"]
+        subgraph LEFT["左炮槽位"]
+            direction TB
+            L0["FirePlan A"] --> L1["装填 + 仰角"] --> L2["Left Ready"]
+        end
 
-    G --> J["确定 current / next"]
-    J --> K["Current 获得共享炮塔方位权"]
-    K --> L["Current 进入 Review / Arm / 等待击发"]
+        subgraph RIGHT["右炮槽位"]
+            direction TB
+            R0["FirePlan B"] --> R1["装填 + 仰角"] --> R2["Right Ready"]
+        end
+    end
 
-    I1 --> M{"另一炮也 Ready<br/>且方位基本相同？"}
-    I2 --> M
-    M -->|"是"| N["Follower 可解除自己的保险"]
-    M -->|"否"| O["保持准备状态等待"]
-
-    L --> P["监控 Left / Right 实际击发"]
-    N --> P
-    O --> P
-
-    P -->|"只有一炮开火"| Q["只消费实际开火炮的 FirePlan"]
-    P -->|"两炮都开火"| R["同时消费两个 FirePlan"]
-
-    Q --> S["剩余 FirePlan 晋升"]
-    S --> T["成为 Current<br/>继续共享执行流程"]
-    Q --> U["空出的炮位可以继续补入 Pending"]
-    R --> U
-    U --> V["Dispatcher 再次匹配"]
+    B --> L0
+    B --> R0
+    L2 --> S["共享执行<br/>current / next<br/>炮塔 · Review · Arm"]
+    R2 --> S
+    S --> P["观察真实物理击发"]
+    P --> C["只消费实际击发的<br/>FirePlan"]
+    C --> F["释放已完成炮位"]
+    F --> N["Dispatcher 可立即<br/>补入新的 Pending"]
 ```
 
 双炮执行采用的是**滑动窗口**，不是批次屏障：左右炮可以并行完成本地准备，一侧 FirePlan 完成并释放炮位后，可以继续承接新的 Pending，而不需要等待另一侧任务结束。
 
-这张图只展示高层关系。当前维护中的完整架构说明见 [docs/context/PROJECT_CONTEXT.md](docs/context/PROJECT_CONTEXT.md)，Planning 与 Execution 的细节分别见 [ARCHITECTURE_PLANNING.md](docs/context/ARCHITECTURE_PLANNING.md) 和 [ARCHITECTURE_EXECUTION.md](docs/context/ARCHITECTURE_EXECUTION.md)。
+这两张图只展示高层关系。当前维护中的完整架构说明见 [docs/context/PROJECT_CONTEXT.md](docs/context/PROJECT_CONTEXT.md)，Planning 与 Execution 的细节分别见 [ARCHITECTURE_PLANNING.md](docs/context/ARCHITECTURE_PLANNING.md) 和 [ARCHITECTURE_EXECUTION.md](docs/context/ARCHITECTURE_EXECUTION.md)。
 
 本项目继续基于 [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS) 开发。Smart 的自动化重点是执行既有火控工作流，而不是替玩家选择战术目标。
 
