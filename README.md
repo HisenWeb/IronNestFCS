@@ -215,92 +215,62 @@ flowchart TB
     EXECUTOR -. freed slot / recovery retry .-> DISPATCH
 ```
 
-### Mission execution flow
+### Mission lifecycle
 
 A Pending **Task is not bound to a gun**. The Left or Right side becomes fixed only after Planner / Matcher selects an assignment and creates a **FirePlan**. Both guns may perform local preparation in parallel; shared turret and firing work follows `current / next`, while observed physical gunfire determines which FirePlan is actually consumed.
 
 #### One mission
 
 ```mermaid
-flowchart TD
-    A["Submit T1"] --> B["Pending"]
-    B --> C["Dispatcher wakeup"]
-    C --> D["Planner reads Left / Right physical snapshot"]
-    D --> E["Build T1 × Left / Right candidates"]
-    E --> F["Matcher selects a gun"]
-    F --> G["Create FirePlan<br/>Left / Right is now fixed"]
-    G --> H["Executor accepts plan"]
+flowchart LR
+    A["Pending"] --> B["Plan & Match<br/>snapshot · eligibility"]
+    B --> C["FirePlan<br/>gun assignment fixed"]
 
-    H --> I["Local Prepare<br/>loading + elevation"]
-    H --> J["Current gets shared execution authority"]
-    J --> K["Rotate turret to target azimuth"]
+    C --> D["Local Prepare<br/>load + elevation"]
+    C --> E["Shared Prepare<br/>current + turret"]
+    D --> F["Ready"]
+    E --> F
 
-    I --> L["LocalReady"]
-    K --> M["AzimuthReady"]
-    L --> N{"LocalReady + AzimuthReady"}
-    M --> N
-
-    N --> O["Review convergence + Arm"]
-    O --> P["WaitingForFire"]
-    P --> Q["Watch Left / Right physical fire"]
-
-    Q -->|"Manual fire"| R["Observe which gun actually fired"]
-    Q -->|"Auto Fire"| S["Operate shared firing control"]
-    S --> R
-
-    R --> T["Consume matching FirePlan"]
-    T --> U["Release gun slot"]
-    U --> V["Trigger next Dispatcher opportunity"]
-
-    R --> W["Post-shot recovery"]
-    W --> X["PersistentLoadingSystem<br/>continues owning physical state"]
+    F --> G["Review · Arm<br/>WaitingForFire"]
+    G --> H["Observed physical shot"]
+    H --> I["Consume FirePlan<br/>release slot"]
+    H --> J["Post-shot recovery<br/>PersistentLoadingSystem"]
+    I -.-> K["Next Dispatcher<br/>opportunity"]
 ```
 
-#### Two missions
+#### Two-gun sliding window
 
 ```mermaid
-flowchart TD
-    A["T1 + T2 Pending"] --> B["Dispatcher"]
-    B --> C["Planner reads one shared Left / Right snapshot"]
-    C --> D["Build Task × Gun candidate matrix"]
-    D --> E["Matcher selects best non-conflicting pair"]
+flowchart LR
+    A["T1 + T2<br/>Pending"] --> B["Plan & Match<br/>shared snapshot"]
 
-    E --> F1["FirePlan A → Left"]
-    E --> F2["FirePlan B → Right"]
-    F1 --> G["Executor"]
-    F2 --> G
+    subgraph LOCAL["Parallel local preparation"]
+        direction LR
 
-    G --> H1["Left Local Prepare<br/>loading + elevation"]
-    G --> H2["Right Local Prepare<br/>loading + elevation"]
-    H1 --> I1["Left LocalReady"]
-    H2 --> I2["Right LocalReady"]
+        subgraph LEFT["Left slot"]
+            direction TB
+            L0["FirePlan A"] --> L1["Load + elevation"] --> L2["Left Ready"]
+        end
 
-    G --> J["Choose current / next"]
-    J --> K["Current owns shared turret azimuth"]
-    K --> L["Current enters Review / Arm / fire wait"]
+        subgraph RIGHT["Right slot"]
+            direction TB
+            R0["FirePlan B"] --> R1["Load + elevation"] --> R2["Right Ready"]
+        end
+    end
 
-    I1 --> M{"Other gun also Ready<br/>and same azimuth?"}
-    I2 --> M
-    M -->|"Yes"| N["Follower may Arm itself"]
-    M -->|"No"| O["Remain prepared and wait"]
-
-    L --> P["Watch Left / Right physical fire"]
-    N --> P
-    O --> P
-
-    P -->|"Only one gun fires"| Q["Consume only the FirePlan that actually fired"]
-    P -->|"Both guns fire"| R["Consume both FirePlans"]
-
-    Q --> S["Promote remaining FirePlan"]
-    S --> T["It becomes Current<br/>and runs its shared phase"]
-    Q --> U["Freed slot can accept more Pending work"]
-    R --> U
-    U --> V["Dispatcher matches again"]
+    B --> L0
+    B --> R0
+    L2 --> S["Shared execution<br/>current / next<br/>turret · Review · Arm"]
+    R2 --> S
+    S --> P["Observe physical fire"]
+    P --> C["Consume only<br/>fired FirePlan(s)"]
+    C --> F["Release fired slot"]
+    F --> N["Dispatcher may<br/>fill freed slot"]
 ```
 
 The two-gun executor therefore behaves as a **sliding window**, not a batch barrier: both guns may prepare locally in parallel, and a freed side can accept another Pending mission without waiting for the other FirePlan to finish.
 
-This diagram is intentionally high-level. The maintained architecture source is [docs/context/PROJECT_CONTEXT.md](docs/context/PROJECT_CONTEXT.md), with detailed planning and execution notes in [ARCHITECTURE_PLANNING.md](docs/context/ARCHITECTURE_PLANNING.md) and [ARCHITECTURE_EXECUTION.md](docs/context/ARCHITECTURE_EXECUTION.md).
+These diagrams are intentionally high-level. The maintained architecture source is [docs/context/PROJECT_CONTEXT.md](docs/context/PROJECT_CONTEXT.md), with detailed planning and execution notes in [ARCHITECTURE_PLANNING.md](docs/context/ARCHITECTURE_PLANNING.md) and [ARCHITECTURE_EXECUTION.md](docs/context/ARCHITECTURE_EXECUTION.md).
 
 The project continues from [svr2kos2/IronNestFCS](https://github.com/svr2kos2/IronNestFCS). Smart intentionally keeps its additional automation focused on operating the existing fire-control workflow rather than choosing tactical targets for the player.
 
