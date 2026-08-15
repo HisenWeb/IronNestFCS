@@ -22,6 +22,8 @@ public enum LeftRight
 public class FSC
 {
     private const string HarmonyId = "com.svr2kos2.ironnestfcs.logic";
+    private const float TtiValidationStableToleranceSeconds = 0.02f;
+    private const int TtiValidationStableSampleCount = 3;
 
     private HarmonyInstance? _harmony;
     private readonly List<object> _runningCoroutines = new();
@@ -152,15 +154,52 @@ public class FSC
     private void CaptureEstimatedFlightTime(LeftRight side)
     {
         var plan = PlanExecutor.GetPlan(side);
-        if (plan == null
-            || plan.Task.progress != Progress.WaitingForFire
-            || !float.IsNaN(plan.EstimatedFlightSeconds))
+        if (plan == null || plan.Task.progress != Progress.WaitingForFire)
+            return;
+
+        if (!TimeToImpactReader.TryReadEstimatedSeconds(side, out var dialSeconds))
+            return;
+
+        // Preserve the production fallback if an early estimate was unavailable for any reason.
+        if (float.IsNaN(plan.EstimatedFlightSeconds))
+        {
+            plan.TrySetEstimatedFlightSeconds(dialSeconds);
+            return;
+        }
+
+        if (plan.TtiValidationLogged
+            || !TimeToImpactEstimator.TryEstimateSeconds(plan.Task.distance, plan.Charge, out var formulaSeconds))
         {
             return;
         }
 
-        if (TimeToImpactReader.TryReadEstimatedSeconds(side, out var seconds))
-            plan.TrySetEstimatedFlightSeconds(seconds);
+        if (!float.IsNaN(plan.TtiValidationLastDialSeconds)
+            && Math.Abs(dialSeconds - plan.TtiValidationLastDialSeconds) <= TtiValidationStableToleranceSeconds)
+        {
+            plan.TtiValidationStableSamples++;
+        }
+        else
+        {
+            plan.TtiValidationStableSamples = 1;
+        }
+
+        plan.TtiValidationLastDialSeconds = dialSeconds;
+        if (plan.TtiValidationStableSamples < TtiValidationStableSampleCount)
+            return;
+
+        plan.TtiValidationLogged = true;
+
+        var deltaSeconds = formulaSeconds - dialSeconds;
+        var absErrorSeconds = Math.Abs(deltaSeconds);
+        var errorPercent = dialSeconds > 0f ? absErrorSeconds / dialSeconds * 100f : float.NaN;
+        var formulaSpeed = plan.Task.distance * 1000f / formulaSeconds;
+        var observedSpeed = plan.Task.distance * 1000f / dialSeconds;
+
+        MelonLogger.Msg(
+            $"[FCS TTI VALIDATE] {plan.Label}; distance={plan.Task.distance:F3}km, elevation={plan.Elevation:F2}°, " +
+            $"formula={formulaSeconds:F3}s, dial={dialSeconds:F3}s, delta={deltaSeconds:+0.000;-0.000;0.000}s, " +
+            $"absError={absErrorSeconds:F3}s ({errorPercent:F3}%), " +
+            $"formulaSpeed={formulaSpeed:F2}m/s, observedSpeed={observedSpeed:F2}m/s");
     }
 
     public void Dispose()
