@@ -1,41 +1,39 @@
+using UnityEngine;
+
 namespace IronNestFCS.Logic.FCS;
 
 /// <summary>
-/// Early shell flight-time estimate derived from repeated in-game Time-To-Impact measurements.
-/// For each valid powder charge, observed flight time is proportional to range:
-/// TTI(seconds) = distance(km) * secondsPerKm(charge).
+/// Early shell flight-time estimate using the inferred stock charge-speed curve.
+/// Repeated in-game measurements strongly match a SmoothStep interpolation from about 210 m/s at C1
+/// to about 700 m/s at C6. For a fixed charge, observed flight time remains proportional to range.
 /// </summary>
 internal static class TimeToImpactEstimator
 {
-    // Measured in-game coefficients, seconds per kilometre.
-    private const float C1SecondsPerKm = 4.758869f;
-    private const float C2SecondsPerKm = 3.830061f;
-    private const float C3SecondsPerKm = 2.613011f;
-    private const float C4SecondsPerKm = 1.894451f;
-    private const float C5SecondsPerKm = 1.540442f;
-    private const float C6SecondsPerKm = 1.427168f;
+    private const int MinCharge = 1;
+    private const int MaxCharge = 6;
+    private const float MinSpeedMetersPerSecond = 210f;
+    private const float MaxSpeedMetersPerSecond = 700f;
 
     public static bool TryEstimateSeconds(float distanceKm, int charge, out float seconds)
     {
         seconds = float.NaN;
-        if (distanceKm <= 0f)
+        if (distanceKm <= 0f || charge is < MinCharge or > MaxCharge)
             return false;
 
-        var secondsPerKm = charge switch
+        var normalizedCharge = (charge - MinCharge) / (float)(MaxCharge - MinCharge);
+        var speedMetersPerSecond = Mathf.SmoothStep(
+            MinSpeedMetersPerSecond,
+            MaxSpeedMetersPerSecond,
+            normalizedCharge);
+
+        if (float.IsNaN(speedMetersPerSecond)
+            || float.IsInfinity(speedMetersPerSecond)
+            || speedMetersPerSecond <= 0f)
         {
-            1 => C1SecondsPerKm,
-            2 => C2SecondsPerKm,
-            3 => C3SecondsPerKm,
-            4 => C4SecondsPerKm,
-            5 => C5SecondsPerKm,
-            6 => C6SecondsPerKm,
-            _ => float.NaN,
-        };
-
-        if (float.IsNaN(secondsPerKm) || float.IsInfinity(secondsPerKm) || secondsPerKm <= 0f)
             return false;
+        }
 
-        seconds = distanceKm * secondsPerKm;
+        seconds = distanceKm * 1000f / speedMetersPerSecond;
         return seconds > 0f && !float.IsNaN(seconds) && !float.IsInfinity(seconds);
     }
 }
